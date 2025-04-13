@@ -4,7 +4,8 @@
 ![许可证](https://img.shields.io/github/license/SomiaWhiteRing/RPGTranslationAssistant)
 ![构建状态](https://img.shields.io/github/actions/workflow/status/SomiaWhiteRing/RPGTranslationAssistant/build.yml)
 
-这是一个用于RPG Maker 2000/2003游戏翻译的辅助工具，它提供了一个友好的图形界面，简化了RPGRewriter的复杂功能，使翻译工作更加高效。
+~这是一个用于RPG Maker 2000/2003游戏翻译的辅助工具，它提供了一个友好的图形界面，简化了RPGRewriter的复杂功能，使翻译工作更加高效。~  
+更新之后变成了把翻译工作也包揽进去的全能一体机但是我懒得写readme了把这行改了先后面的都还是旧的。
 
 <p align="center">
   <img src="screenshots/main.png" alt="主界面截图" width="600">
