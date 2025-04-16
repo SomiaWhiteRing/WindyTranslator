@@ -35,7 +35,7 @@ class ProModePanel(ttk.Frame):
         padx_val = 5
         button_width = 8
         config_button_width = 6
-        config_control_width = 15
+        config_control_width = 20
 
         # --- Helper function to create a row ---
         def create_row(parent_frame, description_title, description_text=None):
@@ -86,16 +86,12 @@ class ProModePanel(ttk.Frame):
         encoding_frame_export.pack(side=tk.RIGHT, padx=padx_val)
         self.export_encoding_combo = ttk.Combobox(encoding_frame_export, textvariable=self.export_encoding_var,
                                              values=self.encoding_display_values, state="readonly", width=config_control_width - 2)
-        self.export_encoding_combo.pack(side=tk.LEFT) # ComboBox 在左
-        ttk.Label(encoding_frame_export, text="编码:").pack(side=tk.LEFT, padx=(0, 2)) # Label 在右？调整为 Label 左 Combo 右
+        ttk.Label(encoding_frame_export, text="编码:").pack(side=tk.LEFT, padx=(0, 2))
+        self.export_encoding_combo.pack(side=tk.LEFT)
         self.export_encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
         self._set_combobox_value(self.export_encoding_combo, self.export_encoding_var.get())
         all_controls_list.extend([self.export_button, self.export_encoding_combo])
         row_idx += 1
-        # 调整编码 Frame 内顺序
-        for widget in encoding_frame_export.winfo_children(): widget.pack_forget() # 先移除
-        ttk.Label(encoding_frame_export, text="编码:").pack(side=tk.LEFT, padx=(0, 2))
-        self.export_encoding_combo.pack(side=tk.LEFT)
 
 
         # --- 3. 制作JSON文件 ---
@@ -149,16 +145,12 @@ class ProModePanel(ttk.Frame):
         encoding_frame_import.pack(side=tk.RIGHT, padx=padx_val)
         self.import_encoding_combo = ttk.Combobox(encoding_frame_import, textvariable=self.import_encoding_var,
                                              values=self.encoding_display_values, state="readonly", width=config_control_width - 2)
-        self.import_encoding_combo.pack(side=tk.LEFT) # Combo 左
-        ttk.Label(encoding_frame_import, text="编码:").pack(side=tk.LEFT, padx=(0, 2)) # Label 右？调整 Label 左 Combo 右
+        ttk.Label(encoding_frame_import, text="编码:").pack(side=tk.LEFT, padx=(0, 2))
+        self.import_encoding_combo.pack(side=tk.LEFT)
         self.import_encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
         self._set_combobox_value(self.import_encoding_combo, self.import_encoding_var.get())
         all_controls_list.extend([self.import_button, self.import_encoding_combo])
         row_idx += 1
-        # 调整编码 Frame 内顺序
-        for widget in encoding_frame_import.winfo_children(): widget.pack_forget() # 先移除
-        ttk.Label(encoding_frame_import, text="编码:").pack(side=tk.LEFT, padx=(0, 2))
-        self.import_encoding_combo.pack(side=tk.LEFT)
 
         # --- 保存所有按钮引用 ---
         self.all_controls = all_controls_list # 使用收集到的列表

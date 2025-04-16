@@ -100,7 +100,7 @@ class RPGTranslatorApp:
             return
 
         game_path = self.get_game_path()
-        if not game_path and task_name != 'configure_gemini' and task_name != 'configure_deepseek': # 配置任务不需要游戏路径
+        if not game_path and task_name != 'configure_gemini' and task_name != 'configure_deepseek' and task_name != 'select_rtp':
              if not self._check_game_path_set(): return # 调用内部检查并显示错误
 
         # --- 准备任务参数 ---
@@ -414,14 +414,25 @@ class RPGTranslatorApp:
         """打开世界观字典编辑器。"""
         if not self._check_game_path_set(): return
 
-        # dict_editor 模块需要一个编辑窗口类，例如 DictEditorWindow
-        # from ui.dict_editor import DictEditorWindow # 假设已存在
-        # work_subfolder = self._get_work_subfolder()
-        # dict_csv_path = os.path.join(self.works_dir, work_subfolder, "world_dictionary.csv")
-        # DictEditorWindow(self.root, self, dict_csv_path) # 将 App 实例和路径传入
-        # --- 临时替代，调用旧逻辑 ---
-        from ui.dict_editor import open_dict_editor_window # 假设把旧逻辑包装成函数
-        open_dict_editor_window(self.root, self, self.works_dir, self.get_game_path())
+        # Get the required arguments for DictEditorWindow
+        current_game_path = self.get_game_path() # Get the current game path string
+
+        # Import the window class (keep the import local if preferred)
+        from ui.dict_editor import DictEditorWindow
+
+        # Instantiate DictEditorWindow with the correct arguments
+        try:
+            DictEditorWindow(
+                parent=self.root,                # The parent window
+                app_controller=self,           # The App instance
+                works_dir=self.works_dir,        # The base Works directory path
+                game_path=current_game_path      # The currently selected game path
+            )
+            self.log_message("世界观字典编辑器已打开。", "normal")
+        except Exception as e:
+            log.exception("打开字典编辑器时出错。")
+            messagebox.showerror("错误", f"无法打开字典编辑器:\n{e}", parent=self.root)
+            self.log_message(f"打开字典编辑器失败: {e}", "error")
 
 
     def _open_gemini_config(self):

@@ -6,6 +6,7 @@ import re
 import time
 import datetime
 import logging
+import queue
 import threading
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
@@ -49,30 +50,30 @@ def _translate_single_item_with_retry(
 
     # *** 步骤 1: 预处理原文 (PUA 替换) ***
     processed_original_text = text_processing.pre_process_text_for_llm(original_key)
-    
-    last_failed_translation_raw = None # 记录最后一次失败的原始译文（API返回）
+
+    # --- 用于详细错误日志记录 ---
+    last_failed_raw_translation = None # 记录最后一次失败的原始译文（API返回，未处理）
+    last_failed_prompt = None           # 记录最后一次失败的完整 Prompt
+    last_failed_api_messages = None     # 记录最后一次失败的 API messages
+    last_failed_api_kwargs = None       # 记录最后一次失败的 API kwargs
+    last_failed_response_content = None # 记录最后一次失败的原始 API 响应体
+    last_validation_reason = "未知错误"  # 记录最后一次验证失败的原因
 
     for attempt in range(max_retries + 1):
         # a. 构建上下文和术语表
-        context_original_keys = [item[0] for item in context_items[-context_lines:]] # 取最近N条原文 Key
-        # 预处理上下文中的特殊字符，使其与当前处理的文本格式一致
+        context_original_keys = [item[1] for item in context_items[-context_lines:]]
         processed_context_keys = [text_processing.pre_process_text_for_llm(ctx_key) for ctx_key in context_original_keys]
 
         context_section = ""
         if processed_context_keys:
-            # prompt 要求 <context> 包含原始语言文本
-            # 注意：这里为了简化，直接用了原文 key，如果上下文需要翻译后的，逻辑会更复杂
             context_section = f"### 上文内容 ({source_language})\n<context>\n" + "\n".join(context_original_keys) + "\n</context>\n"
-            # 或者使用处理后的 keys? -> context_section = f"### 上文内容 ({source_language})\n<context>\n" + "\n".join(processed_context_keys) + "\n</context>\n"
 
         relevant_dict_entries = []
         if world_dictionary:
-            # 检查处理后的原文是否包含字典中的原文（忽略大小写或做更智能匹配？）
-            text_lower = processed_original_text.lower() # 简单的小写匹配
+            text_lower = processed_original_text.lower()
             for entry in world_dictionary:
                 dict_original = entry.get('原文')
                 if dict_original and dict_original.lower() in text_lower:
-                    # 格式化术语表条目
                     entry_line = f"{entry['原文']}|{entry.get('译文', '')}|{entry.get('类别', '')} - {entry.get('描述', '')}"
                     relevant_dict_entries.append(entry_line)
 
@@ -80,82 +81,117 @@ def _translate_single_item_with_retry(
         if relevant_dict_entries:
             glossary_section = "### 术语表\n原文|译文|类别 - 描述\n" + "\n".join(relevant_dict_entries) + "\n"
 
-        # b. 构建最终 Prompt (针对单条文本，模拟批处理格式)
-        numbered_text = f"1.{processed_original_text}" # 使用处理后的文本
-        timestamp_suffix = f"\n[timestamp: {datetime.datetime.now().timestamp()}]" if attempt > 0 else "" # 重试时加时间戳
+        # b. 构建最终 Prompt
+        numbered_text = f"1.{processed_original_text}"
+        timestamp_suffix = f"\n[timestamp: {datetime.datetime.now().timestamp()}]" if attempt > 0 else ""
 
-        final_prompt = prompt_template.format(
+        current_final_prompt = prompt_template.format(
             source_language=source_language,
             target_language=target_language,
             glossary_section=glossary_section,
             context_section=context_section,
             batch_text=numbered_text,
-            target_language_placeholder=target_language # 兼容旧模板
+            target_language_placeholder=target_language
         ) + timestamp_suffix
 
         # c. 调用 API
         log.debug(f"调用 API 翻译 (尝试 {attempt+1}/{max_retries+1}): '{original_key[:30]}...'")
-        # 传递给 API 的 messages 格式
-        api_messages = [{"role": "user", "content": final_prompt}]
+        current_api_messages = [{"role": "user", "content": current_final_prompt}]
+        current_api_kwargs = {}
+        if "temperature" in config: current_api_kwargs["temperature"] = config["temperature"]
+        if "max_tokens" in config: current_api_kwargs["max_tokens"] = config["max_tokens"]
 
-        # 从配置中获取 temperature 和 max_tokens (如果存在)
-        api_kwargs = {}
-        if "temperature" in config: api_kwargs["temperature"] = config["temperature"]
-        if "max_tokens" in config: api_kwargs["max_tokens"] = config["max_tokens"]
-        
-        success, response_content, error_message = api_client.chat_completion(
+        success, current_response_content, error_message = api_client.chat_completion(
             model_name,
-            api_messages,
-            **api_kwargs
+            current_api_messages,
+            **current_api_kwargs
         )
+
+        # --- 记录本次尝试的请求和响应信息，以备失败时使用 ---
+        last_failed_prompt = current_final_prompt
+        last_failed_api_messages = current_api_messages
+        last_failed_api_kwargs = current_api_kwargs
+        last_failed_response_content = current_response_content if success else f"[API错误: {error_message}]"
 
         if not success:
             log.warning(f"API 调用失败 (尝试 {attempt+1}): {error_message} for '{original_key[:30]}...'")
-            last_failed_translation_raw = f"[API错误: {error_message}]"
+            last_failed_raw_translation = f"[API错误: {error_message}]" # 更新最后失败的“译文”
+            last_validation_reason = f"API调用失败: {error_message}" # 更新失败原因
+
+            # *** 在 API 调用失败时记录详细错误 ***
+            try:
+                with error_log_lock:
+                    with open(error_log_path, 'a', encoding='utf-8') as elog:
+                        elog.write(f"[{datetime.datetime.now().isoformat()}] API 调用失败 (尝试 {attempt+1}/{max_retries+1})\n")
+                        elog.write(f"  原文: {original_key}\n")
+                        elog.write(f"  失败原因: {error_message}\n")
+                        elog.write(f"  模型: {model_name}\n")
+                        elog.write(f"  API Kwargs: {json.dumps(current_api_kwargs, ensure_ascii=False)}\n")
+                        elog.write(f"  API Messages:\n{json.dumps(current_api_messages, indent=2, ensure_ascii=False)}\n")
+                        # elog.write(f"  完整 Prompt:\n{current_final_prompt}\n") # 可选，Messages 通常更结构化
+                        elog.write("-" * 20 + "\n")
+            except Exception as log_err:
+                log.error(f"写入错误日志失败 (API 错误): {log_err}")
+
             if attempt < max_retries:
-                time.sleep(1) # 稍作等待后重试
+                time.sleep(1)
                 continue
             else:
                 break # API 连续失败，跳出重试
 
         # d. 提取翻译结果
-        # 假设 API 返回的 content 就是 <textarea> 内部或类似的东西
-        # 需要根据实际 API 返回调整提取逻辑
-        match = re.search(r'<textarea>(.*?)</textarea>', response_content, re.DOTALL)
+        match = re.search(r'<textarea>(.*?)</textarea>', current_response_content, re.DOTALL)
         if match:
             translated_block = match.group(1).strip()
-            # 移除可能的编号前缀 "1."
             if translated_block.startswith("1."):
                 raw_translated_text = translated_block[2:]
             else:
                 log.warning(f"API 响应未找到预期的 '1.' 前缀，将直接使用提取内容: '{translated_block[:50]}...'")
                 raw_translated_text = translated_block
         else:
-            # 如果没有 textarea，可能直接返回了内容
-            log.warning(f"API 响应未找到 <textarea>，尝试直接使用响应内容 (移除编号): '{response_content[:50]}...'")
-            if response_content.strip().startswith("1."):
-                 raw_translated_text = response_content.strip()[2:]
+            log.warning(f"API 响应未找到 <textarea>，尝试直接使用响应内容 (移除编号): '{current_response_content[:50]}...'")
+            if current_response_content.strip().startswith("1."):
+                 raw_translated_text = current_response_content.strip()[2:]
             else:
-                 raw_translated_text = response_content.strip() # 直接使用
+                 raw_translated_text = current_response_content.strip()
 
-        last_failed_translation_raw = raw_translated_text # 记录本次尝试结果
+        last_failed_raw_translation = raw_translated_text # 记录本次尝试的原始译文
 
         # e. 验证翻译
-        # 还原 PUA -> 后处理 -> 验证
         restored_text = text_processing.restore_pua_placeholders(raw_translated_text)
         post_processed_text = text_processing.post_process_translation(restored_text, original_key)
 
-        is_valid, validation_reason = text_processing.validate_translation(
-            original_key, # 使用未经处理的原key进行比较
-            restored_text, # 使用还原了 PUA 但未最终处理的译文进行标记数量比较
-            post_processed_text # 使用最终处理后的文本检查假名等
+        is_valid, current_validation_reason = text_processing.validate_translation(
+            original_key,
+            restored_text,
+            post_processed_text
         )
 
         if is_valid:
             log.info(f"验证通过 (尝试 {attempt+1}): '{original_key[:30]}...' -> '{post_processed_text[:30]}...'")
             return post_processed_text # 成功，返回最终处理后的结果
         else:
-            log.warning(f"验证失败 (尝试 {attempt+1}) for '{original_key[:30]}...'. 原因: {validation_reason}")
+            log.warning(f"验证失败 (尝试 {attempt+1}) for '{original_key[:30]}...'. 原因: {current_validation_reason}")
+            last_validation_reason = current_validation_reason # 更新最后失败原因
+
+            # *** 在验证失败时记录详细错误 ***
+            try:
+                with error_log_lock:
+                    with open(error_log_path, 'a', encoding='utf-8') as elog:
+                        elog.write(f"[{datetime.datetime.now().isoformat()}] 翻译验证失败 (尝试 {attempt+1}/{max_retries+1})\n")
+                        elog.write(f"  原文: {original_key}\n")
+                        elog.write(f"  失败原因: {current_validation_reason}\n")
+                        elog.write(f"  模型: {model_name}\n")
+                        elog.write(f"  API Kwargs: {json.dumps(current_api_kwargs, ensure_ascii=False)}\n")
+                        elog.write(f"  原始 API 响应体:\n{current_response_content}\n")
+                        elog.write(f"  提取的原始译文: {raw_translated_text}\n")
+                        elog.write(f"  最终处理后译文 (用于验证): {post_processed_text}\n")
+                        elog.write(f"  API Messages:\n{json.dumps(current_api_messages, indent=2, ensure_ascii=False)}\n")
+                        # elog.write(f"  完整 Prompt:\n{current_final_prompt}\n") # 可选
+                        elog.write("-" * 20 + "\n")
+            except Exception as log_err:
+                log.error(f"写入错误日志失败 (验证错误): {log_err}")
+
             if attempt < max_retries:
                 log.info(f"准备重试...")
                 continue # 继续下一次重试
@@ -164,51 +200,58 @@ def _translate_single_item_with_retry(
                 break # 跳出重试循环，进入拆分或回退
 
     # --- 重试循环结束 ---
-    # 如果执行到这里，说明所有重试都失败了
 
     # g. 尝试拆分翻译 (如果包含多行且不止一行)
-    lines = original_key.split('\n') # 基于原始 key 拆分
+    lines = original_key.split('\n')
     if len(lines) > 1:
         log.warning(f"翻译和重试均失败，尝试拆分: '{original_key[:30]}...'")
         mid_point = (len(lines) + 1) // 2
         first_half_key = '\n'.join(lines[:mid_point])
         second_half_key = '\n'.join(lines[mid_point:])
 
-        # 递归调用自身处理两个部分 (注意上下文传递可能需要调整)
-        # 这里简单地使用相同的上下文，但更好的方式是分割上下文
         translated_first_half = _translate_single_item_with_retry(
             first_half_key, context_items, world_dictionary, api_client,
             config, error_log_path, error_log_lock
         )
+        # 为第二部分构建上下文（包含第一部分的原文或翻译结果？）
+        # 简单起见，仍然使用原始上下文+第一部分的 key
+        context_for_second_half = context_items + [(first_half_key, "")] # 模拟上下文
         translated_second_half = _translate_single_item_with_retry(
-            second_half_key, context_items, world_dictionary, api_client,
+            second_half_key, context_for_second_half, world_dictionary, api_client,
             config, error_log_path, error_log_lock
         )
 
-        # 拼接结果（即使子部分是原文回退，也要拼接）
-        # 检查子部分是否成功翻译（是否等于其原文key）
         if translated_first_half != first_half_key or translated_second_half != second_half_key:
              log.info(f"拆分翻译完成，合并结果 for '{original_key[:30]}...'")
-             # 返回拼接结果，注意拼接符为换行符
              return translated_first_half + '\n' + translated_second_half
         else:
              log.error(f"拆分翻译后所有部分仍回退到原文，最终回退: '{original_key[:30]}...'")
-             # 继续执行下面的回退逻辑
+             # 继续执行下面的回退逻辑，此时 last_failed_* 变量来自第二部分的失败尝试
 
     # h. 无法拆分或拆分后仍然失败，执行最终回退
     log.error(f"翻译、重试、拆分均失败或无法拆分，回退到原文: '{original_key[:50]}...'")
-    # 记录到错误日志
+    # 记录到错误日志 (使用最后一次失败的信息)
     try:
         with error_log_lock:
             with open(error_log_path, 'a', encoding='utf-8') as elog:
-                elog.write(f"[{datetime.datetime.now().isoformat()}] 翻译失败，使用原文回退:\n")
+                elog.write(f"[{datetime.datetime.now().isoformat()}] 翻译失败，使用原文回退 (所有尝试失败)\n")
                 elog.write(f"  原文: {original_key}\n")
-                if last_failed_translation_raw:
-                    elog.write(f"  最后尝试的原始译文: {last_failed_translation_raw}\n") # 记录未处理的原始译文
-                elog.write(f"  原因: {validation_reason if 'validation_reason' in locals() else 'API 或重试失败'}\n")
+                elog.write(f"  最后失败原因: {last_validation_reason}\n")
+                if last_failed_raw_translation:
+                    elog.write(f"  最后尝试的原始译文: {last_failed_raw_translation}\n")
+                if last_failed_response_content:
+                     elog.write(f"  最后尝试的原始 API 响应体:\n{last_failed_response_content}\n")
+                if model_name:
+                     elog.write(f"  最后尝试的模型: {model_name}\n")
+                if last_failed_api_kwargs:
+                     elog.write(f"  最后尝试的 API Kwargs: {json.dumps(last_failed_api_kwargs, ensure_ascii=False)}\n")
+                if last_failed_api_messages:
+                     elog.write(f"  最后尝试的 API Messages:\n{json.dumps(last_failed_api_messages, indent=2, ensure_ascii=False)}\n")
+                # if last_failed_prompt:
+                #     elog.write(f"  最后尝试的完整 Prompt:\n{last_failed_prompt}\n") # 可选
                 elog.write("-" * 20 + "\n")
     except Exception as log_err:
-        log.error(f"写入错误日志失败: {log_err}")
+        log.error(f"写入最终回退错误日志失败: {log_err}")
 
     return original_key # 返回原文作为最终结果
 

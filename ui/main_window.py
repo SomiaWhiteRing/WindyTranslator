@@ -12,9 +12,6 @@ from . import rtp_dialog # 需要调用更新按钮文本
 from . import config_dialogs # 可能需要引用
 from . import dict_editor # 可能需要引用
 
-# 假设自定义小部件会放在 widgets.py (可选)
-# from . import widgets
-
 class MainWindow:
     """应用程序的主窗口 UI 类。"""
 
@@ -30,7 +27,7 @@ class MainWindow:
         self.root = root
         self.app = app_controller # 保留对 App 控制器的引用
         self.config = config
-        self.root.title("RPG Maker 翻译助手 (重构版)")
+        self.root.title("RPG Maker 200X 翻译助手")
         # 初始大小将在切换模式时设置
         # self.root.geometry("600x750") # 初始大小由模式决定
 
@@ -48,7 +45,7 @@ class MainWindow:
         # **** Grid 配置: 让 path_frame 内的 Entry (列 0) 可以水平扩展 ****
         path_frame.columnconfigure(0, weight=1)
 
-        self.game_path_entry = ttk.Entry(path_frame, textvariable=self.app.game_path, width=70, state='readonly')
+        self.game_path_entry = ttk.Entry(path_frame, textvariable=self.app.game_path, width=70)
         # 让 Entry 水平填充其单元格
         self.game_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5), pady=5)
 
@@ -181,11 +178,10 @@ class MainWindow:
             return self.config.get('selected_mode', 'easy') # 返回配置中的模式
 
     def switch_to_mode(self, mode):
-        """切换到指定的模式标签页并调整窗口大小。"""
+        """切换到指定的模式标签页。"""
         target_frame = self.easy_mode_frame_container if mode == 'easy' else self.pro_mode_frame_container
         try:
             self.functions_notebook.select(target_frame)
-            self._update_window_size(mode)
         except tk.TclError as e:
              print(f"切换模式时出错 (可能控件尚未就绪): {e}")
              # 可以尝试延迟执行
@@ -256,39 +252,6 @@ class MainWindow:
 
 
     # --- 内部辅助方法 ---
-
-    def _on_tab_change(self, event):
-        """处理 Notebook 标签切换事件。"""
-        new_mode = self.get_current_mode()
-        self.log_message(f"切换到 {'轻松' if new_mode == 'easy' else '专业'} 模式")
-        self._update_window_size(new_mode)
-        # 保存当前模式到配置 (可选，如果希望每次切换都保存)
-        if self.config.get('selected_mode') != new_mode:
-             self.config['selected_mode'] = new_mode
-             self.app.save_config() # 通知 App 保存
-
-
-    def _update_window_size(self, mode):
-        """根据模式调整窗口大小。"""
-        # 获取当前位置和宽度
-        current_x = self.root.winfo_x()
-        current_y = self.root.winfo_y()
-        current_width = self.root.winfo_width()
-
-        # 目标宽度（保持不变或设个最小值）
-        target_width = max(current_width, 600)
-
-        # 目标高度
-        target_height = 450 if mode == 'easy' else 750
-
-        # 使用 geometry 设置新大小和位置
-        try:
-            self.root.geometry(f"{target_width}x{target_height}+{current_x}+{current_y}")
-        except tk.TclError as e:
-            # 在窗口最小化或尚未完全显示时调用 geometry 可能出错
-            print(f"调整窗口大小时出错: {e}")
-            # 可以尝试延迟执行
-            # self.root.after(100, lambda: self._update_window_size(mode))
 
     def _flatten_controls(self, controls_list):
         """递归地将嵌套的控件列表/元组展平成单个列表。"""

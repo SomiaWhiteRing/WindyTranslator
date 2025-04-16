@@ -8,6 +8,7 @@ import logging # 使用标准日志库记录更底层的细节
 log = logging.getLogger(__name__)
 
 # --- 文本验证 ---
+
 def validate_translation(original, translated, post_processed_translation):
     """
     验证译文是否符合特定规则（如保留标记、无假名等）。
@@ -184,3 +185,49 @@ def sanitize_filename(filename):
     if not sanitized:
         sanitized = "untitled"
     return sanitized
+
+# **** 新增：半角片假名转全角片假名函数 ****
+def convert_half_to_full_katakana(text):
+    """
+    将字符串中的半角片假名（包括标点、浊音/半浊音符号）转换为全角形式。
+
+    Args:
+        text (str): 输入字符串。
+
+    Returns:
+        str: 转换后的字符串。
+    """
+    if not isinstance(text, str):
+        return text
+
+    # 半角片假名、标点、特殊符号 -> 全角对应字符 映射表
+    # 包含 U+FF61 到 U+FF9F 的范围
+    hankaku_chars = "｡｢｣､･ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝﾞﾟ"
+    zenkaku_chars = "。「」、・ヲァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン゛゜"
+
+    if len(hankaku_chars) != len(zenkaku_chars):
+        log.error("内部错误：半角/全角片假名映射长度不匹配！")
+        return text # 避免出错，返回原文
+
+    # 创建基础转换表
+    trans_table = str.maketrans(hankaku_chars, zenkaku_chars)
+
+    # 应用基础转换
+    text = text.translate(trans_table)
+
+    # 处理需要合并的浊音和半浊音
+    # 顺序很重要，先处理带浊音/半浊音的组合
+    replacements = {
+        'カ゛': 'ガ', 'キ゛': 'ギ', 'ク゛': 'グ', 'ケ゛': 'ゲ', 'コ゛': 'ゴ',
+        'サ゛': 'ザ', 'シ゛': 'ジ', 'ス゛': 'ズ', 'セ゛': 'ゼ', 'ソ゛': 'ゾ',
+        'タ゛': 'ダ', 'チ゛': 'ヂ', 'ツ゛': 'ヅ', 'テ゛': 'デ', 'ト゛': 'ド',
+        'ハ゛': 'バ', 'ヒ゛': 'ビ', 'フ゛': 'ブ', 'ヘ゛': 'ベ', 'ホ゛': 'ボ',
+        'ウ゛': 'ヴ', # 特殊的ウ浊音
+        'ハ゜': 'パ', 'ヒ゜': 'ピ', 'フ゜': 'プ', 'ヘ゜': 'ペ', 'ホ゜': 'ポ',
+    }
+
+    # 执行替换
+    for half_comb, full_comb in replacements.items():
+        text = text.replace(half_comb, full_comb)
+
+    return text

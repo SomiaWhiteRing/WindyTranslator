@@ -41,7 +41,11 @@ def _extract_strings_from_file(file_path):
                     # 去除尾部换行符作为 Key
                     message_key = message_block.rstrip('\n')
                     if message_key: # 只有非空消息块才添加
-                        strings[message_key] = message_key
+                        # **** 对 Value 进行转换 ****
+                        converted_value = text_processing.convert_half_to_full_katakana(message_key)
+                        strings[message_key] = converted_value # Key 是原文, Value 是转换后的
+                        if message_key != converted_value:
+                             log.debug(f"JSON Value Converted (HW->FW Kata): '{message_key[:30]}...' -> '{converted_value[:30]}...'")
                     # i 此时指向 '##' 或文件末尾
                     if i < len(lines) and lines[i].strip() == '##':
                          i += 1 # 跳过 '##' 行
@@ -54,9 +58,13 @@ def _extract_strings_from_file(file_path):
 
                 else: # 处理其他如 System/Terms 等单行内容
                     if i < len(lines):
-                        content_line = lines[i].strip()
-                        if content_line: # 只有非空内容才添加
-                            strings[content_line] = content_line
+                        content_key = lines[i].strip() # 原文作为 Key
+                        if content_key:
+                            # **** 对 Value 进行转换 ****
+                            converted_value = text_processing.convert_half_to_full_katakana(content_key)
+                            strings[content_key] = converted_value # Key 是原文, Value 是转换后的
+                            if content_key != converted_value:
+                                log.debug(f"JSON Value Converted (HW->FW Kata): '{content_key[:30]}...' -> '{converted_value[:30]}...'")
                         i += 1 # 移动到下一行（可能是下一个 #Title# 或文件末尾）
                     else:
                         # 标题后面没有内容了

@@ -99,7 +99,7 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                 game_text_content = f_temp_read.read()
 
             # 检查文本大小是否过大（示例性检查，阈值需要调整）
-            # Gemini 1.5 Pro 支持非常长的上下文，但 API 本身可能有请求大小限制
+            # Gemini 2.5 Pro 支持非常长的上下文，但 API 本身可能有请求大小限制
             MAX_PROMPT_SIZE_MB = 5 # 假设 API 限制 5MB 左右（需要查阅实际文档）
             if len(game_text_content.encode('utf-8')) / (1024*1024) > MAX_PROMPT_SIZE_MB:
                  log.warning(f"聚合后的游戏文本大小 ({len(game_text_content.encode('utf-8')) / (1024*1024):.2f} MB) 可能超过 API 限制。结果可能不完整或失败。")
