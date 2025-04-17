@@ -39,7 +39,10 @@ def _translate_single_item_with_retry(
         error_log_lock (threading.Lock): 错误日志文件写入锁。
 
     Returns:
-        str: 最终的翻译结果（可能经过后处理）或原文（如果所有尝试失败）。
+        tuple[str, str]: 返回一个元组 (final_text, status)。
+            final_text 是最终翻译结果或原文。
+            status 为 'success' 表示翻译成功（即使结果等于原文）。
+            status 为 'fallback' 表示所有尝试失败，显式回退到原文。
     """
     prompt_template = config.get("prompt_template", "")
     model_name = config.get("model", "")
@@ -169,7 +172,7 @@ def _translate_single_item_with_retry(
 
         if is_valid:
             log.info(f"验证通过 (尝试 {attempt+1}): '{original_key[:30]}...' -> '{post_processed_text[:30]}...'")
-            return post_processed_text # 成功，返回最终处理后的结果
+            return post_processed_text, 'success' # 成功，返回最终处理后的结果
         else:
             log.warning(f"验证失败 (尝试 {attempt+1}) for '{original_key[:30]}...'. 原因: {current_validation_reason}")
             last_validation_reason = current_validation_reason # 更新最后失败原因
@@ -209,21 +212,24 @@ def _translate_single_item_with_retry(
         first_half_key = '\n'.join(lines[:mid_point])
         second_half_key = '\n'.join(lines[mid_point:])
 
-        translated_first_half = _translate_single_item_with_retry(
+        translated_first_half, first_status = _translate_single_item_with_retry(
             first_half_key, context_items, world_dictionary, api_client,
             config, error_log_path, error_log_lock
         )
         # 为第二部分构建上下文（包含第一部分的原文或翻译结果？）
         # 简单起见，仍然使用原始上下文+第一部分的 key
         context_for_second_half = context_items + [(first_half_key, "")] # 模拟上下文
-        translated_second_half = _translate_single_item_with_retry(
+        translated_second_half, second_status = _translate_single_item_with_retry(
             second_half_key, context_for_second_half, world_dictionary, api_client,
             config, error_log_path, error_log_lock
         )
+             
+        combined_result = translated_first_half + '\n' + translated_second_half
 
-        if translated_first_half != first_half_key or translated_second_half != second_half_key:
+        if combined_result != original_key:
+             # 即使拆分的部分有 fallback，只要合并结果不等于原始 key，就视为成功避免了完全 fallback
              log.info(f"拆分翻译完成，合并结果 for '{original_key[:30]}...'")
-             return translated_first_half + '\n' + translated_second_half
+             return combined_result, 'success' # 返回合并后的结果
         else:
              log.error(f"拆分翻译后所有部分仍回退到原文，最终回退: '{original_key[:30]}...'")
              # 继续执行下面的回退逻辑，此时 last_failed_* 变量来自第二部分的失败尝试
@@ -253,7 +259,7 @@ def _translate_single_item_with_retry(
     except Exception as log_err:
         log.error(f"写入最终回退错误日志失败: {log_err}")
 
-    return original_key # 返回原文作为最终结果
+    return original_key, 'fallback' # 返回原文作为最终结果
 
 # --- 线程工作函数 ---
 def _translation_worker(
@@ -278,7 +284,7 @@ def _translation_worker(
             current_context = context_items + batch_items[:i]
             
             # 调用单个条目的翻译逻辑
-            final_translation = _translate_single_item_with_retry(
+            final_translation, status = _translate_single_item_with_retry(
                 original_key,
                 current_context,
                 world_dictionary,
@@ -287,11 +293,11 @@ def _translation_worker(
                 error_log_path,
                 error_log_lock
             )
-            batch_results[original_key] = final_translation
+            batch_results[original_key] = (final_translation, status)
         except Exception as item_err:
             # 捕获单条处理中的意外错误（理论上不应发生）
             log.exception(f"处理条目时发生意外错误: {item_err} for '{original_key[:50]}...' - 将使用原文回退")
-            batch_results[original_key] = original_key # 回退
+            batch_results[original_key] = (original_key, 'fallback') # 回退
             # 记录到错误日志
             try:
                 with error_log_lock:
@@ -508,7 +514,6 @@ def run_translate(game_path, works_dir, translate_config, message_queue):
 
         # --- 检查错误日志 ---
         error_count_in_log = 0
-        fallback_count = 0 # 统计实际回退到原文的数量
         if os.path.exists(error_log_path):
             try:
                 with open(error_log_path, 'r', encoding='utf-8') as elog_read:
@@ -523,21 +528,33 @@ def run_translate(game_path, works_dir, translate_config, message_queue):
         
         # 再次检查 translated_data，确认有多少条目最终等于其原始 key (回退)
         final_translated_data = {}
-        for key, translated_value in translated_data.items():
-             if translated_value is None: # 如果仍然是 None，表示 worker 未能成功写入结果？极端情况
-                 log.error(f"条目 '{key[:50]}...' 的翻译结果丢失，将使用原文回退。")
-                 final_translated_data[key] = key # 回退
-                 fallback_count += 1
-             elif translated_value == key: # 值等于 Key 表示是翻译失败或拆分失败后的主动回退
-                 fallback_count += 1
-                 final_translated_data[key] = translated_value # 保留回退结果
-             else:
-                 final_translated_data[key] = translated_value # 使用翻译结果
+        explicit_fallback_count = 0 # 用于统计显式回退的数量
+        missing_count = 0 # 统计结果丢失的数量 (理论上为 0)
 
-        if fallback_count > 0:
-             message_queue.put(("log", ("error", f"翻译完成，但有 {fallback_count} 个条目最终使用了原文回退。")))
+        for key, result_tuple in translated_data.items():
+            final_text = key # 默认回退
+            status = 'fallback' # 默认状态
+
+            if result_tuple is None: # 如果仍然是 None，表示 worker 未能成功写入结果？极端情况
+                log.error(f"条目 '{key[:50]}...' 的翻译结果丢失，将使用原文回退。")
+                final_translated_data[key] = key # 回退
+                missing_count += 1
+            else:
+                #  final_translated_data[key] = translated_value # 使用翻译结果
+                # 解包元组
+                final_text, status = result_tuple
+                if status == 'fallback':
+                    explicit_fallback_count += 1
+                final_translated_data[key] = final_text # 更新最终翻译结果
+
+        if missing_count > 0:
+             log.error(f"严重问题：有 {missing_count} 个条目的翻译结果丢失！")
+             message_queue.put(("error", f"严重警告: {missing_count} 个翻译结果丢失，已强制回退。"))
+
+        if explicit_fallback_count > 0:
+             message_queue.put(("log", ("error", f"翻译完成，但有 {explicit_fallback_count} 个条目最终使用了原文回退。")))
              # 更新状态栏以提示用户
-             message_queue.put(("error", f"警告: {fallback_count} 个翻译使用了原文回退，请检查日志。"))
+             message_queue.put(("error", f"警告: {explicit_fallback_count} 个翻译使用了原文回退，请检查日志。"))
 
 
         # --- 保存翻译后的 JSON ---
@@ -548,12 +565,12 @@ def run_translate(game_path, works_dir, translate_config, message_queue):
 
             elapsed = time.time() - start_time
             message_queue.put(("log", ("success", f"翻译后的 JSON 文件保存成功。耗时: {elapsed:.2f} 秒。")))
-            if fallback_count == 0:
+            if explicit_fallback_count == 0:
                 message_queue.put(("success", f"JSON 文件翻译完成，结果已保存。"))
                 message_queue.put(("status", "翻译完成"))
             else:
-                message_queue.put(("success", f"JSON 文件翻译完成 (有 {fallback_count} 个回退)，结果已保存。"))
-                message_queue.put(("status", f"翻译完成 (有 {fallback_count} 个回退)"))
+                message_queue.put(("success", f"JSON 文件翻译完成 (有 {explicit_fallback_count} 个回退)，结果已保存。"))
+                message_queue.put(("status", f"翻译完成 (有 {explicit_fallback_count} 个回退)"))
             message_queue.put(("done", None))
 
         except Exception as save_err:

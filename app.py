@@ -222,9 +222,6 @@ class RPGTranslatorApp:
         try:
             # 更新当前选择的模式
             self.config['selected_mode'] = self.main_window.get_current_mode()
-            # 保存世界观和翻译配置（如果它们在内存中被修改了）
-            # self.config['world_dict_config'] = ... # 通常在配置窗口保存时更新
-            # self.config['translate_config'] = ...
             self.config_manager.save_config(self.config)
             self.log_message("配置已保存。", "success")
         except Exception as e:
