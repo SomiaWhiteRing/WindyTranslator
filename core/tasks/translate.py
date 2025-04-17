@@ -521,7 +521,7 @@ def run_translate(game_path, works_dir, translate_config, message_queue):
                     # 计算分隔符数量来估计错误条目数
                     error_count_in_log = log_content.count("-" * 20)
                 if error_count_in_log > 0:
-                    message_queue.put(("log", ("warning", f"检测到 {error_count_in_log} 个翻译条目在日志中记录了问题 (可能已回退到原文)。")))
+                    message_queue.put(("log", ("warning", f"检测到翻译过程中发生了 {error_count_in_log} 次错误（并不一定影响结果）。")))
                     message_queue.put(("log", ("warning", f"详情请查看错误日志: {error_log_path}")))
             except Exception as read_log_err:
                 log.error(f"读取错误日志时出错: {read_log_err}")
