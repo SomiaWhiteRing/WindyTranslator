@@ -1,5 +1,5 @@
 # app.py
-from asyncio import subprocess
+import subprocess
 import os
 import tkinter as tk
 from tkinter import messagebox, filedialog
@@ -173,11 +173,6 @@ class RPGTranslatorApp:
              if not world_dict_config.get("api_key") or not translate_config.get("api_key"):
                  messagebox.showerror("配置缺失", "请先在 Gemini 和 DeepSeek 配置中填写 API Key。", parent=self.root)
                  return
-             # 检查默认翻译文件是否存在，如果不存在，提示用户
-             default_translated_json = os.path.join(self._get_translated_dir(), "translation_translated.json")
-             # if not os.path.exists(default_translated_json):
-             #     if not messagebox.askyesno("确认", "未找到上次翻译生成的 'translation_translated.json' 文件。\n轻松模式将无法执行最后的“释放JSON”和“导入文本”步骤。\n是否仍要继续？", parent=self.root):
-             #         return
 
              task_func = easy_mode_flow.run_easy_flow
              task_args = [
@@ -399,7 +394,7 @@ class RPGTranslatorApp:
 
         self.log_message(f"尝试启动游戏: {exe_to_run}")
         try:
-            # 使用 Popen 在后台启动，设置工作目录为游戏目录
+            # 使用 subprocess.Popen 在后台启动，设置工作目录为游戏目录
             subprocess.Popen([exe_to_run], cwd=game_path)
             self.log_message("游戏已启动（在单独进程中）。", "success")
         except Exception as e:
