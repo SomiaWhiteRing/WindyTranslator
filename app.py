@@ -135,7 +135,7 @@ class RPGTranslatorApp:
             task_args = [game_path, self.works_dir, world_dict_config, self.message_queue]
         elif task_name == 'translate':
             task_func = translate.run_translate
-            task_args = [game_path, self.works_dir, translate_config, self.message_queue]
+            task_args = [game_path, self.works_dir, translate_config, world_dict_config, self.message_queue]
         elif task_name == 'release_json':
             # --- 释放 JSON 的特殊处理 ---
             # 1. 查找可用的 JSON 文件

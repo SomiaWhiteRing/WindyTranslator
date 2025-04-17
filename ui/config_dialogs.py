@@ -6,6 +6,8 @@ import logging
 
 # 导入 API 客户端模块用于连接测试
 from core.api_clients import gemini, deepseek
+# 导入默认配置以获取默认 Prompt 值
+from core.config import DEFAULT_WORLD_DICT_CONFIG
 
 log = logging.getLogger(__name__)
 
@@ -33,18 +35,19 @@ class WorldDictConfigWindow(tk.Toplevel):
 
         # --- 窗口设置 ---
         self.title("世界观字典配置 (Gemini)")
-        self.geometry("600x550")
+        self.geometry("800x550") # 增加宽度以适应并排 Prompt
         self.transient(parent)
         self.grab_set()
 
         # --- 框架 ---
         frame = ttk.Frame(self, padding="10")
         frame.pack(fill=tk.BOTH, expand=True)
-        frame.columnconfigure(1, weight=1) # 让输入框和文本框可以扩展
+        frame.columnconfigure(1, weight=1) # API Key 和 Model 输入框列
+        frame.columnconfigure(2, weight=0) # API Key 显示按钮列
 
         # --- 控件变量 ---
         self.api_key_var = tk.StringVar(value=self.config.get("api_key", ""))
-        self.model_var = tk.StringVar(value=self.config.get("model", "gemini-1.5-pro-latest")) # 默认使用最新 Pro
+        self.model_var = tk.StringVar(value=self.config.get("model", DEFAULT_WORLD_DICT_CONFIG["model"])) # 从默认配置取
         self.show_key_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="请先测试连接")
 
@@ -66,25 +69,46 @@ class WorldDictConfigWindow(tk.Toplevel):
         ttk.Label(frame, text="模型名称:").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
         model_combobox = ttk.Combobox(frame, textvariable=self.model_var, values=[
             "gemini-1.5-pro-latest", # 推荐
-            "gemini-pro",            # 旧版稳定
+            "gemini-pro",            # 旧版稳定 Pro
             "gemini-1.0-pro",        # 明确版本
-            # "gemini-1.5-flash-latest", # 如果需要 Flash 版本
+            "gemini-1.5-flash-latest", # Flash 版本
         ], width=48)
         model_combobox.grid(row=row_idx, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
         row_idx += 1
 
-        # Prompt Template
-        prompt_frame = ttk.LabelFrame(frame, text="Prompt 模板", padding="5")
-        prompt_frame.grid(row=row_idx, column=0, columnspan=3, padx=5, pady=5, sticky="nsew")
-        frame.rowconfigure(row_idx, weight=1) # 让 Prompt 区域可以垂直扩展
-        prompt_frame.columnconfigure(0, weight=1)
-        prompt_frame.rowconfigure(0, weight=1)
+        # --- 并排 Prompt 区域 ---
+        prompt_area_frame = ttk.Frame(frame)
+        prompt_area_frame.grid(row=row_idx, column=0, columnspan=3, padx=5, pady=5, sticky="nsew")
+        # 配置 prompt_area_frame 的列权重，使其内部控件能平均分配宽度
+        prompt_area_frame.columnconfigure(0, weight=1)
+        prompt_area_frame.columnconfigure(1, weight=1)
+        # 配置 prompt_area_frame 的行权重，使其能够垂直扩展
+        prompt_area_frame.rowconfigure(0, weight=1)
+        # 配置主 frame 的该行权重，允许 Prompt 区域垂直扩展
+        frame.rowconfigure(row_idx, weight=1)
+        row_idx += 1 # Prompt 区域占据一行
 
-        self.prompt_text = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD, height=15)
-        self.prompt_text.grid(row=0, column=0, sticky="nsew")
-        self.prompt_text.insert(tk.END, self.config.get("prompt", "")) # 加载初始 Prompt
-        self.prompt_text.edit_modified(False) # 初始化修改状态
-        row_idx += 1
+        # 人物提取 Prompt Frame 和 Text
+        char_prompt_frame = ttk.LabelFrame(prompt_area_frame, text="人物提取 Prompt", padding="5")
+        char_prompt_frame.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="nsew")
+        char_prompt_frame.rowconfigure(0, weight=1)
+        char_prompt_frame.columnconfigure(0, weight=1)
+        self.char_prompt_text = scrolledtext.ScrolledText(char_prompt_frame, wrap=tk.WORD, height=15)
+        self.char_prompt_text.grid(row=0, column=0, sticky="nsew")
+        # 从配置或默认值加载 Prompt
+        self.char_prompt_text.insert(tk.END, self.config.get("character_prompt_template", DEFAULT_WORLD_DICT_CONFIG["character_prompt_template"]))
+        self.char_prompt_text.edit_modified(False) # 初始化修改状态
+
+        # 事物提取 Prompt Frame 和 Text
+        entity_prompt_frame = ttk.LabelFrame(prompt_area_frame, text="事物提取 Prompt", padding="5")
+        entity_prompt_frame.grid(row=0, column=1, padx=(5, 0), pady=5, sticky="nsew")
+        entity_prompt_frame.rowconfigure(0, weight=1)
+        entity_prompt_frame.columnconfigure(0, weight=1)
+        self.entity_prompt_text = scrolledtext.ScrolledText(entity_prompt_frame, wrap=tk.WORD, height=15)
+        self.entity_prompt_text.grid(row=0, column=0, sticky="nsew")
+        # 从配置或默认值加载 Prompt
+        self.entity_prompt_text.insert(tk.END, self.config.get("entity_prompt_template", DEFAULT_WORLD_DICT_CONFIG["entity_prompt_template"]))
+        self.entity_prompt_text.edit_modified(False) # 初始化修改状态
 
         # 状态标签
         self.status_label = ttk.Label(frame, textvariable=self.status_var, foreground="orange")
@@ -105,8 +129,9 @@ class WorldDictConfigWindow(tk.Toplevel):
         # --- 绑定事件 ---
         self.api_key_var.trace_add("write", self._on_config_change)
         self.model_var.trace_add("write", self._on_config_change)
-        # 使用 bind 监听 Text 控件的变化比 trace 更可靠
-        self.prompt_text.bind("<<Modified>>", self._on_prompt_modified)
+        # 绑定两个 Prompt 文本框的修改事件
+        self.char_prompt_text.bind("<<Modified>>", self._on_prompt_modified)
+        self.entity_prompt_text.bind("<<Modified>>", self._on_prompt_modified)
         self.protocol("WM_DELETE_WINDOW", self.destroy) # 处理关闭按钮
 
         # --- 初始化完成 ---
@@ -125,18 +150,21 @@ class WorldDictConfigWindow(tk.Toplevel):
             self.api_key_entry.config(show="*")
 
     def _on_prompt_modified(self, event=None):
-        """处理 Prompt 文本框的修改事件。"""
-        # edit_modified() 会触发此回调，需要重置标志位以避免无限循环
-        # 并且仅在非初始化阶段响应
-        if not self.initializing and self.prompt_text.edit_modified():
-            self.prompt_text.edit_modified(False) # 重置标志位
-            self._on_config_change()
+        """处理任一 Prompt 文本框的修改事件。"""
+        if not self.initializing and event:
+            widget = event.widget # 获取触发事件的控件
+            # 检查控件是否真的被修改了
+            if widget.edit_modified():
+                widget.edit_modified(False) # 重置该控件的标志位
+                self._on_config_change() # 触发通用配置更改处理
 
     def _on_config_change(self, *args):
         """配置发生变化时的处理。"""
         if self.initializing: return
+        # 任何配置更改（API Key, Model, 或任一 Prompt）都应重置测试状态并禁用保存
         self.connection_tested_ok = False
-        self.save_button.config(state=tk.DISABLED)
+        if hasattr(self, 'save_button') and self.save_button.winfo_exists(): # 确保按钮存在
+            self.save_button.config(state=tk.DISABLED)
         self._set_status("配置已更改，请重新测试连接", "orange")
 
     def _set_status(self, message, color):
@@ -168,7 +196,8 @@ class WorldDictConfigWindow(tk.Toplevel):
         """在线程中执行实际的 Gemini API 连接测试。"""
         try:
             client = gemini.GeminiClient(api_key) # 初始化客户端
-            success, message = client.test_connection(model) # 调用客户端的测试方法
+            # 使用一个非常简单的 prompt 进行测试，不依赖于复杂的模板
+            success, message = client.test_connection(model)
             # 使用 after 在主线程更新 UI
             self.after(0, lambda: self._test_connection_result(success, message))
         except ConnectionError as e: # 捕获客户端初始化失败
@@ -201,7 +230,13 @@ class WorldDictConfigWindow(tk.Toplevel):
         # 更新 App 持有的配置字典
         self.config["api_key"] = self.api_key_var.get().strip()
         self.config["model"] = self.model_var.get().strip()
-        self.config["prompt"] = self.prompt_text.get("1.0", tk.END).strip()
+        # 保存两个 Prompt 的内容
+        self.config["character_prompt_template"] = self.char_prompt_text.get("1.0", tk.END).strip()
+        self.config["entity_prompt_template"] = self.entity_prompt_text.get("1.0", tk.END).strip()
+        # 确保文件名也保存（如果之前没在配置里，会用默认值，这里保存确保一致性）
+        self.config["character_dict_filename"] = self.config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
+        self.config["entity_dict_filename"] = self.config.get("entity_dict_filename", DEFAULT_WORLD_DICT_CONFIG["entity_dict_filename"])
+
 
         # 通知 App 保存整个配置到文件
         self.app.save_config()
@@ -233,7 +268,7 @@ class TranslateConfigWindow(tk.Toplevel):
 
         # --- 窗口设置 ---
         self.title("翻译JSON文件配置 (DeepSeek/OpenAI)")
-        self.geometry("600x580") # 增加高度以容纳 Prompt
+        self.geometry("600x580") # 保持原大小
         self.transient(parent)
         self.grab_set()
 
@@ -243,14 +278,16 @@ class TranslateConfigWindow(tk.Toplevel):
         frame.columnconfigure(1, weight=1) # 让输入框等可扩展
 
         # --- 控件变量 ---
-        self.api_url_var = tk.StringVar(value=self.config.get("api_url", "https://api.deepseek.com/v1")) # 默认 DeepSeek 官方
+        # 注意：获取默认值时，应从导入的 DEFAULT_TRANSLATE_CONFIG 获取
+        from core.config import DEFAULT_TRANSLATE_CONFIG # 导入默认翻译配置
+        self.api_url_var = tk.StringVar(value=self.config.get("api_url", DEFAULT_TRANSLATE_CONFIG["api_url"]))
         self.api_key_var = tk.StringVar(value=self.config.get("api_key", ""))
-        self.model_var = tk.StringVar(value=self.config.get("model", "deepseek-chat")) # 默认 DeepSeek Chat
-        self.batch_var = tk.IntVar(value=self.config.get("batch_size", 10))
-        self.context_var = tk.IntVar(value=self.config.get("context_lines", 10))
-        self.concur_var = tk.IntVar(value=self.config.get("concurrency", 16))
-        self.source_lang_var = tk.StringVar(value=self.config.get("source_language", "日语"))
-        self.target_lang_var = tk.StringVar(value=self.config.get("target_language", "简体中文"))
+        self.model_var = tk.StringVar(value=self.config.get("model", DEFAULT_TRANSLATE_CONFIG["model"]))
+        self.batch_var = tk.IntVar(value=self.config.get("batch_size", DEFAULT_TRANSLATE_CONFIG["batch_size"]))
+        self.context_var = tk.IntVar(value=self.config.get("context_lines", DEFAULT_TRANSLATE_CONFIG["context_lines"]))
+        self.concur_var = tk.IntVar(value=self.config.get("concurrency", DEFAULT_TRANSLATE_CONFIG["concurrency"]))
+        self.source_lang_var = tk.StringVar(value=self.config.get("source_language", DEFAULT_TRANSLATE_CONFIG["source_language"]))
+        self.target_lang_var = tk.StringVar(value=self.config.get("target_language", DEFAULT_TRANSLATE_CONFIG["target_language"]))
         self.show_key_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="请先测试连接")
 
@@ -278,7 +315,7 @@ class TranslateConfigWindow(tk.Toplevel):
         ttk.Label(frame, text="模型名称:").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
         model_combobox = ttk.Combobox(frame, textvariable=self.model_var, values=[
             "deepseek-chat", "deepseek-coder", # DeepSeek 官方模型示例
-            "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview", # OpenAI 模型示例
+            "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview", "gpt-4o", # OpenAI 模型示例 (加入 gpt-4o)
             "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", # Moonshot 模型示例
             # 添加其他你可能使用的 OpenAI 兼容模型
         ], width=48)
@@ -301,7 +338,7 @@ class TranslateConfigWindow(tk.Toplevel):
 
         # Concurrency
         ttk.Label(spinbox_frame, text="并发数:").pack(side=tk.LEFT, padx=(5, 2))
-        self.concur_spinbox = ttk.Spinbox(spinbox_frame, from_=1, to=64, textvariable=self.concur_var, width=5)
+        self.concur_spinbox = ttk.Spinbox(spinbox_frame, from_=1, to=256, textvariable=self.concur_var, width=5) # 增加并发上限示例
         self.concur_spinbox.pack(side=tk.LEFT, padx=(0, 5))
         row_idx += 1
 
@@ -335,7 +372,8 @@ class TranslateConfigWindow(tk.Toplevel):
 
         self.prompt_text = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD, height=8) # 减少默认高度
         self.prompt_text.grid(row=0, column=0, sticky="nsew")
-        self.prompt_text.insert(tk.END, self.config.get("prompt_template", ""))
+        # 加载时使用配置值，若无则用默认值
+        self.prompt_text.insert(tk.END, self.config.get("prompt_template", DEFAULT_TRANSLATE_CONFIG["prompt_template"]))
         self.prompt_text.edit_modified(False)
         row_idx += 1
 
@@ -361,7 +399,7 @@ class TranslateConfigWindow(tk.Toplevel):
         self.model_var.trace_add("write", self._on_config_change)
         # Spinbox 变化也触发检查
         self.batch_spinbox.bind("<FocusOut>", self._on_config_change)
-        self.batch_spinbox.bind("<KeyRelease>", self._on_config_change)
+        self.batch_spinbox.bind("<KeyRelease>", self._on_config_change) # 用 KeyRelease 更即时
         self.context_spinbox.bind("<FocusOut>", self._on_config_change)
         self.context_spinbox.bind("<KeyRelease>", self._on_config_change)
         self.concur_spinbox.bind("<FocusOut>", self._on_config_change)
@@ -389,6 +427,7 @@ class TranslateConfigWindow(tk.Toplevel):
 
     def _on_prompt_modified(self, event=None):
         """Handle Prompt text modification."""
+        # TranslateConfigWindow 只有一个 prompt_text，逻辑不变
         if not self.initializing and self.prompt_text.edit_modified():
             self.prompt_text.edit_modified(False)
             self._on_config_change()
@@ -459,16 +498,34 @@ class TranslateConfigWindow(tk.Toplevel):
             messagebox.showwarning("无法保存", "请先成功测试连接后再保存。", parent=self)
             return
 
+        # 获取 Spinbox 的值，并进行基本的类型检查和范围限制 (可选但推荐)
+        try:
+            batch_size = int(self.batch_var.get())
+            if not (1 <= batch_size <= 100): batch_size = 10 # 恢复默认
+        except ValueError: batch_size = 10
+        try:
+            context_lines = int(self.context_var.get())
+            if not (0 <= context_lines <= 50): context_lines = 10
+        except ValueError: context_lines = 10
+        try:
+            concurrency = int(self.concur_var.get())
+            if not (1 <= concurrency <= 256): concurrency = 16
+        except ValueError: concurrency = 16
+
+
         # Update the config dictionary directly
         self.config["api_url"] = self.api_url_var.get().strip()
         self.config["api_key"] = self.api_key_var.get().strip()
         self.config["model"] = self.model_var.get().strip()
-        self.config["batch_size"] = self.batch_var.get()
-        self.config["context_lines"] = self.context_var.get()
-        self.config["concurrency"] = self.concur_var.get()
+        self.config["batch_size"] = batch_size
+        self.config["context_lines"] = context_lines
+        self.config["concurrency"] = concurrency
         self.config["source_language"] = self.source_lang_var.get()
         self.config["target_language"] = self.target_lang_var.get()
         self.config["prompt_template"] = self.prompt_text.get("1.0", tk.END).strip()
+        # 确保 max_retries 也被保存 (如果之前没有，从默认值添加)
+        from core.config import DEFAULT_TRANSLATE_CONFIG
+        self.config["max_retries"] = self.config.get("max_retries", DEFAULT_TRANSLATE_CONFIG["max_retries"])
 
         # Notify app to save the entire config
         self.app.save_config()
