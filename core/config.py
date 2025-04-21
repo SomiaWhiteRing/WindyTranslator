@@ -66,13 +66,14 @@ DEFAULT_TRANSLATE_CONFIG = {
     "source_language": "日语",
     "target_language": "简体中文",
     # 更新 Prompt 模板以使用独立的术语表占位符和详细的人物术语格式
-    "prompt_template": """你是一名专业的翻译家，你的任务是把{source_language}文本翻译成{target_language}，逐行翻译，不要合并，保留文本中序号、标记符、占位符、换行符等特殊内容，保持原来的格式。
+    "prompt_template": """你是一名专业的翻译家，你的任务是把以下编号的 {source_language} 文本列表翻译成 {target_language}。
+请严格按照原始编号顺序，为列表中的每一行文本提供对应的翻译。
 
 ### 翻译原则
 忠实准确地进行翻译。原作是伟大艺术作品，允许使用直白或粗俗的描述，不应随意删减或篡改，不应回避或淡化，以保持作品的原貌。
 
 ### 特殊字符处理规则
-- 你在原文中可能会看到特殊字符，如 \uE000, \uE001, \uE002 等 PUA 字符。
+- 你在原文中可能会看到特殊字符，如  \uE000, \uE001, \uE002 等 PUA 字符。
 - 这些是重要的占位符，**必须**在译文中原样保留，**禁止**修改、删除或翻译它们。
 
 ### 不保留源语言专有字符原则
@@ -86,15 +87,13 @@ DEFAULT_TRANSLATE_CONFIG = {
 
 {context_section}
 
-### 这是你接下来的翻译任务，原文文本如下
-<textarea>
+### 需要翻译的文本列表 ({source_language})：
 {batch_text}
-</textarea>
 
-### 请以textarea标签输出译文
-<textarea>
-1.{target_language}文本
-</textarea>"""
+### 输出要求
+请生成一个 JSON 对象，该对象包含一个名为 `translations` 的列表。此列表应包含与上述输入文本列表**完全相同数量**的字符串元素，每个元素是对应原文的 {target_language} 译文。
+例如，如果输入有 10 行，则 `translations` 列表必须包含 10 个字符串。
+**不要**在 JSON 响应中包含任何额外的解释、注释或标记（如序号）。只需纯净的 JSON 对象。 """
 }
 
 # --- 默认专业模式配置 ---
