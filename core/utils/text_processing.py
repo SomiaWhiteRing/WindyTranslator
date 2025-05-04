@@ -111,7 +111,7 @@ def restore_pua_placeholders(text):
     processed_text = processed_text.replace('\uE004', '』')
     processed_text = processed_text.replace('\uE005', r'\.')
     processed_text = processed_text.replace('\uE006', r'\<')
-    processed_text = processed_text.replace('\uE007', r'\>')
+    processed_text = processed_text.replace('\uE007', '>') # 直接还原为 >
     processed_text = processed_text.replace('\uE008', r'\|')
     processed_text = processed_text.replace('\uE009', r'\^')
     # log.debug(f"Restored PUA: '{text[:50]}...' -> '{processed_text[:50]}...'")
@@ -161,23 +161,6 @@ def post_process_translation(text, original_text):
         missing_count = open_double_bracket_count - close_double_bracket_count
         log.debug(f"Adding {missing_count} missing '』' to translation: '{processed_text[:50]}...'")
         processed_text += '』' * missing_count
-
-    # 规则 4: 保证前缀的一致性
-    # --- 使用 get_formatting_prefix 恢复前缀 ---
-    original_prefix = get_formatting_prefix(original_text)
-    # 获取当前译文的实际内容部分（跳过其自身的前缀）
-    current_content_start_index = len(get_formatting_prefix(processed_text))
-    current_content = processed_text[current_content_start_index:]
-
-    # 重新组合：使用原文的前缀 + 译文的内容
-    new_processed_text = original_prefix + current_content
-
-    # 记录是否发生了改变，以及改变前后的样子（用于调试）
-    if new_processed_text != processed_text:
-        log.debug(f"Prefix adjusted. Original prefix: '{repr(original_prefix)}'. "
-                  f"Original processed text start: '{processed_text[:50]}...'. "
-                  f"New processed text start: '{new_processed_text[:50]}...'")
-    processed_text = new_processed_text # 应用修改
         
     # log.debug(f"Post-processed: '{text[:50]}...' -> '{processed_text[:50]}...'")
     return processed_text
@@ -249,65 +232,3 @@ def convert_half_to_full_katakana(text):
         text = text.replace(half_comb, full_comb)
 
     return text
-
-def get_formatting_prefix(text: str) -> str:
-    """
-    从文本开头提取连续的格式化前缀。
-    前缀由空白字符 (\\s) 和反斜杠转义序列 (\\X 或 \\\\) 组成。
-
-    Args:
-        text (str): 输入文本。
-
-    Returns:
-        str: 提取到的格式化前缀。
-    """
-    if not isinstance(text, str):
-        return ""
-
-    prefix = ""
-    current_index = 0
-    text_len = len(text)
-
-    while current_index < text_len:
-        char = text[current_index]
-
-        # 检查是否是空白字符
-        if char.isspace():
-            # 找到连续的空白字符
-            match_ws = re.match(r'\s+', text[current_index:])
-            if match_ws:
-                ws_part = match_ws.group(0)
-                prefix += ws_part
-                current_index += len(ws_part)
-                continue # 继续检查下一个位置是否还是前缀的一部分
-            else:
-                 # 理论上 isspace() 为 True 时，re.match 应该总能匹配到
-                 # 但为防万一，如果匹配不到，就停止
-                 break
-
-        # 检查是否是反斜杠转义序列
-        elif char == '\\':
-            # 检查是否是 \\ 或 \X (X不是反斜杠或空白)
-            # 注意: \ followed by whitespace is not typically an escape sequence itself,
-            # but whitespace is handled above.
-            if current_index + 1 < text_len:
-                next_char = text[current_index + 1]
-                # 匹配 \\ 或 \ + 非空白非反斜杠字符
-                if next_char == '\\' or (not next_char.isspace() and next_char != '\\'):
-                    escape_sequence = text[current_index : current_index + 2]
-                    prefix += escape_sequence
-                    current_index += 2
-                    continue # 继续检查
-                else:
-                    # 是单个反斜杠后面跟了空白，或者就是字符串末尾的反斜杠
-                    # 单个反斜杠本身不构成我们这里定义的“转义序列”前缀的一部分
-                    # 所以在这里停止前缀提取
-                     break
-            else:
-                # 单个反斜杠在字符串末尾，停止
-                break
-        else:
-            # 既不是空白，也不是反斜杠转义序列的开始，前缀结束
-            break
-
-    return prefix
