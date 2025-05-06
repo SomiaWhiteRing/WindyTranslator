@@ -17,9 +17,9 @@ from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
 
 log = logging.getLogger(__name__)
 
-# --- 翻译工作单元 ---
-def _translate_single_item_with_retry(
-    original_key,
+# --- 批量翻译工作单元 (替换 _translate_single_item_with_retry) ---
+def _translate_batch_with_retry(
+    batch_original_keys, # 接收一个批次的原文 key 列表
     context_items, # 用于构建上下文 prompt 的 [(key, value), ...]
     character_dictionary, # 人物词典列表
     entity_dictionary,   # 事物词典列表
@@ -29,23 +29,25 @@ def _translate_single_item_with_retry(
     error_log_lock
 ):
     """
-    翻译单个文本项，包含上下文、分离的人物/事物术语表、验证、重试和拆分逻辑。
+    翻译一个批次的文本项，包含上下文、分离的人物/事物术语表、验证、重试和批次拆分逻辑。
 
     Args:
-        original_key (str): 需要翻译的原文（未经 PUA 处理）。
+        batch_original_keys (list[str]): 需要翻译的原文 Key 列表。
         context_items (list): 上下文列表 [(key, value), ...] (主要用 key 构建 prompt)。
         character_dictionary (list): 人物词典 (已解析的 dict 列表)。
         entity_dictionary (list): 事物词典 (已解析的 dict 列表)。
         api_client (DeepSeekClient): API 客户端实例。
-        config (dict): 翻译配置 (包含 prompt 模板、模型、语言等)。
+        config (dict): 翻译配置 (包含 prompt 模板、模型、语言、重试、拆分设置等)。
         error_log_path (str): 错误日志文件路径。
         error_log_lock (threading.Lock): 错误日志文件写入锁。
 
     Returns:
-        tuple[str, str]: 返回一个元组 (final_text, status)。
+        dict[str, tuple[str, str]]: 返回一个字典，key 是原文 key，
+            value 是一个元组 (final_text, status)。
             final_text 是最终翻译结果或原文。
             status 为 'success' 表示翻译成功（即使结果等于原文）。
             status 为 'fallback' 表示所有尝试失败，显式回退到原文。
+            status 为 'split_failed' 仅在批次大小为1且失败时内部使用，外部看到的是 'fallback'。
     """
     prompt_template = config.get("prompt_template", DEFAULT_TRANSLATE_CONFIG["prompt_template"])
     model_name = config.get("model", "")
@@ -53,47 +55,43 @@ def _translate_single_item_with_retry(
     target_language = config.get("target_language", "简体中文")
     max_retries = config.get("max_retries", 3)
     context_lines = config.get("context_lines", 10)
+    min_batch_size = 1 # 最小拆分批次大小
+    batch_size = len(batch_original_keys) # 当前处理的实际批次大小
 
-    # *** 步骤 1: 预处理原文 (PUA 替换) ***
-    processed_original_text = text_processing.pre_process_text_for_llm(original_key)
-    processed_original_text_lower = processed_original_text.lower() # 预先计算小写版本用于术语匹配
+    results = {} # 存储这个批次的结果
 
     # --- 用于详细错误日志记录 ---
-    last_failed_raw_translation = None
+    last_failed_raw_translation_block = None
     last_failed_prompt = None
     last_failed_api_messages = None
     last_failed_api_kwargs = None
     last_failed_response_content = None
     last_validation_reason = "未知错误"
 
-    for attempt in range(max_retries + 1):
-        # a. 构建上下文
-        # 注意：这里 context_items 仍然是 [(key, value), ...]，我们只用 key
-        context_original_keys = [item[0] for item in context_items[-context_lines:]]
-        # context_processed_keys = [text_processing.pre_process_text_for_llm(ctx_key) for ctx_key in context_original_keys]
+    # *** 步骤 1: 预处理批次内所有原文 (PUA 替换) ***
+    processed_batch_texts = [text_processing.pre_process_text_for_llm(key) for key in batch_original_keys]
+    # 将所有预处理后的文本合并，用于术语匹配检查 (小写)
+    combined_processed_lower = "\n".join(processed_batch_texts).lower()
 
+    for attempt in range(max_retries + 1):
+        # a. 构建上下文 (基于批次开始前的条目)
+        context_original_keys = [item[0] for item in context_items[-context_lines:]]
         context_section = ""
         if context_original_keys:
-            # 在 Prompt 中使用原始 key，让模型看到未处理的上下文
             context_section = f"### 上文内容 ({source_language})\n<context>\n" + "\n".join(context_original_keys) + "\n</context>\n"
 
-        # b. 构建独立的术语表
+        # b. 构建适用于整个批次的术语表
         # --- 人物术语表 ---
         relevant_char_entries = []
         originals_to_include_in_glossary = set()
-        char_lookup = {} # 快速查找表
-
+        char_lookup = {}
         if character_dictionary:
-             # 填充查找表
              char_lookup = {entry.get('原文'): entry for entry in character_dictionary if entry.get('原文')}
-
-             # 第一次遍历：查找直接匹配和关联的主名称
              for entry in character_dictionary:
                  char_original = entry.get('原文')
                  if not char_original: continue
-
-                 # 使用预处理后的小写原文进行匹配检查
-                 if char_original.lower() in processed_original_text_lower:
+                 # 在合并后的批次文本中查找术语
+                 if char_original.lower() in combined_processed_lower:
                      originals_to_include_in_glossary.add(char_original)
                      main_name_ref = entry.get('对应原名')
                      if main_name_ref and main_name_ref in char_lookup:
@@ -101,10 +99,8 @@ def _translate_single_item_with_retry(
                      elif main_name_ref and main_name_ref not in char_lookup:
                           log.warning(f"人物词典不一致: 昵称 '{char_original}' 的对应原名 '{main_name_ref}' 未找到。")
 
-             # 第二次遍历：格式化选定的条目
-             # 定义列顺序，与 Prompt 描述一致
              char_cols = ['原文', '译文', '对应原名', '性别', '年龄', '性格', '口吻', '描述']
-             for char_original in sorted(list(originals_to_include_in_glossary)): # 排序使顺序稳定
+             for char_original in sorted(list(originals_to_include_in_glossary)):
                  entry = char_lookup.get(char_original)
                  if entry:
                      values = [str(entry.get(col, '')) for col in char_cols]
@@ -120,9 +116,8 @@ def _translate_single_item_with_retry(
         if entity_dictionary:
             for entry in entity_dictionary:
                 entity_original = entry.get('原文')
-                # 使用预处理后的小写原文进行匹配检查
-                if entity_original and entity_original.lower() in processed_original_text_lower:
-                    # 格式化：原文|译文|类别 - 描述
+                # 在合并后的批次文本中查找术语
+                if entity_original and entity_original.lower() in combined_processed_lower:
                     desc = entry.get('描述', '')
                     category = entry.get('类别', '')
                     category_desc = f"{category} - {desc}" if category and desc else category or desc
@@ -133,28 +128,28 @@ def _translate_single_item_with_retry(
         if relevant_entity_entries:
             entity_glossary_section = "### 事物术语参考 (格式: 原文|译文|类别 - 描述)\n" + "\n".join(relevant_entity_entries) + "\n"
 
-
-        # c. 构建最终 Prompt
-        numbered_text = f"1.{processed_original_text}" # 使用处理后的文本发送给模型
+        # c. 构建包含批次内所有文本的最终 Prompt
+        # 将批次内所有 PUA 处理后的文本格式化为带编号的列表
+        numbered_batch_text_lines = [f"{i+1}.{text}" for i, text in enumerate(processed_batch_texts)]
+        batch_text_for_prompt = "\n".join(numbered_batch_text_lines)
         timestamp_suffix = f"\n[timestamp: {datetime.datetime.now().timestamp()}]" if attempt > 0 else ""
 
         current_final_prompt = prompt_template.format(
             source_language=source_language,
             target_language=target_language,
-            character_glossary_section=character_glossary_section, # 独立的人物术语
-            entity_glossary_section=entity_glossary_section,       # 独立的事物术语
+            character_glossary_section=character_glossary_section,
+            entity_glossary_section=entity_glossary_section,
             context_section=context_section,
-            batch_text=numbered_text,
-            target_language_placeholder=target_language
+            batch_text=batch_text_for_prompt, # 使用格式化后的多行文本
+            # target_language_placeholder=target_language # prompt模板中可能不再需要这个
         ) + timestamp_suffix
 
         # d. 调用 API
-        log.debug(f"调用 API 翻译 (尝试 {attempt+1}/{max_retries+1}): '{original_key[:30]}...'")
+        log.debug(f"调用 API 翻译批次 (大小: {batch_size}, 尝试 {attempt+1}/{max_retries+1})")
         current_api_messages = [{"role": "user", "content": current_final_prompt}]
         current_api_kwargs = {}
         if "temperature" in config: current_api_kwargs["temperature"] = config["temperature"]
         if "max_tokens" in config: current_api_kwargs["max_tokens"] = config["max_tokens"]
-        # 可以在 config 中添加更多 API 参数，如 top_p, frequency_penalty 等
 
         success, current_response_content, error_message = api_client.chat_completion(
             model_name,
@@ -169,23 +164,14 @@ def _translate_single_item_with_retry(
         last_failed_response_content = current_response_content if success else f"[API错误: {error_message}]"
 
         if not success:
-            log.warning(f"API 调用失败 (尝试 {attempt+1}): {error_message} for '{original_key[:30]}...'")
-            last_failed_raw_translation = f"[API错误: {error_message}]"
+            log.warning(f"API 调用失败 (批次大小 {batch_size}, 尝试 {attempt+1}): {error_message}")
+            last_failed_raw_translation_block = f"[API错误: {error_message}]"
             last_validation_reason = f"API调用失败: {error_message}"
 
             # *** 记录详细错误到文件 ***
-            try:
-                with error_log_lock:
-                    with open(error_log_path, 'a', encoding='utf-8') as elog:
-                        elog.write(f"[{datetime.datetime.now().isoformat()}] API 调用失败 (尝试 {attempt+1}/{max_retries+1})\n")
-                        elog.write(f"  原文: {original_key}\n")
-                        elog.write(f"  失败原因: {error_message}\n")
-                        elog.write(f"  模型: {model_name}\n")
-                        elog.write(f"  API Kwargs: {json.dumps(current_api_kwargs, ensure_ascii=False)}\n")
-                        elog.write(f"  API Messages:\n{json.dumps(current_api_messages, indent=2, ensure_ascii=False)}\n")
-                        elog.write("-" * 20 + "\n")
-            except Exception as log_err:
-                log.error(f"写入错误日志失败 (API 错误): {log_err}")
+            _log_batch_error(error_log_path, error_log_lock, "API 调用失败", batch_original_keys,
+                             last_validation_reason, model_name, last_failed_api_kwargs,
+                             last_failed_api_messages, last_failed_response_content, attempt, max_retries)
 
             if attempt < max_retries:
                 time.sleep(1) # 简单等待后重试
@@ -193,132 +179,224 @@ def _translate_single_item_with_retry(
             else:
                 break # API 连续失败，跳出重试
 
-        # e. 提取翻译结果
-        # 逻辑保持不变：尝试提取 <textarea> 内容，去除 '1.' 前缀
-        match = re.search(r'<textarea>(.*?)</textarea>', current_response_content, re.DOTALL)
-        raw_translated_text = ""
+        # e. 提取并根据编号重组翻译结果
+        match = re.search(r'<textarea>(.*?)</textarea>', current_response_content, re.DOTALL | re.IGNORECASE) # 忽略大小写
+        raw_translated_block = ""
+        # 使用字典来存储按编号提取的翻译，键是行号(int)，值是该编号对应的完整翻译文本(str)
+        numbered_translations = {}
+        max_number_found = 0 # 追踪找到的最大编号
+
         if match:
-            translated_block = match.group(1).strip()
-            if translated_block.startswith("1."):
-                raw_translated_text = translated_block[2:]
-            else:
-                log.warning(f"API 响应 <textarea> 内未找到 '1.' 前缀: '{translated_block[:50]}...'")
-                raw_translated_text = translated_block
-        else:
-            log.warning(f"API 响应未找到 <textarea>，尝试直接使用响应 (去除 '1.'): '{current_response_content[:50]}...'")
-            cleaned_response = current_response_content.strip()
-            if cleaned_response.startswith("1."):
-                 raw_translated_text = cleaned_response[2:]
-            else:
-                 raw_translated_text = cleaned_response
+            raw_translated_block = match.group(1).strip()
+            raw_lines = raw_translated_block.split('\n') # 仍然先按行分割
 
-        last_failed_raw_translation = raw_translated_text # 记录本次原始译文
+            current_number = -1 # 当前正在收集文本的编号
+            current_text_parts = [] # 临时存储当前编号的文本片段
 
-        # f. 验证翻译
-        restored_text = text_processing.restore_pua_placeholders(raw_translated_text)
-        post_processed_text = text_processing.post_process_translation(restored_text, original_key)
+            for line in raw_lines:
+                # 注意：这里不strip()行首空格，保留模型可能输出的缩进，但在匹配编号时strip
+                stripped_line_for_match = line.lstrip() # 只移除左侧空格用于匹配编号
+                line_match = re.match(r'^(\d+)\.\s*(.*)', stripped_line_for_match) # 匹配 "数字." 开头
 
-        is_valid, current_validation_reason = text_processing.validate_translation(
-            original_key,
-            restored_text, # 验证时使用 PUA 恢复后的文本
-            post_processed_text # 也考虑后处理后的文本
-        )
+                if line_match:
+                    # 找到了一个新的编号行
+                    num = int(line_match.group(1))
+                    text_after_number = line_match.group(2)
 
-        if is_valid:
-            log.info(f"验证通过 (尝试 {attempt+1}): '{original_key[:30]}...' -> '{post_processed_text[:30]}...'")
-            return post_processed_text, 'success' # 成功，返回最终处理后的结果
-        else:
-            log.warning(f"验证失败 (尝试 {attempt+1}) for '{original_key[:30]}...'. 原因: {current_validation_reason}")
-            last_validation_reason = current_validation_reason
+                    # 1. 保存上一个编号收集到的文本 (如果存在)
+                    if current_number != -1:
+                        numbered_translations[current_number] = "\n".join(current_text_parts).rstrip() # 合并片段并移除末尾可能的多余换行
 
-            # *** 记录详细验证错误到文件 ***
-            try:
-                with error_log_lock:
-                    with open(error_log_path, 'a', encoding='utf-8') as elog:
-                        elog.write(f"[{datetime.datetime.now().isoformat()}] 翻译验证失败 (尝试 {attempt+1}/{max_retries+1})\n")
-                        elog.write(f"  原文: {original_key}\n")
-                        elog.write(f"  失败原因: {current_validation_reason}\n")
-                        elog.write(f"  模型: {model_name}\n")
-                        elog.write(f"  API Kwargs: {json.dumps(current_api_kwargs, ensure_ascii=False)}\n")
-                        elog.write(f"  原始 API 响应体:\n{current_response_content}\n")
-                        elog.write(f"  提取的原始译文: {raw_translated_text}\n")
-                        elog.write(f"  PUA恢复后译文: {restored_text}\n")
-                        elog.write(f"  最终处理后译文 (用于验证): {post_processed_text}\n")
-                        elog.write(f"  API Messages:\n{json.dumps(current_api_messages, indent=2, ensure_ascii=False)}\n")
-                        elog.write("-" * 20 + "\n")
-            except Exception as log_err:
-                log.error(f"写入错误日志失败 (验证错误): {log_err}")
+                    # 2. 开始收集新编号的文本
+                    current_number = num
+                    current_text_parts = [text_after_number] # 新的片段列表，包含当前行的文本 (编号之后的部分)
+                    max_number_found = max(max_number_found, current_number)
 
+                elif current_number != -1:
+                    # 没有找到新编号，并且我们正在收集某个编号的文本
+                    # 将当前行追加到当前编号的文本片段中 (保留原始行的格式)
+                    current_text_parts.append(line) # 直接添加原始行，保留其内部换行和格式
+
+                # else: 如果 current_number == -1 并且没匹配到编号，说明是 <textarea> 内但在第一个编号之前的内容，忽略。
+
+            # 保存最后一个编号收集到的文本
+            if current_number != -1:
+                numbered_translations[current_number] = "\n".join(current_text_parts).rstrip()
+
+        else: # API 响应未找到 <textarea>
+            log.warning(f"API 响应未找到 <textarea>，批次翻译可能失败。响应: '{current_response_content[:100]}...'")
+            raw_translated_block = current_response_content.strip()
+            last_validation_reason = "响应格式错误：未找到 <textarea>"
+            # 记录错误 (保持不变)
+            _log_batch_error(error_log_path, error_log_lock, "响应格式错误", batch_original_keys,
+                             last_validation_reason, model_name, last_failed_api_kwargs,
+                             last_failed_api_messages, last_failed_response_content, attempt, max_retries)
             if attempt < max_retries:
-                log.info(f"准备重试...")
+                continue # 重试
+            else:
+                break # 格式错误且达到重试次数
+
+        last_failed_raw_translation_block = raw_translated_block # 记录本次原始译文块
+
+        # f. 验证翻译结果 (基于编号重组后的结果)
+        # 检查是否成功提取了从 1 到 batch_size 的所有编号的翻译
+        missing_numbers = []
+        final_translated_lines = [] # 存储最终按顺序排列的、重组好的翻译行
+        all_numbers_found = True
+        for i in range(1, batch_size + 1):
+            if i not in numbered_translations:
+                missing_numbers.append(i)
+                all_numbers_found = False
+            else:
+                # 如果找到了编号，将其对应的文本添加到最终列表
+                final_translated_lines.append(numbered_translations[i])
+
+        if all_numbers_found:
+            # 找到了所有预期的编号
+            log.info(f"批次翻译验证通过 (所有 {batch_size} 个编号均找到，尝试 {attempt+1})")
+
+            # 现在 final_translated_lines 包含了 batch_size 条按顺序排列的翻译文本
+            # 可以进行后续处理（PUA恢复、后处理等）
+            temp_results = {}
+            valid_batch = True # 假设批次有效，除非后续单行验证失败
+            for i, original_key in enumerate(batch_original_keys):
+                # 从 final_translated_lines 获取对应的重组后的翻译文本
+                reconstructed_translation = final_translated_lines[i]
+
+                # 应用之前的处理流程
+                restored_text = text_processing.restore_pua_placeholders(reconstructed_translation)
+                post_processed_text = text_processing.post_process_translation(restored_text, original_key)
+
+                # --- 可选的单行精细验证 ---
+                is_line_valid, line_reason = text_processing.validate_translation(
+                    original_key, restored_text, post_processed_text
+                )
+                if not is_line_valid:
+                    log.warning(f"批次内单行验证失败 (尝试 {attempt+1}): '{original_key[:30]}...' 原因: {line_reason}")
+                    last_validation_reason = f"单行验证失败: {line_reason} (原文: {original_key[:30]}...)"
+                    valid_batch = False
+                    # 记录错误
+                    _log_batch_error(error_log_path, error_log_lock, "单行验证失败", batch_original_keys,
+                                     last_validation_reason, model_name, last_failed_api_kwargs,
+                                     last_failed_api_messages, last_failed_response_content, attempt, max_retries,
+                                     failed_item_index=i, raw_item_translation=reconstructed_translation)
+                    break # 失败则跳出
+
+                temp_results[original_key] = (post_processed_text, 'success')
+                # --- 可选验证结束 ---
+
+                # 如果没有启用单行验证，或者验证通过了
+                # temp_results[original_key] = (post_processed_text, 'success') # 这行移到可选验证内部或之后
+
+            if valid_batch: # 只有在所有行都验证通过时才返回成功 (如果启用了单行验证)
+                return temp_results # 成功，返回整个批次的结果
+
+            # 如果是因为单行验证失败跳出循环 (valid_batch is False)
+            if attempt < max_retries:
+                 log.info(f"批次内单行验证失败，准备重试批次...")
+                 continue # 重试整个批次
+            else:
+                 log.error(f"批次内单行验证失败，达到最大重试次数 ({max_retries+1})")
+                 break # 跳出重试，进入拆分或回退
+
+        else: # 没有找到所有编号 1 到 batch_size
+            log.warning(f"验证失败 (尝试 {attempt+1}): 未能从响应中提取所有预期的编号。")
+            log.warning(f"  期望编号: 1-{batch_size}")
+            log.warning(f"  实际找到的最大编号: {max_number_found}")
+            log.warning(f"  缺失的编号: {missing_numbers}")
+            log.warning(f"  原始响应块 (截断): {raw_translated_block[:200]}...") # 记录部分原始块帮助调试
+            last_validation_reason = f"响应缺少编号 (期望 1-{batch_size}, 缺失: {missing_numbers})"
+            # 记录错误
+            _log_batch_error(error_log_path, error_log_lock, "响应缺少编号", batch_original_keys,
+                             last_validation_reason, model_name, last_failed_api_kwargs,
+                             last_failed_api_messages, last_failed_response_content, attempt, max_retries)
+            if attempt < max_retries:
+                log.info(f"准备重试批次...")
                 continue
             else:
-                log.error(f"验证失败，达到最大重试次数 ({max_retries+1}) for '{original_key[:30]}...'")
+                log.error(f"验证失败，达到最大重试次数 ({max_retries+1})")
                 break # 跳出重试，进入拆分或回退
 
     # --- 重试循环结束 ---
 
-    # g. 尝试拆分翻译 (逻辑保持不变)
-    lines = original_key.split('\n')
-    if len(lines) > 1:
-        log.warning(f"翻译和重试均失败，尝试拆分: '{original_key[:30]}...'")
-        mid_point = (len(lines) + 1) // 2
-        first_half_key = '\n'.join(lines[:mid_point])
-        second_half_key = '\n'.join(lines[mid_point:])
+    # g. 尝试拆分批次 (如果重试都失败了)
+    current_batch_size = len(batch_original_keys)
+    # 只有在批次大小大于最小允许值时才尝试拆分
+    if current_batch_size > min_batch_size:
+        log.warning(f"批次翻译和重试均失败 (大小: {current_batch_size})，尝试拆分批次...")
+        mid_point = (current_batch_size + 1) // 2
+        first_half_keys = batch_original_keys[:mid_point]
+        second_half_keys = batch_original_keys[mid_point:]
 
-        # 递归调用，传递双词典
-        translated_first_half, first_status = _translate_single_item_with_retry(
-            first_half_key, context_items, character_dictionary, entity_dictionary, api_client,
-            config, error_log_path, error_log_lock
-        )
-        # 为第二部分构建上下文：包含原始上下文和第一部分的 key（及其翻译结果，但简单起见只用 key）
-        context_for_second_half = context_items + [(first_half_key, translated_first_half if first_status == 'success' else "")] # 使用翻译结果或空串
-        translated_second_half, second_status = _translate_single_item_with_retry(
-            second_half_key, context_for_second_half, character_dictionary, entity_dictionary, api_client,
+        log.info(f"拆分批次为: {len(first_half_keys)} 和 {len(second_half_keys)}")
+
+        # 递归调用处理第一个子批次
+        first_half_results = _translate_batch_with_retry(
+            first_half_keys, context_items, character_dictionary, entity_dictionary, api_client,
             config, error_log_path, error_log_lock
         )
 
-        combined_result = translated_first_half + '\n' + translated_second_half
+        # 递归调用处理第二个子批次 (上下文保持不变，仍然是原始批次之前的上下文)
+        second_half_results = _translate_batch_with_retry(
+            second_half_keys, context_items, character_dictionary, entity_dictionary, api_client,
+            config, error_log_path, error_log_lock
+        )
 
-        # 验证合并结果是否有效（例如，检查是否产生了原文）
-        # 如果合并结果不等于原始 key，即使部分失败，也视为拆分有效果
-        if combined_result != original_key:
-             log.info(f"拆分翻译完成，合并结果 for '{original_key[:30]}...'")
-             # 重新验证合并后的结果？（可选，增加复杂性）
-             # 这里简单地认为只要不回退到原文就算成功
-             return combined_result, 'success'
-        else:
-             log.error(f"拆分翻译后所有部分仍回退到原文，最终回退: '{original_key[:30]}...'")
-             # 继续下面的回退逻辑
+        # 合并两个子批次的结果
+        # 注意：子批次的结果字典可能包含 'fallback' 状态
+        combined_results = {**first_half_results, **second_half_results}
+        log.info(f"完成拆分批次处理 (原大小: {current_batch_size})")
+        return combined_results # 返回合并后的结果，无论子批次是否成功
 
-    # h. 无法拆分或拆分失败，执行最终回退
-    log.error(f"翻译、重试、拆分均失败或无法拆分，回退到原文: '{original_key[:50]}...'")
-    # 记录最终回退到错误日志
+    else:
+        # h. 无法拆分 (批次大小已达下限) 或 拆分后的单项仍然失败，执行最终回退
+        log.error(f"批次翻译失败，且无法进一步拆分 (当前大小: {current_batch_size}, 最小允许: {min_batch_size})。批内所有项目将回退到原文。")
+        # 记录最终回退到错误日志
+        _log_batch_error(error_log_path, error_log_lock, "最终回退(无法拆分或拆分后失败)", batch_original_keys,
+                         last_validation_reason, model_name, last_failed_api_kwargs,
+                         last_failed_api_messages, last_failed_response_content, max_retries, max_retries) # 用 max_retries 表示最终失败
+
+        # 为批次内所有 key 设置 fallback 状态
+        fallback_results = {key: (key, 'fallback') for key in batch_original_keys}
+        return fallback_results
+
+# --- 辅助函数：记录批次错误日志 ---
+def _log_batch_error(
+    error_log_path, error_log_lock, error_type, batch_keys, reason,
+    model_name, api_kwargs, api_messages, response_content,
+    attempt, max_retries, failed_item_index=None, raw_item_translation=None
+):
+    """记录批次处理中的错误到日志文件。"""
     try:
         with error_log_lock:
             with open(error_log_path, 'a', encoding='utf-8') as elog:
-                elog.write(f"[{datetime.datetime.now().isoformat()}] 翻译失败，使用原文回退 (所有尝试失败)\n")
-                elog.write(f"  原文: {original_key}\n")
-                elog.write(f"  最后失败原因: {last_validation_reason}\n")
-                if last_failed_raw_translation:
-                    elog.write(f"  最后尝试的原始译文: {last_failed_raw_translation}\n")
-                if last_failed_response_content:
-                     elog.write(f"  最后尝试的原始 API 响应体:\n{last_failed_response_content}\n")
-                if model_name:
-                     elog.write(f"  最后尝试的模型: {model_name}\n")
-                if last_failed_api_kwargs:
-                     elog.write(f"  最后尝试的 API Kwargs: {json.dumps(last_failed_api_kwargs, ensure_ascii=False)}\n")
-                if last_failed_api_messages:
-                     elog.write(f"  最后尝试的 API Messages:\n{json.dumps(last_failed_api_messages, indent=2, ensure_ascii=False)}\n")
+                elog.write(f"[{datetime.datetime.now().isoformat()}] {error_type} (尝试 {attempt+1}/{max_retries+1})\n")
+                elog.write(f"  批次大小: {len(batch_keys)}\n")
+                elog.write(f"  失败原因: {reason}\n")
+                if failed_item_index is not None:
+                    elog.write(f"  失败原文 (索引 {failed_item_index}): {batch_keys[failed_item_index]}\n")
+                    if raw_item_translation:
+                        elog.write(f"  失败原文的原始译文: {raw_item_translation}\n")
+                elog.write(f"  涉及原文 Keys (最多显示5条):\n")
+                for i, key in enumerate(batch_keys[:5]):
+                    elog.write(f"    - {key[:80]}...\n")
+                if len(batch_keys) > 5:
+                    elog.write(f"    - ... (等 {len(batch_keys) - 5} 个)\n")
+                elog.write(f"  模型: {model_name}\n")
+                if api_kwargs:
+                    elog.write(f"  API Kwargs: {json.dumps(api_kwargs, ensure_ascii=False)}\n")
+                if response_content:
+                    elog.write(f"  原始 API 响应体 (截断):\n{response_content[:500]}...\n")
+                # 可选：记录完整的 Prompt (可能很长)
+                if api_messages:
+                    elog.write(f"  API Messages:\n{json.dumps(api_messages, indent=2, ensure_ascii=False)}\n")
                 elog.write("-" * 20 + "\n")
     except Exception as log_err:
-        log.error(f"写入最终回退错误日志失败: {log_err}")
-
-    return original_key, 'fallback' # 返回原文作为最终结果
+        log.error(f"写入批次错误日志失败: {log_err}")
 
 # --- 线程工作函数 ---
 def _translation_worker(
-    batch_items,
+    batch_items, # 仍然接收 [(key, value), ...]
     context_items,
     character_dictionary, # 接收人物词典
     entity_dictionary,   # 接收事物词典
@@ -330,53 +408,48 @@ def _translation_worker(
     error_log_path,
     error_log_lock
 ):
-    """处理一个批次的翻译任务，调用 _translate_single_item_with_retry。"""
-    processed_count = 0
-    batch_results = {} # 存储当前批次的结果
+    """处理一个批次的翻译任务，调用 _translate_batch_with_retry。"""
+    batch_original_keys = [item[0] for item in batch_items] # 提取批次内的所有 keys
+    batch_size = len(batch_original_keys)
 
-    for i, (original_key, _) in enumerate(batch_items):
-        try:
-            # 构建当前条目的上下文（包含批内已处理的）
-            # context 使用 (key, value) 对，其中 value 是之前的翻译结果或原文
-            current_context = context_items + list(batch_results.items())[:i] # 使用当前批次已完成的结果作为上下文
+    if not batch_original_keys:
+        log.warning("工作线程收到空批次，跳过。")
+        return
 
-            # 调用单个条目的翻译逻辑，传递双词典
-            final_translation, status = _translate_single_item_with_retry(
-                original_key,
-                current_context,
-                character_dictionary, # 传递
-                entity_dictionary,   # 传递
-                api_client,
-                config,
-                error_log_path,
-                error_log_lock
-            )
-            batch_results[original_key] = (final_translation, status) # 存储元组
-        except Exception as item_err:
-            # 捕获单条处理中的意外错误
-            log.exception(f"处理条目时发生意外错误: {item_err} for '{original_key[:50]}...' - 将使用原文回退")
-            batch_results[original_key] = (original_key, 'fallback') # 回退并标记状态
-            # 记录到错误日志
-            try:
-                with error_log_lock:
-                    with open(error_log_path, 'a', encoding='utf-8') as elog:
-                        elog.write(f"[{datetime.datetime.now().isoformat()}] 处理条目时发生意外错误，使用原文回退:\n")
-                        elog.write(f"  原文: {original_key}\n")
-                        elog.write(f"  错误: {item_err}\n")
-                        elog.write("-" * 20 + "\n")
-            except Exception as log_err:
-                log.error(f"写入意外错误日志失败: {log_err}")
-        finally:
-            processed_count += 1
-            # 发送进度更新消息
-            progress_queue.put(1)
+    try:
+        # 直接调用批量翻译函数处理整个批次
+        batch_results = _translate_batch_with_retry(
+            batch_original_keys,
+            context_items, # 传递批次开始前的上下文
+            character_dictionary,
+            entity_dictionary,
+            api_client,
+            config,
+            error_log_path,
+            error_log_lock
+        )
 
-    # 批次处理完毕后，更新共享的 translated_data 字典
-    with results_lock:
-        translated_data.update(batch_results)
+        # 批次处理完毕后，更新共享的 translated_data 字典
+        with results_lock:
+            translated_data.update(batch_results)
 
-    log.debug(f"Worker 完成批次，处理 {processed_count} 个条目。")
+        # 发送进度更新消息，一次性发送整个批次的大小
+        progress_queue.put(batch_size)
+        log.debug(f"Worker 完成批次处理，包含 {batch_size} 个条目。")
 
+    except Exception as batch_err:
+        # 捕获批量处理函数本身抛出的未预料错误 (理论上应该在内部处理了)
+        log.exception(f"处理批次时发生意外顶层错误: {batch_err} - 批内所有项目将回退")
+        # 记录错误
+        _log_batch_error(error_log_path, error_log_lock, "工作线程意外错误", batch_original_keys,
+                         f"顶层异常: {batch_err}", config.get("model"), {}, [], "无响应体", 0, 0)
+
+        # 紧急回退：将批内所有 key 标记为 fallback
+        fallback_results = {key: (key, 'fallback') for key in batch_original_keys}
+        with results_lock:
+            translated_data.update(fallback_results)
+        # 仍然汇报进度，以便主线程不会卡住
+        progress_queue.put(batch_size)
 
 # --- 主任务函数 ---
 def run_translate(game_path, works_dir, translate_config, world_dict_config, message_queue): # 添加 world_dict_config
@@ -509,19 +582,23 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = []
-            for i in range(0, total_items, batch_size):
+            for i in range(0, total_items, batch_size): # 使用配置的 batch_size 分割任务
                 batch = original_items[i : i + batch_size]
+                if not batch: continue # 如果最后为空批次则跳过
+
                 # 上下文：取当前批次之前的所有原始条目（受 context_lines 限制）
                 context_start_index = max(0, i - config.get("context_lines", 10))
+                # 上下文传递原始的 (key, value) 对，因为 worker 内部的 _translate_batch_with_retry
+                # 会自己处理如何使用这些上下文（当前只用了 key）。
+                # 如果需要更精细的上下文（例如包含之前的翻译结果），这里的 context 构建需要调整。
                 context = original_items[context_start_index : i]
-                # 注意：上下文现在只包含原始 (key, value) 对，worker 内部会根据已翻译结果构建更精确的上下文
 
                 futures.append(executor.submit(
-                    _translation_worker,
+                    _translation_worker, # worker 现在处理整个批次
                     batch,
-                    context, # 传递原始上下文
-                    character_dictionary, # 传递人物词典
-                    entity_dictionary,   # 传递事物词典
+                    context,
+                    character_dictionary,
+                    entity_dictionary,
                     api_client,
                     config,
                     translated_data,
@@ -531,48 +608,55 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     error_log_lock
                 ))
 
-            # --- 监控进度 (逻辑保持不变) ---
+            # --- 监控进度 (修改累加逻辑) ---
             completed_count = 0
+            last_update_time = time.time()
+            update_interval = 0.5 # 每 0.5 秒更新一次状态栏，避免过于频繁
+
             while completed_count < total_items:
                 try:
-                    progress_queue.get(timeout=1.0) # 等待 worker 完成一个条目
-                    completed_count += 1
+                    # 等待 worker 完成一个批次，并返回该批次的大小
+                    items_in_batch = progress_queue.get(timeout=1.0)
+                    completed_count += items_in_batch # 累加完成的条目数
 
+                    current_time = time.time()
                     # 更新状态栏和进度条 (可以降低更新频率)
-                    if completed_count % (max(1, total_items // 100)) == 0 or completed_count == total_items: # 大约每 1% 更新一次
-                        progress_percent = (completed_count / total_items) * 100
-                        elapsed_time = time.time() - start_time
+                    if current_time - last_update_time >= update_interval or completed_count == total_items:
+                        progress_percent = (completed_count / total_items) * 100 if total_items > 0 else 0
+                        elapsed_time = current_time - start_time
                         est_total_time = (elapsed_time / completed_count) * total_items if completed_count > 0 else 0
                         remaining_time = max(0, est_total_time - elapsed_time)
 
                         status_msg = (f"正在翻译: {completed_count}/{total_items} ({progress_percent:.1f}%) "
-                                      f"- 预计剩余: {remaining_time:.0f}s")
+                                    f"- 预计剩余: {remaining_time:.0f}s")
                         message_queue.put(("status", status_msg))
                         message_queue.put(("progress", progress_percent))
+                        last_update_time = current_time
 
                 except queue.Empty:
-                    # 超时，检查是否有任务异常结束
+                    # 超时，检查是否有任务异常结束 (逻辑不变)
                     all_futures_done = all(f.done() for f in futures)
                     if all_futures_done:
-                        # 检查是否有异常
                         exceptions = [f.exception() for f in futures if f.exception()]
                         if exceptions:
-                             log.error(f"翻译过程中出现 {len(exceptions)} 个线程错误。第一个错误: {exceptions[0]}")
-                             # 可能需要更复杂的错误处理
-                        # 检查完成计数是否匹配
+                            log.error(f"翻译过程中出现 {len(exceptions)} 个线程错误。第一个错误: {exceptions[0]}")
                         if completed_count < total_items:
                             log.warning(f"所有线程已结束，但完成计数 ({completed_count}) 少于总数 ({total_items})。可能存在问题。强制完成。")
                             completed_count = total_items # 强制完成
                             message_queue.put(("progress", 100.0))
-                        break # 所有 future 完成，跳出循环
+                            # 确保最后状态更新
+                            final_status_msg = f"翻译处理完成: {completed_count}/{total_items}"
+                            message_queue.put(("status", final_status_msg))
+                        break
                 except Exception as monitor_err:
-                     log.error(f"进度监控出错: {monitor_err}")
-                     break # 避免监控错误导致卡死
+                    log.error(f"进度监控出错: {monitor_err}")
+                    break
 
-            # 确保最终状态是 100%
-            final_status_msg = f"翻译处理完成: {completed_count}/{total_items}"
-            message_queue.put(("status", final_status_msg))
-            message_queue.put(("progress", 100.0))
+            # 确保最终状态是 100% (如果循环正常结束)
+            if completed_count >= total_items:
+                final_status_msg = f"翻译处理完成: {completed_count}/{total_items}" # completed_count 可能略大于 total_items (如果最后一个批次超额?)，用 min(cc, ti) 更安全
+                message_queue.put(("status", final_status_msg))
+                message_queue.put(("progress", 100.0))
             message_queue.put(("log", ("normal", "所有翻译工作线程已完成。")))
 
         # --- 检查错误日志 (逻辑保持不变) ---
@@ -593,29 +677,38 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         explicit_fallback_count = 0
         missing_count = 0
 
-        for key, original_value in original_items: # 遍历原始项目以保持顺序
-             result_tuple = translated_data.get(key) # 从共享字典获取结果
+        # 确保原始值字典存在，用于回退
+        original_values_map = dict(original_items)
 
-             if result_tuple is None:
-                 log.error(f"条目 '{key[:50]}...' 的翻译结果丢失，将使用原文回退。")
-                 final_translated_data[key] = original_value # 使用原始 JSON 的 value 回退
-                 missing_count += 1
-             else:
-                 final_text, status = result_tuple
-                 if status == 'fallback':
-                     explicit_fallback_count += 1
-                     final_translated_data[key] = original_value # 显式回退也用原始 value
-                 else:
-                     final_translated_data[key] = final_text # 使用翻译结果
+        # 遍历原始 keys 保证顺序
+        for key in original_values_map.keys():
+            result_tuple = translated_data.get(key) # 从共享字典获取结果
+
+            if result_tuple is None:
+                # 这种情况理论上不应该发生，因为 worker 会确保所有 key 都有结果 (即使是 fallback)
+                log.error(f"严重问题：条目 '{key[:50]}...' 的翻译结果在最终收集中丢失！将使用原文回退。")
+                final_translated_data[key] = original_values_map[key] # 使用原始 JSON 的 value 回退
+                missing_count += 1
+            else:
+                final_text, status = result_tuple
+                if status == 'fallback':
+                    explicit_fallback_count += 1
+                    final_translated_data[key] = original_values_map[key] # 显式回退也用原始 value
+                elif status == 'success':
+                    final_translated_data[key] = final_text # 使用翻译结果
+                else:
+                    # 不期望的其他状态，也视为回退
+                    log.warning(f"条目 '{key[:50]}...' 收到意外状态 '{status}'，将使用原文回退。")
+                    final_translated_data[key] = original_values_map[key]
+                    explicit_fallback_count += 1
+
 
         if missing_count > 0:
-             log.error(f"严重问题：有 {missing_count} 个条目的翻译结果丢失！")
-             message_queue.put(("error", f"严重警告: {missing_count} 个翻译结果丢失，已强制回退。"))
+            log.error(f"严重问题：有 {missing_count} 个条目的翻译结果丢失！")
+            message_queue.put(("error", f"严重警告: {missing_count} 个翻译结果丢失，已强制回退。"))
 
         if explicit_fallback_count > 0:
-             message_queue.put(("log", ("warning", f"翻译完成，有 {explicit_fallback_count} 个条目最终使用了原文回退。")))
-             # 可以在状态栏提示，但避免覆盖最终的“完成”状态
-             # message_queue.put(("status", f"翻译完成 (有 {explicit_fallback_count} 个回退)"))
+            message_queue.put(("log", ("warning", f"翻译完成，有 {explicit_fallback_count} 个条目最终使用了原文回退。")))
 
 
         # --- 保存翻译后的 JSON (逻辑保持不变) ---

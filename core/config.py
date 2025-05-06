@@ -91,9 +91,12 @@ DEFAULT_TRANSLATE_CONFIG = {
 {batch_text}
 </textarea>
 
-### 请以textarea标签输出译文
+### 请严格按照下面的格式输出译文列表 ({target_language})，确保行数与原文列表一致
 <textarea>
-1.{target_language}文本
+1. 译文行1
+2. 译文行2
+...
+N. 译文行N
 </textarea>"""
 }
 
