@@ -162,6 +162,56 @@ def post_process_translation(text, original_text):
         log.debug(f"Adding {missing_count} missing '』' to translation: '{processed_text[:50]}...'")
         processed_text += '』' * missing_count
         
+
+    # 规则 4: 恢复前导换行符
+    original_leading_newlines = ""
+    for char_val in original_text: # 修正：直接迭代字符串字符
+        if char_val == '\n':
+            original_leading_newlines += '\n'
+        else:
+            break
+    current_text_without_leading_newlines = processed_text.lstrip('\n')
+    processed_text = original_leading_newlines + current_text_without_leading_newlines
+    
+    # 规则 5: 空格数量修正
+    original_lines = original_text.split('\n')
+    processed_lines = processed_text.split('\n')
+    
+    final_processed_lines = []
+    
+    num_original_lines = len(original_lines)
+    num_processed_lines = len(processed_lines)
+
+    for i in range(num_processed_lines):
+        current_p_line = processed_lines[i]
+        
+        # 获取对应的原文行，如果存在的话
+        o_line_exists = i < num_original_lines
+        current_o_line = original_lines[i] if o_line_exists else "" # 如果原文行不存在，视为空串
+
+        # a. 处理当前译文行行首的空格 (即上一行换行符之后的空格)
+        # 只有当不是整个文本的第一行时，行首空格才是在换行符“之后”
+        if i > 0:
+            if current_p_line.startswith(' ') and (not o_line_exists or not current_o_line.startswith(' ')):
+                # 如果译文行以空格开头，但原文对应行没有以空格开头 (或原文行不存在)
+                # 则移除译文行的行首空格
+                original_len = len(current_p_line)
+                current_p_line = current_p_line.lstrip(' ')
+                
+
+        # b. 处理当前译文行行尾的空格 (即下一行换行符之前的空格)
+        # 只有当不是整个文本的最后一行时，行尾空格才是在换行符“之前”
+        if i < num_processed_lines - 1:
+            if current_p_line.endswith(' ') and (not o_line_exists or not current_o_line.endswith(' ')):
+                # 如果译文行以空格结尾，但原文对应行没有以空格结尾 (或原文行不存在)
+                # 则移除译文行的行尾空格
+                original_len = len(current_p_line)
+                current_p_line = current_p_line.rstrip(' ')
+                
+        final_processed_lines.append(current_p_line)
+        
+    processed_text = '\n'.join(final_processed_lines)
+
     # log.debug(f"Post-processed: '{text[:50]}...' -> '{processed_text[:50]}...'")
     return processed_text
 
