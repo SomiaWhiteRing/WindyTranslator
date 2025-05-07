@@ -8,6 +8,7 @@ import threading
 import traceback
 import logging
 import time
+import csv
 from concurrent.futures import ThreadPoolExecutor
 
 # 导入 UI 层 (这里先假设 UI 类已定义，后面再实现)
@@ -57,6 +58,7 @@ class RPGTranslatorApp:
         # --- 初始化 UI ---
         # 将 self (App实例) 传递给 MainWindow，以便 UI 调用 App 的方法
         self.main_window = main_window.MainWindow(self.root, self, self.config)
+        self._check_and_update_ui_states() # <--- 新增: 初始检查
 
         # 根据加载的配置设置初始模式和窗口大小
         initial_mode = self.config.get('selected_mode', 'easy')
@@ -78,6 +80,7 @@ class RPGTranslatorApp:
                 self.log_message(f"已选择游戏目录: {path}")
                 self.update_status("游戏目录已选择，可以开始操作。")
                 # 清理旧状态？或者在任务开始时清理
+                self._check_and_update_ui_states() # <--- 新增: 路径改变后检查按钮状态
             else:
                 messagebox.showerror("路径无效", "选择的目录不是有效的 RPG Maker 2000/2003 游戏目录（未找到 RPG_RT.lmt）。", parent=self.root)
                 self.log_message("选择了无效的游戏目录。", "error")
@@ -187,6 +190,32 @@ class RPGTranslatorApp:
         elif task_name == 'edit_dictionary':
              self._open_dict_editor() # 直接调用内部方法
              return
+        
+        elif task_name == 'fix_fallback': # <--- 修改: 修正回退任务
+            fallback_csv_path = self._get_fallback_csv_path() # 获取路径
+            translated_json_path = self._get_translated_json_path() # 获取翻译 JSON 路径
+
+            if not fallback_csv_path or not translated_json_path:
+                messagebox.showerror("错误", "无法确定修正所需的文件路径 (可能是游戏路径未设置?)。", parent=self.root)
+                return
+
+            if self._check_fallback_csv_status(fallback_csv_path): # 检查文件状态
+                 from ui.fix_fallback_dialog import FixFallbackDialog # 导入对话框
+                 try:
+                    FixFallbackDialog(
+                        parent=self.root,
+                        app_controller=self, # 传递 App 实例
+                        fallback_csv_path=fallback_csv_path, # 传递 CSV 路径
+                        translated_json_path=translated_json_path # 传递 JSON 路径
+                    )
+                    self.log_message("修正回退对话框已打开。", "normal")
+                 except Exception as e:
+                    log.exception("打开修正回退对话框时出错。")
+                    messagebox.showerror("错误", f"无法打开修正回退对话框:\n{e}", parent=self.root)
+            else:
+                 messagebox.showinfo("提示", "没有检测到需要修正的回退项。", parent=self.root)
+                 self.log_message("没有需要修正的回退项。", "normal")
+            return # 处理完毕，直接返回
         elif task_name == 'configure_gemini':
              self._open_gemini_config() # 直接调用内部方法
              return
@@ -267,6 +296,47 @@ class RPGTranslatorApp:
         subfolder = self._get_work_subfolder()
         if not subfolder: return None
         return os.path.join(self.works_dir, subfolder, "translated")
+    
+    def _get_fallback_csv_path(self): # <--- 新增: 获取回退 CSV 路径
+        """获取当前游戏 fallback_corrections.csv 的完整路径。"""
+        translated_dir = self._get_translated_dir()
+        if not translated_dir: return None
+        # 使用 translate 任务中定义的相同文件名
+        return os.path.join(translated_dir, "fallback_corrections.csv")
+
+    def _get_translated_json_path(self): # <--- 新增: 获取翻译 JSON 路径
+        """获取当前游戏 translation_translated.json 的完整路径。"""
+        translated_dir = self._get_translated_dir()
+        if not translated_dir: return None
+        return os.path.join(translated_dir, "translation_translated.json")
+
+    def _check_fallback_csv_status(self, csv_path): # <--- 新增: 检查 CSV 状态
+        """检查回退 CSV 文件是否存在且有数据行（非表头）。"""
+        if not csv_path or not os.path.exists(csv_path):
+            return False # 文件不存在，按钮禁用
+        try:
+            with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                reader = csv.reader(f)
+                header = next(reader, None) # 读取表头
+                if header is None:
+                    return False # 空文件，禁用
+                # 检查是否存在下一行 (数据行)
+                first_data_row = next(reader, None)
+                return first_data_row is not None # 如果能读到数据行，则返回 True (启用)
+        except StopIteration: # 只有表头，没有数据行
+            return False # 只有表头，禁用
+        except Exception as e:
+            log.error(f"检查回退 CSV 文件状态时出错 ({csv_path}): {e}")
+            return False # 读取出错，视为禁用
+
+    def _check_and_update_ui_states(self): # <--- 新增: 统一检查和更新 UI
+        """检查依赖文件状态的 UI 元素并更新它们。"""
+        # 检查回退按钮状态
+        fallback_csv_path = self._get_fallback_csv_path()
+        enable_fix_button = self._check_fallback_csv_status(fallback_csv_path)
+        if hasattr(self, 'main_window') and self.main_window:
+            self.main_window.update_fix_fallback_button_state(enable_fix_button)
+        # 未来可以添加其他需要根据文件状态更新的 UI 逻辑
 
     def _find_translated_json_files(self):
         """查找当前游戏已翻译的 JSON 文件列表。"""
@@ -316,6 +386,7 @@ class RPGTranslatorApp:
                 # self.message_queue.put(("done", None))
                 # 在主线程中更新状态
                 self.root.after(0, lambda: self.set_processing_state(False))
+                self.root.after(10, self._check_and_update_ui_states) # <--- 新增: 任务完成后也检查状态
                 # 移除对线程的引用
                 self.current_task_thread = None
 

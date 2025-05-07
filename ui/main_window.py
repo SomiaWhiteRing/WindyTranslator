@@ -250,6 +250,20 @@ class MainWindow:
         result = selected_value.get()
         return result if result else None
 
+    
+    # --- 新增: 更新 Pro 面板修正按钮状态的中继方法 ---
+    def update_fix_fallback_button_state(self, enabled):
+        """
+        更新专业模式面板上的 '修正回退' 按钮的状态。
+        此方法由 App 控制器调用。
+        """
+        # 检查 ProModePanel 实例是否存在且控件仍然有效
+        if hasattr(self, 'pro_panel') and self.pro_panel.winfo_exists():
+            # 调用 ProModePanel 实例上的方法来实际更新按钮状态
+            self.pro_panel.update_fix_fallback_button_state(enabled)
+        else:
+            # 如果 ProModePanel 不可用（例如窗口正在关闭），则记录日志或忽略
+            print("尝试更新修正回退按钮状态，但 ProModePanel 不可用。")
 
     # --- 内部辅助方法 ---
 

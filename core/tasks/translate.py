@@ -42,12 +42,11 @@ def _translate_batch_with_retry(
         error_log_lock (threading.Lock): 错误日志文件写入锁。
 
     Returns:
-        dict[str, tuple[str, str]]: 返回一个字典，key 是原文 key，
-            value 是一个元组 (final_text, status)。
+        dict[str, tuple[str, str, str | None]]: 返回一个字典，key 是原文 key，
+            value 是一个元组 (final_text, status, failure_context)。
             final_text 是最终翻译结果或原文。
-            status 为 'success' 表示翻译成功（即使结果等于原文）。
-            status 为 'fallback' 表示所有尝试失败，显式回退到原文。
-            status 为 'split_failed' 仅在批次大小为1且失败时内部使用，外部看到的是 'fallback'。
+            status 为 'success' 或 'fallback'。
+            failure_context: 如果 status='fallback'，则包含导致回退的错误信息或最后一次尝试的（未后处理的）译文；否则为 None。
     """
     prompt_template = config.get("prompt_template", DEFAULT_TRANSLATE_CONFIG["prompt_template"])
     model_name = config.get("model", "")
@@ -67,6 +66,7 @@ def _translate_batch_with_retry(
     last_failed_api_kwargs = None
     last_failed_response_content = None
     last_validation_reason = "未知错误"
+    failure_context_for_batch = None # <--- 新增: 存储导致当前批次回退的原因
 
     # *** 步骤 1: 预处理批次内所有原文 (PUA 替换) ***
     processed_batch_texts = [text_processing.pre_process_text_for_llm(key) for key in batch_original_keys]
@@ -167,6 +167,7 @@ def _translate_batch_with_retry(
             log.warning(f"API 调用失败 (批次大小 {batch_size}, 尝试 {attempt+1}): {error_message}")
             last_failed_raw_translation_block = f"[API错误: {error_message}]"
             last_validation_reason = f"API调用失败: {error_message}"
+            failure_context_for_batch = f"[API调用失败: {error_message}]" # <--- 更新: 记录失败原因
 
             # *** 记录详细错误到文件 ***
             _log_batch_error(error_log_path, error_log_lock, "API 调用失败", batch_original_keys,
@@ -227,6 +228,7 @@ def _translate_batch_with_retry(
             log.warning(f"API 响应未找到 <textarea>，批次翻译可能失败。响应: '{current_response_content[:100]}...'")
             raw_translated_block = current_response_content.strip()
             last_validation_reason = "响应格式错误：未找到 <textarea>"
+            failure_context_for_batch = "[响应格式错误：未找到 <textarea>]" # <--- 更新: 记录失败原因
             # 记录错误 (保持不变)
             _log_batch_error(error_log_path, error_log_lock, "响应格式错误", batch_original_keys,
                              last_validation_reason, model_name, last_failed_api_kwargs,
@@ -259,6 +261,10 @@ def _translate_batch_with_retry(
             # 可以进行后续处理（PUA恢复、后处理等）
             temp_results = {}
             valid_batch = True # 假设批次有效，除非后续单行验证失败
+            # --- 存储单行验证失败时的译文 ---
+            failed_line_original_key = None
+            failed_line_raw_translation = None # <--- 新增: 存储失败行的原始（还原后）译文
+
             for i, original_key in enumerate(batch_original_keys):
                 # 从 final_translated_lines 获取对应的重组后的翻译文本
                 reconstructed_translation = final_translated_lines[i]
@@ -274,6 +280,9 @@ def _translate_batch_with_retry(
                 if not is_line_valid:
                     log.warning(f"批次内单行验证失败 (尝试 {attempt+1}): '{original_key[:30]}...' 原因: {line_reason}")
                     last_validation_reason = f"单行验证失败: {line_reason} (原文: {original_key[:30]}...)"
+                    failure_context_for_batch = restored_text # <--- 更新: 记录导致失败的还原后译文
+                    failed_line_original_key = original_key  # 记录失败的原文
+                    failed_line_raw_translation = reconstructed_translation # 记录失败的原始译文（API返回）
                     valid_batch = False
                     # 记录错误
                     _log_batch_error(error_log_path, error_log_lock, "单行验证失败", batch_original_keys,
@@ -282,7 +291,7 @@ def _translate_batch_with_retry(
                                      failed_item_index=i, raw_item_translation=reconstructed_translation)
                     break # 失败则跳出
 
-                temp_results[original_key] = (post_processed_text, 'success')
+                temp_results[original_key] = (post_processed_text, 'success', None)
                 # --- 可选验证结束 ---
 
                 # 如果没有启用单行验证，或者验证通过了
@@ -297,6 +306,8 @@ def _translate_batch_with_retry(
                  continue # 重试整个批次
             else:
                  log.error(f"批次内单行验证失败，达到最大重试次数 ({max_retries+1})")
+                 # 确保 failure_context_for_batch 存储的是导致失败的 restored_text
+                 failure_context_for_batch = failure_context_for_batch or "[单行验证失败，达到最大重试]" # 兜底
                  break # 跳出重试，进入拆分或回退
 
         else: # 没有找到所有编号 1 到 batch_size
@@ -306,6 +317,7 @@ def _translate_batch_with_retry(
             log.warning(f"  缺失的编号: {missing_numbers}")
             log.warning(f"  原始响应块 (截断): {raw_translated_block[:200]}...") # 记录部分原始块帮助调试
             last_validation_reason = f"响应缺少编号 (期望 1-{batch_size}, 缺失: {missing_numbers})"
+            failure_context_for_batch = f"[响应缺少编号: {missing_numbers}]" # <--- 更新: 记录失败原因
             # 记录错误
             _log_batch_error(error_log_path, error_log_lock, "响应缺少编号", batch_original_keys,
                              last_validation_reason, model_name, last_failed_api_kwargs,
@@ -315,6 +327,7 @@ def _translate_batch_with_retry(
                 continue
             else:
                 log.error(f"验证失败，达到最大重试次数 ({max_retries+1})")
+                failure_context_for_batch = failure_context_for_batch or "[响应缺少编号，达到最大重试]" # 兜底
                 break # 跳出重试，进入拆分或回退
 
     # --- 重试循环结束 ---
@@ -351,13 +364,14 @@ def _translate_batch_with_retry(
     else:
         # h. 无法拆分 (批次大小已达下限) 或 拆分后的单项仍然失败，执行最终回退
         log.error(f"批次翻译失败，且无法进一步拆分 (当前大小: {current_batch_size}, 最小允许: {min_batch_size})。批内所有项目将回退到原文。")
+        final_failure_context = failure_context_for_batch or "[最终回退，未知具体原因]" # <--- 获取最终的失败原因
         # 记录最终回退到错误日志
         _log_batch_error(error_log_path, error_log_lock, "最终回退(无法拆分或拆分后失败)", batch_original_keys,
                          last_validation_reason, model_name, last_failed_api_kwargs,
                          last_failed_api_messages, last_failed_response_content, max_retries, max_retries) # 用 max_retries 表示最终失败
 
         # 为批次内所有 key 设置 fallback 状态
-        fallback_results = {key: (key, 'fallback') for key in batch_original_keys}
+        fallback_results = {key: (key, 'fallback', final_failure_context) for key in batch_original_keys} # <--- 更新: 返回包含 failure_context 的元组
         return fallback_results
 
 # --- 辅助函数：记录批次错误日志 ---
@@ -440,12 +454,13 @@ def _translation_worker(
     except Exception as batch_err:
         # 捕获批量处理函数本身抛出的未预料错误 (理论上应该在内部处理了)
         log.exception(f"处理批次时发生意外顶层错误: {batch_err} - 批内所有项目将回退")
+        fallback_failure_context = f"[工作线程顶层异常: {batch_err}]" # <--- 记录异常信息
         # 记录错误
         _log_batch_error(error_log_path, error_log_lock, "工作线程意外错误", batch_original_keys,
                          f"顶层异常: {batch_err}", config.get("model"), {}, [], "无响应体", 0, 0)
 
         # 紧急回退：将批内所有 key 标记为 fallback
-        fallback_results = {key: (key, 'fallback') for key in batch_original_keys}
+        fallback_results = {key: (key, 'fallback', fallback_failure_context) for key in batch_original_keys} # <--- 更新: 包含 failure_context
         with results_lock:
             translated_data.update(fallback_results)
         # 仍然汇报进度，以便主线程不会卡住
@@ -467,6 +482,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
     start_time = time.time()
     character_dictionary = [] # 初始化人物词典列表
     entity_dictionary = []   # 初始化事物词典列表
+    # 定义回退修正 CSV 文件名
+    fallback_csv_filename = "fallback_corrections.csv" # <--- 新增
 
     try:
         message_queue.put(("status", "正在准备翻译任务..."))
@@ -481,6 +498,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         untranslated_json_path = os.path.join(untranslated_dir, "translation.json")
         translated_json_path = os.path.join(translated_dir, "translation_translated.json")
         error_log_path = os.path.join(translated_dir, "translation_errors.log")
+        # 构建回退 CSV 的完整路径
+        fallback_csv_path = os.path.join(translated_dir, fallback_csv_filename) # <--- 新增
 
         # 获取词典文件名
         char_dict_filename = world_dict_config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
@@ -674,6 +693,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         # --- 整理最终结果 (逻辑保持不变) ---
         final_translated_data = {}
+        fallback_items = [] # <--- 新增: 存储回退项信息 (原文 key, 失败上下文)
         explicit_fallback_count = 0
         missing_count = 0
 
@@ -689,11 +709,16 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 log.error(f"严重问题：条目 '{key[:50]}...' 的翻译结果在最终收集中丢失！将使用原文回退。")
                 final_translated_data[key] = original_values_map[key] # 使用原始 JSON 的 value 回退
                 missing_count += 1
+                # 丢失也算一种回退，但没有明确的上下文
+                fallback_items.append((key, "[结果丢失，强制回退]")) # <--- 新增: 记录丢失的回退
+                explicit_fallback_count += 1
             else:
-                final_text, status = result_tuple
+                # 解包三元组
+                final_text, status, failure_context = result_tuple # <--- 修改: 解包三元组
                 if status == 'fallback':
                     explicit_fallback_count += 1
                     final_translated_data[key] = original_values_map[key] # 显式回退也用原始 value
+                    fallback_items.append((key, failure_context or "[未知回退原因]")) # <--- 新增: 记录回退项和失败上下文
                 elif status == 'success':
                     final_translated_data[key] = final_text # 使用翻译结果
                 else:
@@ -701,6 +726,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     log.warning(f"条目 '{key[:50]}...' 收到意外状态 '{status}'，将使用原文回退。")
                     final_translated_data[key] = original_values_map[key]
                     explicit_fallback_count += 1
+                    fallback_items.append((key, f"[未知状态: {status}]")) # <--- 新增: 记录未知状态的回退
 
 
         if missing_count > 0:
@@ -710,6 +736,37 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         if explicit_fallback_count > 0:
             message_queue.put(("log", ("warning", f"翻译完成，有 {explicit_fallback_count} 个条目最终使用了原文回退。")))
 
+        # --- 生成或删除回退修正 CSV 文件 ---
+        message_queue.put(("log", ("normal", "检查并处理回退修正文件...")))
+        try:
+            if fallback_items:
+                # 如果有回退项，生成 CSV 文件
+                log.info(f"检测到 {len(fallback_items)} 个回退项，正在生成修正文件: {fallback_csv_path}")
+                # 确保目录存在
+                file_system.ensure_dir_exists(os.path.dirname(fallback_csv_path))
+                # 定义 CSV 表头
+                csv_header = ["原文", "最终尝试结果", "修正译文"]
+                # 准备数据行
+                csv_data = [csv_header] + [[key, context, ""] for key, context in fallback_items]
+
+                # 写入 CSV 文件
+                with open(fallback_csv_path, 'w', newline='', encoding='utf-8-sig') as f_csv:
+                    writer = csv.writer(f_csv, quoting=csv.QUOTE_ALL)
+                    writer.writerows(csv_data)
+                message_queue.put(("log", ("success", f"回退修正文件已生成: {fallback_csv_filename}")))
+            else:
+                # 如果没有回退项，删除旧的 CSV 文件（如果存在）
+                if os.path.exists(fallback_csv_path):
+                    log.info(f"没有回退项，正在删除旧的修正文件: {fallback_csv_path}")
+                    if file_system.safe_remove(fallback_csv_path):
+                        message_queue.put(("log", ("normal", f"旧的回退修正文件已删除。")))
+                    else:
+                        message_queue.put(("log", ("warning", f"删除旧的回退修正文件失败: {fallback_csv_path}")))
+                else:
+                    log.info("没有回退项，无需生成或删除修正文件。")
+        except Exception as csv_err:
+            log.exception(f"处理回退修正 CSV 文件时出错: {csv_err}")
+            message_queue.put(("log", ("error", f"处理回退修正文件 ({fallback_csv_filename}) 时出错: {csv_err}")))
 
         # --- 保存翻译后的 JSON (逻辑保持不变) ---
         message_queue.put(("log", ("normal", f"正在保存翻译结果到: {translated_json_path}")))
@@ -726,7 +783,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             status_message = "翻译完成"
             log_level = "success"
             if explicit_fallback_count > 0:
-                 result_message += f" (有 {explicit_fallback_count} 个回退)"
+                 result_message += f" (有 {explicit_fallback_count} 个回退，请查看 '{fallback_csv_filename}')" # <--- 修改: 提示查看 CSV
                  status_message += f" (有 {explicit_fallback_count} 个回退)"
                  log_level = "warning" # 如果有回退，使用警告级别
 

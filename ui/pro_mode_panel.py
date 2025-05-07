@@ -110,7 +110,7 @@ class ProModePanel(ttk.Frame):
         self.gemini_config_button = ttk.Button(row_frame_4, text="配置", width=config_button_width,
                                             command=lambda: self.app.start_task('configure_gemini'))
         self.gemini_config_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.edit_dict_button = ttk.Button(row_frame_4, text="编辑字典", width=10,
+        self.edit_dict_button = ttk.Button(row_frame_4, text="编辑字典", width=button_width + 2,
                                           command=lambda: self.app.start_task('edit_dictionary'))
         self.edit_dict_button.pack(side=tk.RIGHT, padx=padx_val)
         all_controls_list.extend([self.gen_dict_button, self.gemini_config_button, self.edit_dict_button])
@@ -124,6 +124,10 @@ class ProModePanel(ttk.Frame):
         self.deepseek_config_button = ttk.Button(row_frame_5, text="配置", width=config_button_width,
                                               command=lambda: self.app.start_task('configure_deepseek'))
         self.deepseek_config_button.pack(side=tk.RIGHT, padx=padx_val)
+        self.fix_fallback_button = ttk.Button(row_frame_5, text="修正回退", width=button_width + 2,
+                                              command=lambda: self.app.start_task('fix_fallback'),
+                                              state=tk.DISABLED) # <--- 初始禁用
+        self.fix_fallback_button.pack(side=tk.RIGHT, padx=padx_val) # <--- 添加按钮到布局
         all_controls_list.extend([self.translate_button, self.deepseek_config_button])
         row_idx += 1
 
@@ -159,6 +163,17 @@ class ProModePanel(ttk.Frame):
     def get_controls(self):
         """返回此面板上的所有可交互控件列表。"""
         return self.all_controls
+
+    # --- 新增: 更新修正回退按钮状态的方法 ---
+    def update_fix_fallback_button_state(self, enabled):
+        """根据传入的状态更新 '修正回退' 按钮的可用性。"""
+        new_state = tk.NORMAL if enabled else tk.DISABLED
+        if hasattr(self, 'fix_fallback_button') and self.fix_fallback_button.winfo_exists():
+            try:
+                self.fix_fallback_button.config(state=new_state)
+            except tk.TclError:
+                # 忽略控件可能已销毁的错误
+                pass
 
     # ... (update_rtp_button_text, _set_combobox_value, _on_encoding_change, _save_settings 方法保持不变, 但注意 _save_settings 中获取 Combobox 值的方式可能需要调整，因为现在是通过 self 实例属性访问) ...
     def update_rtp_button_text(self):
