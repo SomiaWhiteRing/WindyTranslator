@@ -10,15 +10,15 @@ log = logging.getLogger(__name__)
 # --- 默认世界观字典生成配置 ---
 DEFAULT_WORLD_DICT_CONFIG = {
     "api_key": "",
-    "model": "gemini-2.5-pro-exp-03-25",
+    "model": "gemini-2.5-pro-preview-03-25",
     "character_dict_filename": "character_dictionary.csv", # 人物词典文件名
     "entity_dict_filename": "entity_dictionary.csv",       # 事物词典文件名
 
-    # 默认人物提取 Prompt
+    # 更新人物提取 Prompt，添加口吻不能有假名残留的要求
     "character_prompt_template": """请分析提供的游戏文本，提取其中反复出现的【角色名称】和【角色昵称】。提取规则如下：
 1.  输出格式为严格的CSV，包含八列：原文,译文,对应原名,性别,年龄,性格,口吻,描述。
 2.  【对应原名】列：只有当该行是【昵称】时，才填写其对应的【角色名称】原文；如果是【角色名称】或无法确定对应关系，则此列留空。
-3.  【性别】、【年龄】、【性格】、【口吻】列：主要针对【角色名称】提取，尽可能根据文本推断；如果是【昵称】，这些列通常留空，除非昵称本身明确指向这些属性。
+3.  【性别】、【年龄】、【性格】、【口吻】列：主要针对【角色名称】提取，尽可能根据文本推断；如果是【昵称】，这些列通常留空，除非昵称本身明确指向这些属性；在【口吻】列中，如果包含了角色的口癖，则**必须**翻译成中文，不能有任何假名残留。
 4.  【描述】列：可以补充其他关键信息，例如角色的种族、身份、与其他角色的关系等。
 5.  确保每个字段都被双引号包围，字段内的逗号和换行符需要正确转义。
 6.  **重要：生成的任何字段内容本身应避免包含英文双引号(`"`)字符。如果必须表示引用或特定术语，请考虑使用中文引号（“ ”）、单引号（' '）或其他标记，或者直接在描述性文本中说明。**
@@ -54,18 +54,16 @@ DEFAULT_WORLD_DICT_CONFIG = {
 
 # --- 默认翻译配置 ---
 DEFAULT_TRANSLATE_CONFIG = {
-    "api_url": "https://api.deepseek.com/v1", # 默认 DeepSeek 官方 API 地址
+    "api_url": "https://api.x.ai/v1", # 更新为X.AI的API地址
     "api_key": "",
-    "model": "deepseek-chat", # 默认 DeepSeek Chat 模型
-    "batch_size": 10,
-    "context_lines": 10,
+    "model": "grok-3-latest", # 更新为grok模型
+    "batch_size": 8, # 从10改为8
+    "context_lines": 8, # 从10改为8
     "concurrency": 16,
-    "max_retries": 3, # 添加翻译重试次数配置
-    # "temperature": 0.7, # 可以添加温度等 API 参数
-    # "max_tokens": 4000, # 可以添加最大 token 限制
+    "max_retries": 3,
     "source_language": "日语",
     "target_language": "简体中文",
-    # 更新 Prompt 模板以使用独立的术语表占位符和详细的人物术语格式
+    # 更新Prompt模板
     "prompt_template": """你是一名专业的翻译家，你的任务是把{source_language}文本翻译成{target_language}，逐行翻译，不要合并，保留文本中序号、标记符、占位符、换行符等特殊内容，保持原来的格式。
 
 ### 翻译原则
@@ -100,7 +98,7 @@ DEFAULT_TRANSLATE_CONFIG = {
 {batch_text}
 </textarea>
 
-### 请严格按照下面的格式输出译文列表 ({target_language})，确保行数与原文列表一致
+### 请严格按照下面的格式，在<textarea>内输出译文列表 ({target_language})，确保行数与原文列表一致
 <textarea>
 1. 译文行1
 2. 译文行2
@@ -112,7 +110,7 @@ N. 译文行N
 请在生成最终输出前，检查以下几点：
 1.  译文中是否还有残留的日语假名？（目标：无）
 2.  是否精确保留了原文中所有的特殊代码（如 `\\N[1]`, `\\C[0]`, `\\>` 等）及其位置？（目标：是）
-3.  输出的编号行数是否与输入的编号行数完全一致？（目标：是）"""
+3.  输出的编号数是否与输入的编号数完全一致？（目标：是）"""
 }
 
 # --- 默认专业模式配置 ---
