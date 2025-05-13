@@ -70,9 +70,9 @@ class ProModePanel(ttk.Frame):
         self.rename_button = ttk.Button(row_frame_1, text="执行", width=button_width,
                                        command=lambda: self.app.start_task('rename'))
         self.rename_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.log_checkbutton = ttk.Checkbutton(row_frame_1, text="RTP修正", variable=self.rtp_fix_check,
-                                               command=self._save_settings)
-        self.log_checkbutton.pack(side=tk.RIGHT, padx=padx_val)
+        # self.log_checkbutton = ttk.Checkbutton(row_frame_1, text="RTP修正", variable=self.rtp_fix_check,
+        #                                        command=self._save_settings)
+        # self.log_checkbutton.pack(side=tk.RIGHT, padx=padx_val)
         all_controls_list.extend([self.rename_button, self.log_checkbutton])
         row_idx += 1
 

@@ -72,7 +72,9 @@ def install_rtp_files(target_game_dir, selected_rtp_zips):
 
                 for file in files:
                     src_file_path = os.path.join(root, file)
-                    dst_file_path = os.path.join(current_target_dir, file)
+                    # 复制时要将目标文件名从cp437转换为cp936
+                    file_name_cp936 = file.encode('cp437').decode('cp936')
+                    dst_file_path = os.path.join(current_target_dir, file_name_cp936)
 
                     if not os.path.exists(dst_file_path):
                         if file_system.safe_copy(src_file_path, dst_file_path):

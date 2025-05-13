@@ -117,7 +117,7 @@ N. 译文行N
 DEFAULT_PRO_MODE_SETTINGS = {
     "export_encoding": "932",   # 默认 Shift-JIS
     "import_encoding": "936",   # 默认 GBK
-    "rewrite_rtp_fix": True,    # 默认进行RTP修正
+    "rewrite_rtp_fix": False,    # 默认进行RTP修正（然后发现这个功能并没有什么卯月就让它变成黑历史吧
     "rtp_options": {            # RTP 默认选项
         "2000": True,
         "2000en": False,
