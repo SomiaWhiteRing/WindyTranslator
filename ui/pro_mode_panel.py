@@ -73,7 +73,8 @@ class ProModePanel(ttk.Frame):
         # self.log_checkbutton = ttk.Checkbutton(row_frame_1, text="RTP修正", variable=self.rtp_fix_check,
         #                                        command=self._save_settings)
         # self.log_checkbutton.pack(side=tk.RIGHT, padx=padx_val)
-        all_controls_list.extend([self.rename_button, self.log_checkbutton])
+        # all_controls_list.extend([self.rename_button, self.log_checkbutton])
+        all_controls_list.extend([self.rename_button])
         row_idx += 1
 
         # --- 2. 导出文本 ---
