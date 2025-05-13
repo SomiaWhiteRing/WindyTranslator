@@ -116,7 +116,7 @@ class RPGTranslatorApp:
         rtp_options = pro_config.get('rtp_options', {'2000': True, '2000en': False, '2003': False, '2003steam': False})
         export_encoding = pro_config.get('export_encoding', '932')
         import_encoding = pro_config.get('import_encoding', '936')
-        write_log_rename = pro_config.get('write_log_rename', True)
+        rewrite_rtp_fix = pro_config.get('rewrite_rtp_fix', True)
         world_dict_config = self.config.get('world_dict_config', {})
         translate_config = self.config.get('translate_config', {})
 
@@ -126,7 +126,7 @@ class RPGTranslatorApp:
             task_args = [game_path, rtp_options, self.message_queue]
         elif task_name == 'rename':
             task_func = rename.run_rename
-            task_args = [game_path, self.program_dir, write_log_rename, self.message_queue]
+            task_args = [game_path, self.program_dir, rewrite_rtp_fix, self.message_queue]
         elif task_name == 'export':
             task_func = export.run_export
             task_args = [game_path, export_encoding, self.message_queue]
@@ -181,7 +181,7 @@ class RPGTranslatorApp:
              task_args = [
                  game_path, self.program_dir, self.works_dir,
                  rtp_options, export_encoding, import_encoding,
-                 world_dict_config, translate_config, write_log_rename,
+                 world_dict_config, translate_config, rewrite_rtp_fix,
                  self.message_queue
              ]
         elif task_name == 'start_game':

@@ -15,7 +15,7 @@ def run_easy_flow(
     import_encoding, # import_task 需要
     world_dict_config, # dict_generation 需要
     translate_config, # translate 需要
-    write_log_rename, # rename 需要
+    rewrite_rtp_fix, # rename 需要
     message_queue
 ):
     """
@@ -30,7 +30,7 @@ def run_easy_flow(
         import_encoding (str): 导入编码。
         world_dict_config (dict): Gemini 配置。
         translate_config (dict): DeepSeek 配置。
-        write_log_rename (bool): 重命名是否写日志。
+        rewrite_rtp_fix (bool): 是否进行RTP修正。
         message_queue (queue.Queue): 消息队列。
     """
     current_step = 0
@@ -38,7 +38,7 @@ def run_easy_flow(
 
     steps = [
         {"name": "初始化", "func": initialize.run_initialize, "args": [game_path, rtp_options, message_queue]},
-        {"name": "重写文件名", "func": rename.run_rename, "args": [game_path, program_dir, write_log_rename, message_queue]},
+        {"name": "重写文件名", "func": rename.run_rename, "args": [game_path, program_dir, rewrite_rtp_fix, message_queue]},
         {"name": "导出文本", "func": export.run_export, "args": [game_path, export_encoding, message_queue]},
         {"name": "制作JSON文件", "func": json_creation.run_create_json, "args": [game_path, works_dir, message_queue]},
         {"name": "生成世界观字典", "func": dict_generation.run_generate_dictionary, "args": [game_path, works_dir, world_dict_config, message_queue]},

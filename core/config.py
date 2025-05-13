@@ -117,7 +117,7 @@ N. 译文行N
 DEFAULT_PRO_MODE_SETTINGS = {
     "export_encoding": "932",   # 默认 Shift-JIS
     "import_encoding": "936",   # 默认 GBK
-    "write_log_rename": True, # 默认输出重命名日志
+    "rewrite_rtp_fix": True,    # 默认进行RTP修正
     "rtp_options": {            # RTP 默认选项
         "2000": True,
         "2000en": False,
