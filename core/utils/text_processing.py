@@ -88,8 +88,7 @@ def pre_process_text_for_llm(text):
     processed_text = text.replace(r'\!', '\uE002') # \!
     processed_text = processed_text.replace(r'\.', '\uE005') # \.
     processed_text = processed_text.replace(r'\<', '\uE006') # \<
-    # 注意 > 的替换使用了负向前瞻 (?<!\\)，避免替换 \\>
-    processed_text = re.sub(r'(?<!\\)>', '\uE007', processed_text) # > (but not \>)
+    processed_text = processed_text.replace(r'\>', '\uE007') # \>
     processed_text = processed_text.replace(r'\|', '\uE008') # \|
     processed_text = processed_text.replace(r'\^', '\uE009') # \^
     # 再替换单字符模式
