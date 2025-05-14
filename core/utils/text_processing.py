@@ -111,7 +111,7 @@ def restore_pua_placeholders(text):
     processed_text = processed_text.replace('\uE004', '』')
     processed_text = processed_text.replace('\uE005', r'\.')
     processed_text = processed_text.replace('\uE006', r'\<')
-    processed_text = processed_text.replace('\uE007', '>') # 直接还原为 >
+    processed_text = processed_text.replace('\uE007', r'\>') 
     processed_text = processed_text.replace('\uE008', r'\|')
     processed_text = processed_text.replace('\uE009', r'\^')
     # log.debug(f"Restored PUA: '{text[:50]}...' -> '{processed_text[:50]}...'")

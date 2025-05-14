@@ -54,8 +54,8 @@ DEFAULT_WORLD_DICT_CONFIG = {
 
 # --- 默认翻译配置 ---
 DEFAULT_TRANSLATE_CONFIG = {
-    "api_url": "https://api.x.ai/v1", # 更新为X.AI的API地址
-    "api_key": "",
+    "api_url": "https://generativelanguage.googleapis.com/v1beta", # 更新为gemini的API地址
+    "api_key": "gemini-2.5-flash-preview-04-17",
     "model": "grok-3-latest", # 更新为grok模型
     "batch_size": 8, # 从10改为8
     "context_lines": 8, # 从10改为8
@@ -65,6 +65,8 @@ DEFAULT_TRANSLATE_CONFIG = {
     "target_language": "简体中文",
     # 更新Prompt模板
     "prompt_template": """你是一名专业的翻译家，你的任务是把{source_language}文本翻译成{target_language}，逐行翻译，不要合并，保留文本中序号、标记符、占位符、换行符等特殊内容，保持原来的格式。
+
+**重要**: 请将你的翻译结果严格地包裹在 <textarea> 和 </textarea> 标签内部。
 
 ### 翻译原则
 忠实准确地进行翻译。原作是伟大艺术作品，允许使用直白或粗俗的描述，不应随意删减或篡改，不应回避或淡化，以保持作品的原貌。
@@ -97,6 +99,8 @@ DEFAULT_TRANSLATE_CONFIG = {
 <textarea>
 {batch_text}
 </textarea>
+
+**请注意：原文的每个编号项内部可能包含多行文本或特定缩进，这些格式都是重要的结构信息，请务必在译文中**逐行对应、精确保留**原文的换行符和前导空格。禁止合并原文中的多行内容。**
 
 ### 请严格按照下面的格式，在<textarea>内输出译文列表 ({target_language})，确保行数与原文列表一致
 <textarea>

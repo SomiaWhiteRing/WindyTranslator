@@ -151,11 +151,34 @@ def _translate_batch_with_retry(
         if "temperature" in config: current_api_kwargs["temperature"] = config["temperature"]
         if "max_tokens" in config: current_api_kwargs["max_tokens"] = config["max_tokens"]
 
+        # --- 新增日志: 记录 API 请求详情 ---
+        log.debug(f"[Translate Task] Attempt {attempt+1}/{max_retries+1}: Calling API model '{model_name}' for batch size {batch_size}.")
+        # 记录 API URL，有助于区分不同的 API 源
+        if hasattr(api_client, 'base_url'): # DeepSeekClient 有这个属性
+             log.debug(f"[Translate Task]   API URL: {api_client.base_url}")
+        # 记录完整的 messages 和 kwargs，使用 json.dumps 美化输出且处理非 ASCII 字符
+        try:
+             log.debug(f"[Translate Task]   API Messages (full):\n{json.dumps(current_api_messages, indent=2, ensure_ascii=False)}")
+             log.debug(f"[Translate Task]   API Kwargs:\n{json.dumps(current_api_kwargs, indent=2, ensure_ascii=False)}")
+        except Exception as e:
+             log.warning(f"[Translate Task] Failed to log API messages/kwargs: {e}")
+        # ----------------------------------------
+
         success, current_response_content, error_message = api_client.chat_completion(
             model_name,
             current_api_messages,
             **current_api_kwargs
         )
+
+        # --- 新增日志: 记录 API 返回详情 ---
+        if success:
+            log.debug(f"[Translate Task] Attempt {attempt+1}: API call successful.")
+            # 记录原始的响应内容，这对于调试响应格式问题非常重要
+            log.debug(f"[Translate Task]   Raw response content (full):\n{current_response_content}")
+        else:
+            log.warning(f"[Translate Task] Attempt {attempt+1}: API call failed. Error: {error_message}")
+            # API错误信息已在后续逻辑 (_log_batch_error) 中记录到专门的错误日志文件，这里在主日志流中简要记录。
+        # ---------------------------------------
 
         # --- 记录本次尝试的请求和响应信息 ---
         last_failed_prompt = current_final_prompt

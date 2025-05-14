@@ -1,9 +1,10 @@
 # main.py
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import logging
 import sys
 import os
+import datetime
 
 # 导入主应用程序类
 from app import RPGTranslatorApp
@@ -38,9 +39,10 @@ def setup_logging():
             log_dir = None # 创建失败则不记录到文件
 
     if log_dir:
-        log_file = os.path.join(log_dir, "app.log")
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join(log_dir, f"app_{timestamp}.log")
         try:
-            file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8') # 追加模式
+            file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8') # 追加模式
             file_handler.setLevel(logging.DEBUG) # 文件记录更详细的 DEBUG 级别
             file_formatter = logging.Formatter(log_format)
             file_handler.setFormatter(file_formatter)
