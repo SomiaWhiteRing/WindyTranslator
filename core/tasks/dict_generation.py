@@ -8,6 +8,7 @@ from core.api_clients import gemini # 导入 Gemini API 客户端模块
 from core.utils import file_system, text_processing
 # 导入默认配置以获取默认文件名
 from core.config import DEFAULT_WORLD_DICT_CONFIG
+from . import apply_base_dictionary
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         entity_prompt_template = world_dict_config.get("entity_prompt_template", "")
         char_dict_filename = world_dict_config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
         entity_dict_filename = world_dict_config.get("entity_dict_filename", DEFAULT_WORLD_DICT_CONFIG["entity_dict_filename"])
+        enable_base_dict = world_dict_config.get("enable_base_dictionary", True)
 
         # --- 检查配置 ---
         if not api_key: raise ValueError("Gemini API Key 未配置。")
@@ -277,6 +279,26 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
             log.exception(f"生成事物词典阶段发生错误: {entity_err}")
             message_queue.put(("log", ("error", f"生成事物词典时出错: {entity_err}")))
             # 记录错误
+
+        # ==================================================
+        # === 阶段三：应用基础字典 (Base Dictionary) ===
+        # ==================================================
+        if enable_base_dict:
+            message_queue.put(("log", ("normal", "阶段 4.3: 检查并应用基础字典...")))
+            try:
+                apply_base_dictionary.run_apply_base_dictionary(
+                    game_path,
+                    works_dir,
+                    world_dict_config, # 传递完整的 world_dict_config
+                    message_queue
+                )
+
+            except Exception as apply_err:
+                log.exception(f"调用应用基础字典流程时发生错误: {apply_err}")
+                message_queue.put(("error", f"应用基础字典时出错: {apply_err}"))
+                message_queue.put(("status", "生成字典完成 (应用基础字典时出错)"))
+                message_queue.put(("done", None)) # 标记整个任务完成（即使子步骤失败）
+                return # 应用出错，直接返回，不再执行后续的原始 "done"
 
         # --- 最终总结 ---
         if character_dict_success and entity_dict_success:

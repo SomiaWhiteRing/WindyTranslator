@@ -19,9 +19,10 @@ from core import config as cfg # 重命名避免与 tkinter.config 冲突
 from core.tasks import (
     initialize, rename, export, json_creation,
     dict_generation, translate, json_release, import_task,
-    easy_mode_flow
+    easy_mode_flow, apply_base_dictionary
 )
-from core.utils import text_processing # 需要 sanitizename
+from core.utils import (text_processing, dictionary_manager)
+from ui.dict_editor import DictEditorWindow
 
 log = logging.getLogger(__name__) # 获取 logger 实例
 
@@ -89,22 +90,30 @@ class RPGTranslatorApp:
         """获取当前游戏路径。"""
         return self.game_path.get()
 
-    def start_task(self, task_name, mode='pro'):
+    def start_task(self, task_name, mode='pro', game_path=None):
         """
         根据任务名称启动相应的后台任务。
 
         Args:
             task_name (str): 任务的唯一标识符 (例如 'initialize', 'translate', 'easy_flow')。
             mode (str): 当前的操作模式 ('easy' 或 'pro')，用于更新 UI 状态。
+            game_path (str, optional): 从外部（如DictEditor）传递的游戏路径。
+                                      如果为 None，则使用 self.get_game_path()。
         """
         if self.is_processing:
             self.log_message("请等待当前操作完成。", "error")
             messagebox.showwarning("操作繁忙", "请等待当前操作完成后再试。", parent=self.root)
             return
 
-        game_path = self.get_game_path()
-        if not game_path and task_name != 'configure_gemini' and task_name != 'configure_deepseek' and task_name != 'select_rtp':
-             if not self._check_game_path_set(): return # 调用内部检查并显示错误
+        # --- 修改：优先使用传入的 game_path ---
+        current_game_path = game_path if game_path is not None else self.get_game_path()
+
+        # --- 修改：检查路径时使用 current_game_path ---
+        if not current_game_path and task_name not in [
+            'configure_gemini', 'configure_deepseek', 'select_rtp',
+            # 'open_base_dict_editor' 是直接方法调用，不在这里处理
+        ]:
+            if not self._check_game_path_set(current_game_path): return # <--- 传递 current_game_path
 
         # --- 准备任务参数 ---
         task_func = None
@@ -123,54 +132,49 @@ class RPGTranslatorApp:
         # 根据 task_name 选择任务函数和参数
         if task_name == 'initialize':
             task_func = initialize.run_initialize
-            task_args = [game_path, rtp_options, self.message_queue]
+            task_args = [current_game_path, rtp_options, self.message_queue]
         elif task_name == 'rename':
             task_func = rename.run_rename
-            task_args = [game_path, self.program_dir, rewrite_rtp_fix, self.message_queue]
+            task_args = [current_game_path, self.program_dir, rewrite_rtp_fix, self.message_queue]
         elif task_name == 'export':
             task_func = export.run_export
-            task_args = [game_path, export_encoding, self.message_queue]
+            task_args = [current_game_path, export_encoding, self.message_queue]
         elif task_name == 'create_json':
             task_func = json_creation.run_create_json
-            task_args = [game_path, self.works_dir, self.message_queue]
+            task_args = [current_game_path, self.works_dir, self.message_queue]
         elif task_name == 'generate_dictionary':
             task_func = dict_generation.run_generate_dictionary
-            task_args = [game_path, self.works_dir, world_dict_config, self.message_queue]
+            task_args = [current_game_path, self.works_dir, world_dict_config, self.message_queue]
         elif task_name == 'translate':
             task_func = translate.run_translate
-            task_args = [game_path, self.works_dir, translate_config, world_dict_config, self.message_queue]
+            task_args = [current_game_path, self.works_dir, translate_config, world_dict_config, self.message_queue]
         elif task_name == 'release_json':
-            # --- 释放 JSON 的特殊处理 ---
-            # 1. 查找可用的 JSON 文件
-            json_files = self._find_translated_json_files()
+            json_files = self._find_translated_json_files(current_game_path) # <--- 传递 current_game_path
             if not json_files:
-                 messagebox.showerror("错误", f"在 Works/{self._get_work_subfolder()}/translated 目录下未找到翻译后的 JSON 文件。", parent=self.root)
+                 messagebox.showerror("错误", f"在 Works/{self._get_work_subfolder(current_game_path)}/translated 目录下未找到翻译后的 JSON 文件。", parent=self.root)
                  return
-            # 2. 如果有多个，弹出选择框 (这部分 UI 交互应该在 App 层完成)
             selected_json_path = None
             if len(json_files) == 1:
                 selected_json_path = json_files[0]
             else:
-                # 调用 UI 提供的方法来选择文件 (MainWindow 需要实现 show_file_selection_dialog)
                 selected_filename = self.main_window.show_file_selection_dialog(
                     "选择翻译文件",
                     "请选择要导入的翻译 JSON 文件:",
                     [os.path.basename(p) for p in json_files]
                 )
                 if selected_filename:
-                    selected_json_path = os.path.join(self._get_translated_dir(), selected_filename)
+                    selected_json_path = os.path.join(self._get_translated_dir(current_game_path), selected_filename) # <--- 传递 current_game_path
                 else:
                     self.log_message("取消选择翻译文件。", "warning")
-                    return # 用户取消
-
+                    return
             if selected_json_path:
                 task_func = json_release.run_release_json
-                task_args = [game_path, self.works_dir, selected_json_path, self.message_queue]
+                task_args = [current_game_path, self.works_dir, selected_json_path, self.message_queue]
             else:
-                return # 没有有效路径
+                return
         elif task_name == 'import':
             task_func = import_task.run_import
-            task_args = [game_path, import_encoding, self.message_queue]
+            task_args = [current_game_path, import_encoding, self.message_queue]
         elif task_name == 'easy_flow':
              # 轻松模式需要检查 API Key 是否配置
              if not world_dict_config.get("api_key") or not translate_config.get("api_key"):
@@ -179,11 +183,15 @@ class RPGTranslatorApp:
 
              task_func = easy_mode_flow.run_easy_flow
              task_args = [
-                 game_path, self.program_dir, self.works_dir,
+                 current_game_path, self.program_dir, self.works_dir,
                  rtp_options, export_encoding, import_encoding,
                  world_dict_config, translate_config, rewrite_rtp_fix,
                  self.message_queue
              ]
+        # --- 新增：手动应用基础字典任务 ---
+        elif task_name == 'apply_base_dictionary_manual':
+            task_func = apply_base_dictionary.run_apply_base_dictionary
+            task_args = [current_game_path, self.works_dir, world_dict_config, self.message_queue]
         elif task_name == 'start_game':
              self._start_game() # 直接调用内部方法，不需后台线程
              return
@@ -191,7 +199,7 @@ class RPGTranslatorApp:
              self._open_dict_editor() # 直接调用内部方法
              return
         
-        elif task_name == 'fix_fallback': # <--- 修改: 修正回退任务
+        elif task_name == 'fix_fallback': # 修正回退任务
             fallback_csv_path = self._get_fallback_csv_path() # 获取路径
             translated_json_path = self._get_translated_json_path() # 获取翻译 JSON 路径
 
@@ -284,29 +292,28 @@ class RPGTranslatorApp:
 
     # --- 内部方法 ---
 
-    def _get_work_subfolder(self):
+    def _get_work_subfolder(self, game_path_override=None):
         """获取当前游戏对应的 Works 子目录名。"""
-        game_path = self.get_game_path()
-        if not game_path: return None
-        game_folder_name = text_processing.sanitize_filename(os.path.basename(game_path))
+        current_game_path = game_path_override if game_path_override is not None else self.get_game_path()
+        if not current_game_path: return None
+        game_folder_name = text_processing.sanitize_filename(os.path.basename(current_game_path))
         return game_folder_name or "UntitledGame"
 
-    def _get_translated_dir(self):
+    def _get_translated_dir(self, game_path_override=None):
         """获取当前游戏翻译文件存放目录的完整路径。"""
-        subfolder = self._get_work_subfolder()
+        subfolder = self._get_work_subfolder(game_path_override)
         if not subfolder: return None
         return os.path.join(self.works_dir, subfolder, "translated")
     
-    def _get_fallback_csv_path(self): # <--- 新增: 获取回退 CSV 路径
+    def _get_fallback_csv_path(self, game_path_override=None):
         """获取当前游戏 fallback_corrections.csv 的完整路径。"""
-        translated_dir = self._get_translated_dir()
+        translated_dir = self._get_translated_dir(game_path_override)
         if not translated_dir: return None
-        # 使用 translate 任务中定义的相同文件名
         return os.path.join(translated_dir, "fallback_corrections.csv")
 
-    def _get_translated_json_path(self): # <--- 新增: 获取翻译 JSON 路径
+    def _get_translated_json_path(self, game_path_override=None):
         """获取当前游戏 translation_translated.json 的完整路径。"""
-        translated_dir = self._get_translated_dir()
+        translated_dir = self._get_translated_dir(game_path_override)
         if not translated_dir: return None
         return os.path.join(translated_dir, "translation_translated.json")
 
@@ -338,9 +345,9 @@ class RPGTranslatorApp:
             self.main_window.update_fix_fallback_button_state(enable_fix_button)
         # 未来可以添加其他需要根据文件状态更新的 UI 逻辑
 
-    def _find_translated_json_files(self):
+    def _find_translated_json_files(self, game_path_override=None):
         """查找当前游戏已翻译的 JSON 文件列表。"""
-        translated_dir = self._get_translated_dir()
+        translated_dir = self._get_translated_dir(game_path_override)
         if not translated_dir or not os.path.isdir(translated_dir):
             return []
         try:
@@ -353,9 +360,10 @@ class RPGTranslatorApp:
             log.error(f"无法读取翻译目录 {translated_dir}: {e}")
             return []
 
-    def _check_game_path_set(self):
+    def _check_game_path_set(self, path_to_check=None):
         """检查游戏路径是否已设置，如果未设置则显示错误。"""
-        if not self.get_game_path():
+        current_path = path_to_check if path_to_check is not None else self.get_game_path()
+        if not current_path:
             self.log_message("请先选择有效的游戏目录。", "error")
             messagebox.showerror("错误", "请先选择一个有效的 RPG Maker 游戏目录。", parent=self.root)
             return False
@@ -446,12 +454,13 @@ class RPGTranslatorApp:
             # 无论如何，100ms 后再次检查队列
             self.root.after(100, self._process_messages)
 
-    def _start_game(self):
+    def _start_game(self, game_path_to_start=None):
         """启动游戏。"""
-        if not self._check_game_path_set(): return
-        game_path = self.get_game_path()
-        player_exe = os.path.join(game_path, "Player.exe") # EasyRPG Player
-        rpg_rt_exe = os.path.join(game_path, "RPG_RT.exe") # 原版
+        current_game_path = game_path_to_start if game_path_to_start is not None else self.get_game_path()
+        if not self._check_game_path_set(current_game_path): return
+
+        player_exe = os.path.join(current_game_path, "Player.exe") # EasyRPG Player
+        rpg_rt_exe = os.path.join(current_game_path, "RPG_RT.exe") # 原版
 
         exe_to_run = None
         if os.path.exists(player_exe):
@@ -466,30 +475,26 @@ class RPGTranslatorApp:
         self.log_message(f"尝试启动游戏: {exe_to_run}")
         try:
             # 使用 subprocess.Popen 在后台启动，设置工作目录为游戏目录
-            subprocess.Popen([exe_to_run], cwd=game_path)
+            subprocess.Popen([exe_to_run], cwd=current_game_path)
             self.log_message("游戏已启动（在单独进程中）。", "success")
         except Exception as e:
             log.exception(f"启动游戏失败: {e}")
             messagebox.showerror("启动失败", f"启动游戏时发生错误：\n{e}", parent=self.root)
             self.log_message(f"启动游戏失败: {e}", "error")
 
-    def _open_dict_editor(self):
+    def _open_dict_editor(self, game_path_to_edit=None):
         """打开世界观字典编辑器。"""
-        if not self._check_game_path_set(): return
+        
+        current_game_path = game_path_to_edit if game_path_to_edit is not None else self.get_game_path()
+        if not self._check_game_path_set(current_game_path): return
 
-        # Get the required arguments for DictEditorWindow
-        current_game_path = self.get_game_path() # Get the current game path string
-
-        # Import the window class (keep the import local if preferred)
-        from ui.dict_editor import DictEditorWindow
-
-        # Instantiate DictEditorWindow with the correct arguments
         try:
             DictEditorWindow(
-                parent=self.root,                # The parent window
-                app_controller=self,           # The App instance
-                works_dir=self.works_dir,        # The base Works directory path
-                game_path=current_game_path      # The currently selected game path
+                parent=self.root,
+                app_controller=self,
+                works_dir=self.works_dir,
+                game_path=current_game_path, # <--- 使用 current_game_path
+                is_base_dict=False # 明确这是编辑游戏特定字典
             )
             self.log_message("世界观字典编辑器已打开。", "normal")
         except Exception as e:
@@ -497,6 +502,23 @@ class RPGTranslatorApp:
             messagebox.showerror("错误", f"无法打开字典编辑器:\n{e}", parent=self.root)
             self.log_message(f"打开字典编辑器失败: {e}", "error")
 
+    def open_base_dict_editor(self): # <--- 新增方法
+        """打开基础字典编辑器。"""
+        try:
+            # DictEditorWindow 的 works_dir 和 game_path 在编辑基础字典时可以为 None 或不重要
+            # is_base_dict=True 会让 DictEditorWindow 使用基础字典路径
+            DictEditorWindow(
+                parent=self.root,
+                app_controller=self,
+                works_dir=self.works_dir, # 可以传递，但 DictEditor 内部不会用于基础字典
+                game_path=None,           # 基础字典不与特定游戏路径关联
+                is_base_dict=True
+            )
+            self.log_message("基础字典编辑器已打开。", "normal")
+        except Exception as e:
+            log.exception("打开基础字典编辑器时出错。")
+            messagebox.showerror("错误", f"无法打开基础字典编辑器:\n{e}", parent=self.root)
+            self.log_message(f"打开基础字典编辑器失败: {e}", "error")
 
     def _open_gemini_config(self):
         """打开 Gemini 配置窗口。"""

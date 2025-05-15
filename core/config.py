@@ -13,6 +13,7 @@ DEFAULT_WORLD_DICT_CONFIG = {
     "model": "gemini-2.5-pro-preview-03-25",
     "character_dict_filename": "character_dictionary.csv", # 人物词典文件名
     "entity_dict_filename": "entity_dictionary.csv",       # 事物词典文件名
+    "enable_base_dictionary": True, # <--- 启用基础字典
 
     # 更新人物提取 Prompt，添加口吻不能有假名残留的要求
     "character_prompt_template": """请分析提供的游戏文本，提取其中反复出现的【角色名称】和【角色昵称】。提取规则如下：

@@ -31,7 +31,7 @@ class WorldDictConfigWindow(tk.Toplevel):
 
         # --- 状态标志 ---
         self.initializing = True # 防止初始化期间触发 on_change
-        self.connection_tested_ok = False # 标记连接测试是否通过
+        self.connection_tested_ok = True # 标记连接测试是否通过
 
         # --- 窗口设置 ---
         self.title("世界观字典配置 (Gemini)")
@@ -47,7 +47,8 @@ class WorldDictConfigWindow(tk.Toplevel):
 
         # --- 控件变量 ---
         self.api_key_var = tk.StringVar(value=self.config.get("api_key", ""))
-        self.model_var = tk.StringVar(value=self.config.get("model", DEFAULT_WORLD_DICT_CONFIG["model"])) # 从默认配置取
+        self.model_var = tk.StringVar(value=self.config.get("model", DEFAULT_WORLD_DICT_CONFIG["model"]))
+        self.enable_base_dict_var = tk.BooleanVar(value=self.config.get("enable_base_dictionary", True))
         self.show_key_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="请先测试连接")
 
@@ -119,9 +120,24 @@ class WorldDictConfigWindow(tk.Toplevel):
         button_frame = ttk.Frame(frame)
         button_frame.grid(row=row_idx, column=0, columnspan=3, pady=10, sticky="e")
 
+
+        # --- 新增：基础字典相关控件，放在按钮组左侧 ---
+        self.enable_base_dict_checkbutton = ttk.Checkbutton(
+            button_frame,
+            text="启用基础字典",
+            variable=self.enable_base_dict_var,
+            command=self._on_config_change # 勾选变化也视为配置更改
+        )
+        self.enable_base_dict_checkbutton.pack(side=tk.LEFT, padx=5) # 增加右边距
+        self.edit_base_dict_button = ttk.Button(
+            button_frame,
+            text="编辑基础字典",
+            command=lambda: self.app.open_base_dict_editor() # 调用 App 的方法
+        )
+        self.edit_base_dict_button.pack(side=tk.LEFT, padx=5) # 增加右边距
         self.test_button = ttk.Button(button_frame, text="测试连接", command=self._test_connection)
         self.test_button.pack(side=tk.LEFT, padx=5)
-        self.save_button = ttk.Button(button_frame, text="保存", command=self._save_config, state=tk.DISABLED) # 初始禁用
+        self.save_button = ttk.Button(button_frame, text="保存", command=self._save_config)
         self.save_button.pack(side=tk.LEFT, padx=5)
         cancel_button = ttk.Button(button_frame, text="取消", command=self.destroy)
         cancel_button.pack(side=tk.LEFT, padx=5)
@@ -129,7 +145,6 @@ class WorldDictConfigWindow(tk.Toplevel):
         # --- 绑定事件 ---
         self.api_key_var.trace_add("write", self._on_config_change)
         self.model_var.trace_add("write", self._on_config_change)
-        # 绑定两个 Prompt 文本框的修改事件
         self.char_prompt_text.bind("<<Modified>>", self._on_prompt_modified)
         self.entity_prompt_text.bind("<<Modified>>", self._on_prompt_modified)
         self.protocol("WM_DELETE_WINDOW", self.destroy) # 处理关闭按钮
@@ -138,7 +153,7 @@ class WorldDictConfigWindow(tk.Toplevel):
         self.initializing = False
         # 检查初始状态
         if self.api_key_var.get():
-            self._set_status("配置已加载，请测试连接", "orange")
+            self._set_status("配置已加载", "green")
         else:
             self._set_status("请输入 API Key 并测试连接", "red")
 
@@ -159,13 +174,25 @@ class WorldDictConfigWindow(tk.Toplevel):
                 self._on_config_change() # 触发通用配置更改处理
 
     def _on_config_change(self, *args):
-        """配置发生变化时的处理。"""
+        """配置发生变化时的处理。只有API Key或Model变化时才重置测试状态。"""
         if self.initializing: return
-        # 任何配置更改（API Key, Model, 或任一 Prompt）都应重置测试状态并禁用保存
-        self.connection_tested_ok = False
-        if hasattr(self, 'save_button') and self.save_button.winfo_exists(): # 确保按钮存在
-            self.save_button.config(state=tk.DISABLED)
-        self._set_status("配置已更改，请重新测试连接", "orange")
+        # 检查API Key和Model是否发生变化
+        api_key = self.api_key_var.get().strip()
+        model = self.model_var.get().strip()
+        if not hasattr(self, '_last_api_key'):
+            self._last_api_key = api_key
+        if not hasattr(self, '_last_model'):
+            self._last_model = model
+        api_key_changed = (api_key != self._last_api_key)
+        model_changed = (model != self._last_model)
+        if api_key_changed or model_changed:
+            self.connection_tested_ok = False
+            if hasattr(self, 'save_button') and self.save_button.winfo_exists():
+                self.save_button.config(state=tk.DISABLED)
+            self._set_status("API Key 或模型已更改，请重新测试连接", "orange")
+            self._last_api_key = api_key
+            self._last_model = model
+        # 其他配置变化不影响连接测试状态
 
     def _set_status(self, message, color):
         """更新状态标签的文本和颜色。"""
@@ -233,6 +260,8 @@ class WorldDictConfigWindow(tk.Toplevel):
         # 保存两个 Prompt 的内容
         self.config["character_prompt_template"] = self.char_prompt_text.get("1.0", tk.END).strip()
         self.config["entity_prompt_template"] = self.entity_prompt_text.get("1.0", tk.END).strip()
+        # --- 新增：保存基础字典启用状态 ---
+        self.config["enable_base_dictionary"] = self.enable_base_dict_var.get()
         # 确保文件名也保存（如果之前没在配置里，会用默认值，这里保存确保一致性）
         self.config["character_dict_filename"] = self.config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
         self.config["entity_dict_filename"] = self.config.get("entity_dict_filename", DEFAULT_WORLD_DICT_CONFIG["entity_dict_filename"])
@@ -431,14 +460,6 @@ class TranslateConfigWindow(tk.Toplevel):
         if not self.initializing and self.prompt_text.edit_modified():
             self.prompt_text.edit_modified(False)
             self._on_config_change()
-
-    def _on_config_change(self, *args):
-        """Handle configuration changes."""
-        if self.initializing: return
-        self.connection_tested_ok = False
-        if hasattr(self, 'save_button') and self.save_button.winfo_exists():
-             self.save_button.config(state=tk.DISABLED)
-        self._set_status("配置已更改，请重新测试连接", "orange")
 
     def _set_status(self, message, color):
         """Update status label."""
