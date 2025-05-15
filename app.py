@@ -502,23 +502,26 @@ class RPGTranslatorApp:
             messagebox.showerror("错误", f"无法打开字典编辑器:\n{e}", parent=self.root)
             self.log_message(f"打开字典编辑器失败: {e}", "error")
 
-    def open_base_dict_editor(self): # <--- 新增方法
+    def open_base_dict_editor(self, parent_for_editor=None): # 添加可选参数
         """打开基础字典编辑器。"""
         try:
-            # DictEditorWindow 的 works_dir 和 game_path 在编辑基础字典时可以为 None 或不重要
-            # is_base_dict=True 会让 DictEditorWindow 使用基础字典路径
-            DictEditorWindow(
-                parent=self.root,
+            # 如果没有显式传递父窗口，则使用主窗口
+            actual_parent = parent_for_editor if parent_for_editor else self.root
+
+            editor = DictEditorWindow(
+                parent=actual_parent, # 使用实际的父窗口
                 app_controller=self,
-                works_dir=self.works_dir, # 可以传递，但 DictEditor 内部不会用于基础字典
-                game_path=None,           # 基础字典不与特定游戏路径关联
+                works_dir=self.works_dir,
+                game_path=None,
                 is_base_dict=True
             )
             self.log_message("基础字典编辑器已打开。", "normal")
+            return editor # 返回创建的窗口实例
         except Exception as e:
             log.exception("打开基础字典编辑器时出错。")
-            messagebox.showerror("错误", f"无法打开基础字典编辑器:\n{e}", parent=self.root)
+            messagebox.showerror("错误", f"无法打开基础字典编辑器:\n{e}", parent=actual_parent) # 使用 actual_parent
             self.log_message(f"打开基础字典编辑器失败: {e}", "error")
+            return None # 打开失败返回 None
 
     def _open_gemini_config(self):
         """打开 Gemini 配置窗口。"""

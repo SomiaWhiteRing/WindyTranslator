@@ -132,7 +132,7 @@ class WorldDictConfigWindow(tk.Toplevel):
         self.edit_base_dict_button = ttk.Button(
             button_frame,
             text="编辑基础字典",
-            command=lambda: self.app.open_base_dict_editor() # 调用 App 的方法
+            command=self._open_base_dict_editor_modal # 修改命令
         )
         self.edit_base_dict_button.pack(side=tk.LEFT, padx=5) # 增加右边距
         self.test_button = ttk.Button(button_frame, text="测试连接", command=self._test_connection)
@@ -156,6 +156,66 @@ class WorldDictConfigWindow(tk.Toplevel):
             self._set_status("配置已加载", "green")
         else:
             self._set_status("请输入 API Key 并测试连接", "red")
+
+    
+    def _open_base_dict_editor_modal(self):
+        """
+        以模态方式打开基础字典编辑器。
+        在编辑器打开期间，禁用当前配置窗口的交互。
+        """
+        # 禁用当前配置窗口的主要控件
+        self._set_controls_enabled(False)
+
+        # 调用 App 的方法打开编辑器，传递当前窗口作为父级，以便编辑器可以正确设置 transient
+        # App 的 open_base_dict_editor 方法需要能够接收这个父窗口
+        editor_window = self.app.open_base_dict_editor(parent_for_editor=self)
+
+        if editor_window:
+            # 等待编辑器窗口关闭
+            # wait_window 会阻塞，直到 editor_window 被销毁
+            self.wait_window(editor_window)
+
+        # 编辑器关闭后，重新启用当前配置窗口的控件
+        self._set_controls_enabled(True)
+        # 将焦点带回此窗口 (可选)
+        self.focus_set()
+        self.grab_set() # 重新获取事件焦点
+
+    def _set_controls_enabled(self, enabled):
+        """启用或禁用当前配置窗口的主要控件。"""
+        state = tk.NORMAL if enabled else tk.DISABLED
+        # 列出需要禁用/启用的控件
+        controls_to_manage = [
+            self.api_key_entry, self.show_key_var, # Key 和显示按钮
+            self.model_var, # 模型下拉框 (Combobox)
+            self.char_prompt_text, self.entity_prompt_text, # 两个 ScrolledText
+            self.enable_base_dict_checkbutton,
+            self.edit_base_dict_button, # 编辑基础字典按钮本身也应管理
+            self.test_button, self.save_button,
+            # 通常不禁用取消按钮，但根据需求可以加上
+        ]
+        # Combobox 需要特殊处理 state
+        if hasattr(self, 'model_var_combobox'): # 假设 model_var 是 Combobox
+             self.model_var_combobox.config(state='readonly' if enabled else tk.DISABLED)
+
+
+        for control in controls_to_manage:
+            if control and hasattr(control, 'winfo_exists') and control.winfo_exists():
+                try:
+                    if isinstance(control, (tk.Entry, ttk.Entry, tk.Text, scrolledtext.ScrolledText, ttk.Spinbox)):
+                        control.config(state=state)
+                    elif isinstance(control, (ttk.Button, ttk.Checkbutton)):
+                        control.config(state=state)
+                    elif isinstance(control, tk.StringVar) or isinstance(control, tk.BooleanVar) or isinstance(control, tk.IntVar):
+                        pass # 变量本身没有 state
+                    elif isinstance(control, ttk.Combobox):
+                         control.config(state='readonly' if enabled else tk.DISABLED)
+                    else:
+                        # 对于其他类型的控件，可能需要不同的处理方式
+                        # print(f"未处理的控件类型: {type(control)}")
+                        pass
+                except tk.TclError:
+                    pass # 忽略错误
 
     def _toggle_key_visibility(self):
         """切换 API Key 的显示状态。"""
