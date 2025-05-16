@@ -54,6 +54,8 @@ class RPGTranslatorApp:
         # --- 后台任务处理 ---
         self.message_queue = queue.Queue()
         self.thread_pool = ThreadPoolExecutor(max_workers=1) # 主任务通常只跑一个
+        # 新增：用于存储任务ID和对应编辑器实例的映射
+        self._editor_callbacks_registry = {}
         self.root.after(100, self._process_messages) # 启动消息循环
 
         # --- 初始化 UI ---
@@ -90,7 +92,7 @@ class RPGTranslatorApp:
         """获取当前游戏路径。"""
         return self.game_path.get()
 
-    def start_task(self, task_name, mode='pro', game_path=None):
+    def start_task(self, task_name, mode='pro', game_path=None, task_id_for_callback=None):
         """
         根据任务名称启动相应的后台任务。
 
@@ -99,10 +101,22 @@ class RPGTranslatorApp:
             mode (str): 当前的操作模式 ('easy' 或 'pro')，用于更新 UI 状态。
             game_path (str, optional): 从外部（如DictEditor）传递的游戏路径。
                                       如果为 None，则使用 self.get_game_path()。
+            task_id_for_callback (str, optional): 用于回调的唯一任务 ID，通常用于编辑器实例。
         """
         if self.is_processing:
             self.log_message("请等待当前操作完成。", "error")
-            messagebox.showwarning("操作繁忙", "请等待当前操作完成后再试。", parent=self.root)
+            parent_window_for_msg = self.root
+            # 如果此任务是由编辑器发起的，错误提示应相对于编辑器
+            if task_id_for_callback and task_id_for_callback in self._editor_callbacks_registry:
+                 editor = self._editor_callbacks_registry.get(task_id_for_callback)
+                 if editor and editor.winfo_exists():
+                     parent_window_for_msg = editor
+            messagebox.showwarning("操作繁忙", "请等待当前操作完成后再试。", parent=parent_window_for_msg)
+            # 如果是从编辑器调用的，并且操作被阻止，需要通知编辑器（可选，但更好）
+            if task_id_for_callback and task_id_for_callback in self._editor_callbacks_registry:
+                editor = self._editor_callbacks_registry.pop(task_id_for_callback) # 移除，因为任务未启动
+                if editor and editor.winfo_exists():
+                    editor.handle_apply_base_dict_result(False, "操作繁忙，任务未启动。")
             return
 
         # --- 修改：优先使用传入的 game_path ---
@@ -191,7 +205,10 @@ class RPGTranslatorApp:
         # --- 新增：手动应用基础字典任务 ---
         elif task_name == 'apply_base_dictionary_manual':
             task_func = apply_base_dictionary.run_apply_base_dictionary
-            task_args = [current_game_path, self.works_dir, world_dict_config, self.message_queue]
+            # task_id_for_callback 将通过 kwargs 传递给任务函数
+            if task_id_for_callback:
+                task_kwargs['task_id_for_callback'] = task_id_for_callback
+            task_args = [current_game_path, self.works_dir, world_dict_config.copy(), self.message_queue]
         elif task_name == 'start_game':
              self._start_game() # 直接调用内部方法，不需后台线程
              return
@@ -375,6 +392,10 @@ class RPGTranslatorApp:
         self.update_status(f"正在执行: {task_name}...")
         self._stop_requested = False # 重置停止标志
 
+        # 从 kwargs 中提取 task_id_for_callback，以便在异常时使用
+        # 实际的 task_id 会通过 kwargs 传递给 task_func
+        task_id_from_kwargs_for_exception_handling = kwargs.get('task_id_for_callback')
+
         def wrapper():
             task_start_time = time.time()
             try:
@@ -386,9 +407,18 @@ class RPGTranslatorApp:
                 # 发送错误消息到队列
                 self.message_queue.put(("error", f"任务 '{task_name}' 失败: {traceback.format_exc()}")) # 发送完整 traceback
                 self.message_queue.put(("status", f"{task_name} 执行失败"))
+                # --- 如果任务因异常而终止，并且它有关联的回调ID，则尝试通知编辑器 ---
+                if task_id_from_kwargs_for_exception_handling and task_id_from_kwargs_for_exception_handling in self._editor_callbacks_registry:
+                    editor_to_notify = self._editor_callbacks_registry.pop(task_id_from_kwargs_for_exception_handling, None)
+                    if editor_to_notify and editor_to_notify.winfo_exists():
+                        error_message_for_callback = f"任务 '{task_name}' 执行时发生意外错误: {e}"
+                        log.info(f"任务 {task_id_from_kwargs_for_exception_handling} (异常结束) 将通知编辑器。消息: {error_message_for_callback}")
+                        self.root.after(0, lambda w=editor_to_notify, msg=error_message_for_callback: w.handle_apply_base_dict_result(False, msg))
+                    elif editor_to_notify: # 编辑器存在但窗口已关闭
+                        log.info(f"任务 {task_id_from_kwargs_for_exception_handling} (异常结束) 的编辑器回调被跳过，因为窗口已关闭。")
             finally:
                 elapsed = time.time() - task_start_time
-                log.info(f"任务 '{task_name}' 线程执行完毕，耗时: {elapsed:.2f} 秒。")
+                log.info(f"任务 '{task_name}' (ID: {task_id_from_kwargs_for_exception_handling if task_id_from_kwargs_for_exception_handling else 'N/A'}) 线程执行完毕，耗时: {elapsed:.2f} 秒。")
                 # 确保发送 'done' 信号，即使任务内部忘记发送或出错中断
                 # 但为了避免重复发送，最好还是依赖任务自身发送
                 # self.message_queue.put(("done", None))
@@ -408,8 +438,38 @@ class RPGTranslatorApp:
             while True: # 处理队列中的所有当前消息
                 message = self.message_queue.get_nowait()
                 msg_type, content = message
+                
+                task_id_from_done_signal = None
+                callback_success = False
+                callback_message = ""
+                
+                if msg_type == "done":
+                    # 检查 content 是否是 (task_id, (success_bool, message_str)) 的格式
+                    if isinstance(content, tuple) and len(content) == 2 and isinstance(content[0], str):
+                        potential_task_id = content[0]
+                        if isinstance(content[1], tuple) and len(content[1]) == 2 and isinstance(content[1][0], bool):
+                            task_id_from_done_signal = potential_task_id
+                            callback_success, callback_message = content[1]
+                            log.info(f"收到带回调ID '{task_id_from_done_signal}' 的 'done' 信号。成功: {callback_success}, 消息: '{callback_message[:100]}...'")
+                        else:
+                            log.debug(f"收到普通 'done' 信号（content[0]是字符串但内容格式不符回调）: {content}")
+                    else:
+                        log.debug(f"收到普通 'done' 信号，内容: {content}")
+                
+                # 现在 task_id_from_done_signal 要么是 None，要么是从 "done" 消息中赋的值
+                if task_id_from_done_signal and task_id_from_done_signal in self._editor_callbacks_registry:
+                    editor_to_notify = self._editor_callbacks_registry.pop(task_id_from_done_signal, None)
+                    if editor_to_notify and editor_to_notify.winfo_exists():
+                        log.info(f"为任务 {task_id_from_done_signal} 执行编辑器回调。")
+                        self.root.after(0, lambda w=editor_to_notify, s=callback_success, m=callback_message: w.handle_apply_base_dict_result(s, m))
+                    elif editor_to_notify:
+                        log.info(f"任务 {task_id_from_done_signal} 的编辑器回调被跳过，因为窗口已关闭。")
+                    # 注意：如果 "done" 信号是用于回调的，我们可能不希望它再触发下面的通用 "done" 处理逻辑
+                    # 所以，这里在处理完回调后，可以考虑跳过后续的 msg_type == "done" 判断
+                    # 或者，确保回调的 "done" 信号不会再被后续的通用 "done" 处理。
+                    # 当前的结构，如果 task_id_from_done_signal 被赋值了，后续的 elif msg_type == "done" 不会执行。
 
-                if msg_type == "log":
+                elif msg_type == "log":
                     level, text = content
                     self.log_message(text, level)
                 elif msg_type == "status":
@@ -454,6 +514,34 @@ class RPGTranslatorApp:
             # 无论如何，100ms 后再次检查队列
             self.root.after(100, self._process_messages)
 
+    def start_task_for_editor_callback(self, task_name, game_path, editor_instance):
+        """
+        启动一个后台任务，并在任务完成后通过回调通知指定的编辑器实例。
+        """
+        if self.is_processing:
+            if editor_instance and editor_instance.winfo_exists():
+                messagebox.showwarning("操作繁忙", "请等待当前操作完成后再试。", parent=editor_instance)
+                # 直接调用编辑器的回调，告知操作未执行
+                editor_instance.handle_apply_base_dict_result(False, "另一个任务正在运行，操作未执行。")
+            else:
+                messagebox.showwarning("操作繁忙", "请等待当前操作完成后再试。", parent=self.root)
+            return
+
+        # 为这个任务和编辑器实例的组合生成一个唯一的ID
+        # 使用时间戳确保ID的唯一性，以防编辑器快速关闭再打开
+        unique_task_id_for_callback = f"{task_name}_{id(editor_instance)}_{time.time_ns()}"
+
+        # 注册回调：存储 task_id 和 editor_instance 的映射
+        self._editor_callbacks_registry[unique_task_id_for_callback] = editor_instance
+        log.info(f"已为任务 '{task_name}' (编辑器: {id(editor_instance)}) 注册回调, ID: {unique_task_id_for_callback}")
+
+        # 调用通用的 start_task 方法，并传递这个 unique_id
+        self.start_task(
+            task_name=task_name,
+            game_path=game_path, # 确保 game_path 被使用
+            task_id_for_callback=unique_task_id_for_callback # 传递生成的唯一ID
+        )
+    
     def _start_game(self, game_path_to_start=None):
         """启动游戏。"""
         current_game_path = game_path_to_start if game_path_to_start is not None else self.get_game_path()

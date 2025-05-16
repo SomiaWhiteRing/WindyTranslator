@@ -1,6 +1,6 @@
 # ui/dict_editor.py
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, scrolledtext
 import csv
 import os
 import logging
@@ -32,6 +32,10 @@ class DictEditorWindow(tk.Toplevel):
         self.app = app_controller
         self.is_base_dict = is_base_dict
         self.game_path = game_path # 保存游戏路径，供“应用基础字典”按钮使用
+        self._active_tab_before_disable = None # 新增：记录禁用前的活动tab
+
+        # --- 新增状态标志 ---
+        self._is_applying_base_dict = False
 
         window_title_prefix = "基础字典编辑器" if self.is_base_dict else f"游戏字典编辑器 - {text_processing.sanitize_filename(os.path.basename(game_path or '')) or '未命名游戏'}"
         self.title(window_title_prefix)
@@ -102,27 +106,25 @@ class DictEditorWindow(tk.Toplevel):
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=5)
 
-        add_button = ttk.Button(button_frame, text="添加行", command=self._add_row)
-        add_button.pack(side=tk.LEFT, padx=5)
+        self.add_button = ttk.Button(button_frame, text="添加行", command=self._add_row)
+        self.add_button.pack(side=tk.LEFT, padx=5)
 
         self.delete_button = ttk.Button(button_frame, text="删除选中行", command=self._delete_selected_row, state=tk.DISABLED)
         self.delete_button.pack(side=tk.LEFT, padx=5)
 
         # --- 修改：保存和关闭按钮放右边，应用按钮（如果显示）放它们左边 ---
-        cancel_button = ttk.Button(button_frame, text="关闭", command=self.destroy)
-        cancel_button.pack(side=tk.RIGHT, padx=5)
+        self.cancel_button = ttk.Button(button_frame, text="关闭", command=self.destroy)
+        self.cancel_button.pack(side=tk.RIGHT, padx=5)
 
-        save_button = ttk.Button(button_frame, text="保存全部", command=self._save_data)
-        save_button.pack(side=tk.RIGHT, padx=5)
+        self.save_button = ttk.Button(button_frame, text="保存全部", command=self._on_apply_base_dictionary_clicked)
+        self.save_button.pack(side=tk.RIGHT, padx=5)
 
         # --- 新增：“应用基础字典”按钮，仅在非基础字典编辑时显示 ---
         if not self.is_base_dict:
             self.apply_base_dict_button = ttk.Button(
                 button_frame,
                 text="应用基础字典",
-                command=lambda: self.app.start_task('apply_base_dictionary_manual', game_path=self.game_path)
-                # 使用新的任务名区分自动和手动，或者在 app.start_task 中判断来源
-                # 这里用 game_path=self.game_path 传递当前游戏路径
+                command=self._on_apply_base_dictionary_clicked # 修改命令
             )
             self.apply_base_dict_button.pack(side=tk.RIGHT, padx=10) # 放在保存左边，加点间距
 
@@ -201,13 +203,6 @@ class DictEditorWindow(tk.Toplevel):
             }
         else:
             return None
-    
-    # _create_empty_dict_file, _load_data, _load_single_table, _save_data, _save_single_table,
-    # _add_row, _delete_selected_row, _update_delete_button_state, _on_tab_changed,
-    # _on_selection_change, _on_cell_double_click, _start_edit, _commit_edit,
-    # _cancel_edit, _destroy_edit_widget, _reset_edit_state 方法大部分保持不变，
-    # 只需要确保它们使用的是 self.character_headers_override 和 self.entity_headers_override
-    # 以及正确的 self.character_dict_path, self.entity_dict_path
 
     # --- 示例：_create_empty_dict_file 修改 ---
     def _create_empty_dict_file(self, file_path, headers): # headers 参数现在来自 self.xxx_headers_override
@@ -322,21 +317,25 @@ class DictEditorWindow(tk.Toplevel):
         self._update_delete_button_state()
 
     def _save_data(self):
-        """将两个 Treeview 表格中的数据分别保存回对应的 CSV 文件。"""
+        """将两个 Treeview 表格中的数据分别保存回对应的 CSV 文件。
+        返回 True 如果所有部分都成功保存，否则 False。
+        """
         if self._edit_widget:
             self._commit_edit()
-            if self._edit_widget:
+            if self._edit_widget: # 检查 commit_edit 是否成功清除了编辑控件
                 messagebox.showwarning("保存提示", "请先完成或取消当前单元格的编辑。", parent=self)
-                return
+                return False # 保存未完成
 
         char_saved = self._save_single_table(self.character_table)
         entity_saved = self._save_single_table(self.entity_table)
 
-        if char_saved and entity_saved:
+        all_saved = char_saved and entity_saved
+
+        # 日志记录部分保持不变
+        if all_saved:
             log.info("人物和事物词典均已保存。")
-            # --- 修改：只有在编辑游戏特定字典时才尝试通知主界面 ---
             if not self.is_base_dict and hasattr(self.app, 'log_message'):
-                self.app.log_message("世界观字典已全部保存。", "success")
+                 self.app.log_message("世界观字典已全部保存。", "success")
         elif char_saved:
             log.warning("仅人物词典已保存，事物词典保存失败。")
             if not self.is_base_dict and hasattr(self.app, 'log_message'):
@@ -347,6 +346,8 @@ class DictEditorWindow(tk.Toplevel):
                  self.app.log_message("事物词典已保存，但人物词典保存失败。", "warning")
         else:
              log.error("人物和事物词典均保存失败。")
+        
+        return all_saved # 返回整体保存状态
 
     def _add_row(self):
         """在当前活动的表格末尾添加一个空行。"""
@@ -571,3 +572,127 @@ class DictEditorWindow(tk.Toplevel):
         self._edit_widget_type = None
         self._editing_table = None
         log.debug("Edit state reset.")
+    
+    def _on_save_data_clicked(self):
+        """当用户点击“保存全部”按钮时调用。"""
+        if self._save_data(): # _save_data 现在应返回布尔值
+            self.app.log_message("字典数据已手动保存。", "success")
+            # 可以选择性地在这里也弹出一个showinfo，如果需要的话
+            # messagebox.showinfo("保存成功", "所有字典数据已保存。", parent=self)
+        else:
+            # _save_data 内部应该已经弹出了错误框
+            self.app.log_message("保存字典数据时发生错误或部分失败。", "warning")
+    
+    def _get_interactive_controls(self):
+        """返回编辑器窗口中需要管理的交互控件列表。"""
+        controls = [
+            self.add_button, self.delete_button,
+            self.save_button, self.cancel_button, # 通常不禁用关闭按钮
+            self.character_table, self.entity_table,
+            self.notebook
+        ]
+        if hasattr(self, 'apply_base_dict_button') and self.apply_base_dict_button.winfo_exists():
+            controls.append(self.apply_base_dict_button)
+        return controls
+    
+    def _set_controls_enabled_for_apply(self, enabled):
+        """在应用基础字典期间启用/禁用编辑器控件。"""
+        state = tk.NORMAL if enabled else tk.DISABLED
+        notebook_tab_state = tk.NORMAL if enabled else 'disabled'
+
+        if not enabled:
+            # 禁用前记录当前选中的标签页ID (注意，不是索引)
+            try:
+                self._active_tab_before_disable = self.notebook.select()
+            except tk.TclError:
+                self._active_tab_before_disable = None # 如果获取失败
+
+        for control in self._get_interactive_controls():
+            if control and hasattr(control, 'winfo_exists') and control.winfo_exists():
+                try:
+                    if control == self.notebook:
+                        for i in range(len(control.tabs())):
+                            try:
+                                control.tab(i, state=notebook_tab_state)
+                            except tk.TclError: pass
+                        
+                        # --- 新增：重新启用后，如果之前有记录的活动tab，则尝试恢复 ---
+                        if enabled and self._active_tab_before_disable:
+                            try:
+                                # 确保 Notebook 自身是活动的，否则 select 可能无效或行为异常
+                                if self.notebook.winfo_exists() and self.notebook.instate(['!disabled']):
+                                    self.notebook.select(self._active_tab_before_disable)
+                                    log.debug(f"重新选中 Notebook tab: {self._active_tab_before_disable}")
+                            except tk.TclError as e:
+                                log.warning(f"重新选中 Notebook tab失败: {e}. 当前选中的tab: {self.notebook.select() if self.notebook.winfo_exists() else 'N/A'}")
+                                # 如果恢复失败，尝试选中第一个tab作为回退
+                                try:
+                                    if len(self.notebook.tabs()) > 0:
+                                        self.notebook.select(0)
+                                except tk.TclError:
+                                    pass # 最后的尝试也失败了
+                            finally:
+                                self._active_tab_before_disable = None # 清理记录
+                                
+                    elif control == self.character_table or control == self.entity_table:
+                        control.configure(takefocus=enabled)
+                        # 禁用/启用双击编辑和删除键绑定
+                        if enabled:
+                            control.bind('<Double-1>', self._on_cell_double_click)
+                            control.bind('<Delete>', self._delete_selected_row)
+                        else:
+                            control.unbind('<Double-1>')
+                            control.unbind('<Delete>')
+                    else:
+                        control.configure(state=state)
+                except tk.TclError:
+                    pass # 忽略控件可能已销毁的错误
+                
+    def _on_apply_base_dictionary_clicked(self):
+        """处理“应用基础字典”按钮点击事件。"""
+        if self.is_base_dict:
+            return
+        if self._is_applying_base_dict: # 防止重复点击
+            messagebox.showinfo("提示", "正在应用基础字典，请稍候。", parent=self)
+            return
+
+        if not self._save_data(): # 调用修改后的 _save_data，它现在返回 True/False
+            messagebox.showwarning("保存失败", "应用基础字典前未能成功保存当前更改，操作已取消。", parent=self)
+            return
+        self.app.log_message("应用基础字典前，当前字典已自动保存。", "normal")
+
+        self._is_applying_base_dict = True
+        self._set_controls_enabled_for_apply(False) # 禁用控件
+        original_title = self.title()
+        self.title(f"{original_title} - 正在应用基础字典...") # 修改标题提示
+
+        # 请求 App 启动任务，并传递自身实例用于回调
+        self.app.start_task_for_editor_callback( # 调用 App 的新方法
+            task_name='apply_base_dictionary_manual',
+            game_path=self.game_path,
+            editor_instance=self
+        )
+
+    def handle_apply_base_dict_result(self, success, message):
+        """
+        由 App 在 'apply_base_dictionary_manual' 任务完成后调用。
+        """
+        # 恢复窗口标题
+        if self.title().endswith(" - 正在应用基础字典..."):
+            self.title(self.title().replace(" - 正在应用基础字典...", ""))
+
+        self._load_data() # 重新加载表格数据以刷新显示
+
+        self._set_controls_enabled_for_apply(True) # 重新启用控件
+        self._is_applying_base_dict = False
+
+        # 弹窗提示结果
+        if success:
+            messagebox.showinfo("操作完成", f"应用基础字典已完成。\n{message}", parent=self)
+        else:
+            messagebox.showerror("操作失败", f"应用基础字典时发生错误。\n{message}\n请检查主窗口日志获取详细信息。", parent=self)
+        
+        self.focus_set() # 尝试将焦点带回此窗口
+        self.lift()      # 尝试将窗口置于顶层
+
+

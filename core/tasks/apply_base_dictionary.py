@@ -35,7 +35,7 @@ def _count_term_in_json_originals(json_path, term):
         return 0 # 出错则返回0
     return count
 
-def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_queue):
+def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_queue, **kwargs):
     """
     应用基础字典到游戏特定的生成字典。
 
@@ -44,9 +44,18 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
         works_dir (str): Works 工作目录的根路径。
         world_dict_config (dict): 包含世界观字典文件名和启用状态的配置。
         message_queue (queue.Queue): 用于向主线程发送消息的队列。
+        **kwargs 可能包含 'task_id_for_callback'，用于回调给特定的UI组件。
     """
     message_queue.put(("status", "正在应用基础字典..."))
     log.info("开始应用基础字典流程...")
+    
+    task_id_for_callback = kwargs.get('task_id_for_callback')
+    if task_id_for_callback:
+        log.info(f"此 'apply_base_dictionary' 任务关联的回调ID: {task_id_for_callback}")
+        
+    # --- 用于回调的最终结果变量 ---
+    callback_task_successful = False
+    callback_message_content = "应用基础字典操作已开始，但未正常完成。" # 默认失败消息
 
     try:
         # --- 1. 确定文件路径 ---
@@ -70,7 +79,8 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
         if not base_char_dict and not base_entity_dict:
             message_queue.put(("log", ("normal", "基础字典为空或加载失败，跳过应用基础字典流程。")))
             message_queue.put(("status", "应用基础字典已跳过 (无基础数据)"))
-            message_queue.put(("done", None))
+            callback_task_successful = True # 视为一种“成功”的跳过
+            callback_message_content = "基础字典为空或加载失败，已跳过应用。"
             return
 
         # 加载游戏特定的人物生成字典
@@ -273,10 +283,35 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
             message_queue.put(("error", "应用基础字典过程中保存文件失败，请检查日志。"))
             message_queue.put(("status", "应用基础字典失败 (保存错误)"))
         
-        message_queue.put(("done", None))
+        # --- 准备回调信息 ---
+        if char_save_success and entity_save_success:
+            callback_task_successful = True
+            callback_message_content = (f"基础字典应用完成。替换译名: {replacements_made_count} 条，"
+                                        f"更新字段: {fields_updated_count} 处，"
+                                        f"新增人物: {added_char_count} 条，新增事物: {added_entity_count} 条。")
+            message_queue.put(("success", callback_message_content)) # 主日志的成功消息
+            message_queue.put(("status", "应用基础字典完成"))
+        else:
+            callback_task_successful = False
+            callback_message_content = "应用基础字典过程中保存文件失败，请检查日志。"
+            message_queue.put(("error", callback_message_content)) # 主日志的错误消息
+            message_queue.put(("status", "应用基础字典失败 (保存错误)"))
 
     except Exception as e:
         log.exception("应用基础字典任务执行期间发生意外错误。")
         message_queue.put(("error", f"应用基础字典过程中发生严重错误: {e}"))
         message_queue.put(("status", "应用基础字典失败"))
-        message_queue.put(("done", None))
+        callback_task_successful = False # 标记任务因异常失败
+        callback_message_content = f"应用基础字典过程中发生严重错误: {e}"
+        
+    finally:
+        # --- 修改点 3: 任务结束时，发送带 task_id 的 "done" 信号 ---
+        if task_id_for_callback:
+            # content 是一个元组 (task_id, (success_bool, message_str))
+            # success_bool 和 message_str 用于回调给编辑器
+            log.debug(f"任务完成，发送带回调ID '{task_id_for_callback}' 的 done 信号。成功: {callback_task_successful}")
+            message_queue.put(("done", (task_id_for_callback, (callback_task_successful, callback_message_content))))
+        else:
+            # 如果没有 task_id (例如从主流程或其他地方调用)，则发送普通的 done 信号
+            log.debug("任务完成，发送普通 done 信号。")
+            message_queue.put(("done", None))
