@@ -246,10 +246,7 @@ def run_create_json(game_path, works_dir, message_queue):
             for file_name in files_in_dir:
                 if file_name.lower().endswith('.txt'):
                     file_path = os.path.join(root_dir, file_name)
-                    # 使用相对路径作为文件名键，或者直接用 file_name，取决于是否需要保留子目录结构
-                    # 为了简单起见，这里直接使用 file_name。如果需要保留结构，可以用 os.path.relpath
-                    # relative_file_path_key = os.path.relpath(file_path, string_scripts_path)
-                    file_key_in_json = file_name # 使用纯文件名作为JSON中的顶层键
+                    file_key_in_json = os.path.relpath(file_path, string_scripts_path)
 
                     message_queue.put(("log", ("debug", f"正在解析文件: {file_key_in_json}"))) 
                     

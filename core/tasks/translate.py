@@ -6,20 +6,17 @@ import re
 import time
 import datetime
 import logging
-import queue
+import queue # 虽然主进度通信可能不再直接依赖它，但保留以防未来需要
 import threading
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor
-from core.api_clients import deepseek # 导入 DeepSeek (OpenAI 兼容) 客户端
+from concurrent.futures import ThreadPoolExecutor, as_completed # 使用 as_completed
+from core.api_clients import deepseek
 from core.utils import file_system, text_processing
-# 导入默认配置以获取默认文件名和列定义
 from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
 
 log = logging.getLogger(__name__)
 
-# --- 批量翻译工作单元 (函数本身逻辑与上一版基本一致) ---
-# 它的输入 batch_metadata_items 和 context_metadata_items 将由新的 run_translate 按文件范围传入。
-# 它的输出是 {原文: 翻译结果对象}，这个结构也适合按文件汇总。
+# --- 批量翻译工作单元 (与上一版几乎一致，增加了 current_processing_file_name 的使用) ---
 def _translate_batch_with_retry(
     batch_metadata_items, 
     context_metadata_items, 
@@ -27,17 +24,16 @@ def _translate_batch_with_retry(
     entity_dictionary,
     api_client,
     config,
-    error_log_path, # 全局错误日志路径
+    error_log_path, 
     error_log_lock,
-    current_processing_file_name=None # 新增：当前处理的文件名，用于更详细的日志
+    current_processing_file_name=None 
 ):
-    # (函数内部逻辑与你提供的上一版本保持一致，只是在调用 _log_batch_error 时可以考虑加入 current_processing_file_name)
     prompt_template = config.get("prompt_template", DEFAULT_TRANSLATE_CONFIG["prompt_template"])
     model_name = config.get("model", "")
     source_language = config.get("source_language", "日语")
     target_language = config.get("target_language", "简体中文")
     max_retries = config.get("max_retries", 3)
-    context_lines = config.get("context_lines", 10) 
+    context_lines_config = config.get("context_lines", 10) 
     min_batch_size = 1
     
     batch_original_texts_for_logging = [item["text_to_translate"] for item in batch_metadata_items]
@@ -57,7 +53,7 @@ def _translate_batch_with_retry(
     combined_processed_lower_for_glossary = "\n".join(processed_original_texts_for_glossary_matching).lower()
 
     for attempt in range(max_retries + 1):
-        actual_context_items_to_use = context_metadata_items[-context_lines:]
+        actual_context_items_to_use = context_metadata_items[-context_lines_config:]
         context_text_lines_for_prompt = [item_data["text_to_translate"] for item_data in actual_context_items_to_use]
         context_section = ""
         if context_text_lines_for_prompt:
@@ -77,7 +73,7 @@ def _translate_batch_with_retry(
                      if main_name_ref and main_name_ref in char_lookup:
                          originals_to_include_in_glossary.add(main_name_ref)
                      elif main_name_ref and main_name_ref not in char_lookup:
-                          log.warning(f"人物词典不一致(文件: {current_processing_file_name or 'N/A'}): 昵称 '{char_original}' 的对应原名 '{main_name_ref}' 未找到。") # 添加文件名
+                          log.warning(f"人物词典不一致(文件: {current_processing_file_name or 'N/A'}): 昵称 '{char_original}' 的对应原名 '{main_name_ref}' 未找到。")
              char_cols_for_prompt = ['原文', '译文', '对应原名', '性别', '年龄', '性格', '口吻', '描述']
              for char_original in sorted(list(originals_to_include_in_glossary)):
                  entry = char_lookup.get(char_original)
@@ -124,7 +120,7 @@ def _translate_batch_with_retry(
             context_section=context_section, batch_text=batch_text_for_prompt_payload
         ) + timestamp_suffix
 
-        log.debug(f"调用 API 翻译批次 (文件: {current_processing_file_name or 'N/A'}, 大小: {current_batch_size}, 尝试 {attempt+1}/{max_retries+1})") # 添加文件名
+        log.debug(f"调用 API 翻译批次 (文件: {current_processing_file_name or 'N/A'}, 大小: {current_batch_size}, 尝试 {attempt+1}/{max_retries+1})")
         current_api_messages_payload = [{"role": "user", "content": current_final_prompt_payload}]
         current_api_kwargs_payload = {}
         if "temperature" in config: current_api_kwargs_payload["temperature"] = config["temperature"]
@@ -147,7 +143,7 @@ def _translate_batch_with_retry(
             _log_batch_error(error_log_path, error_log_lock, "API 调用失败", batch_original_texts_for_logging,
                              last_validation_reason, model_name, last_failed_api_kwargs,
                              last_failed_api_messages, last_failed_response_content, attempt, max_retries,
-                             file_name_for_log=current_processing_file_name) # 传递文件名
+                             file_name_for_log=current_processing_file_name)
             if attempt < max_retries: time.sleep(1); continue
             else: break
 
@@ -177,7 +173,7 @@ def _translate_batch_with_retry(
             _log_batch_error(error_log_path, error_log_lock, "响应格式错误", batch_original_texts_for_logging,
                              last_validation_reason, model_name, last_failed_api_kwargs,
                              last_failed_api_messages, last_failed_response_content, attempt, max_retries,
-                             file_name_for_log=current_processing_file_name) # 传递文件名
+                             file_name_for_log=current_processing_file_name)
             if attempt < max_retries: continue
             else: break
         last_failed_raw_translation_block = raw_translated_text_block_from_api
@@ -195,7 +191,8 @@ def _translate_batch_with_retry(
             log.info(f"批次翻译响应包含所有 {current_batch_size} 个预期编号 (文件: {current_processing_file_name or 'N/A'}, 尝试 {attempt+1})")
             batch_is_fully_valid = True; temp_results_for_this_attempt = {}
             for i, original_item_data in enumerate(batch_metadata_items):
-                original_text_for_validation = original_item_data["text_to_translate"]
+                result_key = original_item_data["original_json_key"] 
+                original_text_for_validation = original_item_data["text_to_translate"] # 这个仍然是用于翻译和验证的文本
                 raw_translation_for_this_item = final_translated_lines_from_api[i] 
                 restored_text_for_validation = text_processing.restore_pua_placeholders(raw_translation_for_this_item)
                 post_processed_text_for_validation = text_processing.post_process_translation(
@@ -213,11 +210,14 @@ def _translate_batch_with_retry(
                                      last_validation_reason, model_name, last_failed_api_kwargs,
                                      last_failed_api_messages, last_failed_response_content, attempt, max_retries,
                                      failed_item_index=i, raw_item_translation=raw_translation_for_this_item,
-                                     file_name_for_log=current_processing_file_name) # 传递文件名
+                                     file_name_for_log=current_processing_file_name)
                     break
-                temp_results_for_this_attempt[original_text_for_validation] = {
-                    "text": post_processed_text_for_validation, "status": "success", "failure_context": None,
-                    "original_marker": original_item_data["original_marker"], "speaker_id": original_item_data["speaker_id"]
+                temp_results_for_this_attempt[result_key] = {
+                    "text": post_processed_text_for_validation, 
+                    "status": "success", 
+                    "failure_context": None,
+                    "original_marker": original_item_data["original_marker"], 
+                    "speaker_id": original_item_data["speaker_id"]
                 }
             if batch_is_fully_valid: return temp_results_for_this_attempt
             if attempt < max_retries: log.info(f"由于批次内单行验证失败，准备重试整个批次 (文件: {current_processing_file_name or 'N/A'}, 尝试 {attempt+1} 失败)..."); continue
@@ -230,7 +230,7 @@ def _translate_batch_with_retry(
             _log_batch_error(error_log_path, error_log_lock, "响应缺少编号", batch_original_texts_for_logging,
                              last_validation_reason, model_name, last_failed_api_kwargs,
                              last_failed_api_messages, last_failed_response_content, attempt, max_retries,
-                             file_name_for_log=current_processing_file_name) # 传递文件名
+                             file_name_for_log=current_processing_file_name)
             if attempt < max_retries: log.info(f"准备重试批次 (文件: {current_processing_file_name or 'N/A'}, 因响应缺少编号)..."); continue
             else: log.error(f"因API响应缺少编号，且已达到最大重试次数 (文件: {current_processing_file_name or 'N/A'}, {max_retries+1})。"); break
             
@@ -257,13 +257,16 @@ def _translate_batch_with_retry(
         _log_batch_error(error_log_path, error_log_lock, "最终回退(无法拆分或单项失败)", batch_original_texts_for_logging,
                          last_validation_reason, model_name, last_failed_api_kwargs,
                          last_failed_api_messages, last_failed_response_content, max_retries, max_retries,
-                         file_name_for_log=current_processing_file_name) # 传递文件名
+                         file_name_for_log=current_processing_file_name)
         fallback_results = {}
         for item_data in batch_metadata_items:
             original_text_key = item_data["text_to_translate"]
             fallback_results[original_text_key] = {
-                "text": original_text_key, "status": "fallback", "failure_context": final_fallback_reason,
-                "original_marker": item_data["original_marker"], "speaker_id": item_data["speaker_id"]
+                "text": original_text_key, 
+                "status": "fallback", 
+                "failure_context": final_fallback_reason,
+                "original_marker": item_data["original_marker"], 
+                "speaker_id": item_data["speaker_id"]
             }
         return fallback_results
 
@@ -272,14 +275,13 @@ def _log_batch_error(
     error_log_path, error_log_lock, error_type, batch_keys, reason,
     model_name, api_kwargs, api_messages, response_content,
     attempt, max_retries, failed_item_index=None, raw_item_translation=None,
-    file_name_for_log=None # 新增：可选的文件名参数
+    file_name_for_log=None 
 ):
-    """记录批次处理中的错误到日志文件。"""
     try:
         with error_log_lock:
             with open(error_log_path, 'a', encoding='utf-8') as elog:
                 elog.write(f"[{datetime.datetime.now().isoformat()}] {error_type} (尝试 {attempt+1}/{max_retries+1})\n")
-                if file_name_for_log: # 如果提供了文件名，记录下来
+                if file_name_for_log: 
                     elog.write(f"  所属文件: {file_name_for_log}\n")
                 elog.write(f"  批次大小: {len(batch_keys)}\n")
                 elog.write(f"  失败原因: {reason}\n")
@@ -289,46 +291,45 @@ def _log_batch_error(
                         elog.write(f"  失败原文的原始译文: {raw_item_translation}\n")
                 elog.write(f"  涉及原文 Keys (最多显示5条):\n")
                 for i, key in enumerate(batch_keys[:5]):
-                    elog.write(f"    - {key[:80]}...\n") # 原文key可能很长，截断显示
+                    elog.write(f"    - {key[:80]}...\n")
                 if len(batch_keys) > 5:
                     elog.write(f"    - ... (等 {len(batch_keys) - 5} 个)\n")
                 elog.write(f"  模型: {model_name}\n")
-                if api_kwargs:
-                    elog.write(f"  API Kwargs: {json.dumps(api_kwargs, ensure_ascii=False)}\n")
-                if response_content:
-                    elog.write(f"  原始 API 响应体 (截断):\n{response_content[:500]}...\n")
-                if api_messages: # 记录完整的 Prompt 内容
-                    elog.write(f"  API Messages (Prompt):\n{json.dumps(api_messages, indent=2, ensure_ascii=False)}\n")
+                if api_kwargs: elog.write(f"  API Kwargs: {json.dumps(api_kwargs, ensure_ascii=False)}\n")
+                if response_content: elog.write(f"  原始 API 响应体 (截断):\n{response_content[:500]}...\n")
+                if api_messages: elog.write(f"  API Messages (Prompt):\n{json.dumps(api_messages, indent=2, ensure_ascii=False)}\n")
                 elog.write("-" * 20 + "\n")
     except Exception as log_err:
-        # 避免因日志记录本身失败导致程序中断
         log.error(f"写入批次错误日志失败: {log_err}")
 
-# --- 线程工作函数 (添加文件名参数) ---
+
+# --- 线程工作函数 (返回文件名和结果) ---
 def _translation_worker(
     batch_metadata_items,
     context_metadata_items_for_batch,
+    source_file_name_for_worker, # 新增：当前批次所属的文件名
     character_dictionary,
     entity_dictionary,
     api_client,
     config,
-    translated_data_shared_dict, 
-    results_lock,
-    progress_queue,
+    # translated_data_shared_dict, # 不再直接修改共享字典
+    # results_lock, # 锁也不再由此函数管理
+    # progress_queue, # 进度由主线程根据future结果更新
     error_log_path,
-    error_log_lock,
-    current_processing_file_name_for_worker # 新增：当前文件名
+    error_log_lock
 ):
-    """处理一个批次的翻译任务，调用 _translate_batch_with_retry。"""
+    """
+    处理一个批次的翻译任务，并返回结果及其源文件名。
+    """
     if not batch_metadata_items:
-        log.warning(f"工作线程收到来自文件 '{current_processing_file_name_for_worker or 'N/A'}' 的空批次，跳过。")
-        return
+        log.warning(f"工作线程收到来自文件 '{source_file_name_for_worker or 'N/A'}' 的空批次，跳过。")
+        return source_file_name_for_worker, {} # 返回空结果
 
-    batch_size_for_progress = len(batch_metadata_items)
     original_texts_in_batch_for_logging = [item["text_to_translate"] for item in batch_metadata_items]
+    batch_processing_result = {} # 用于存储此worker处理的结果
 
     try:
-        batch_results_from_retry_func = _translate_batch_with_retry(
+        batch_processing_result = _translate_batch_with_retry(
             batch_metadata_items,
             context_metadata_items_for_batch,
             character_dictionary,
@@ -337,28 +338,30 @@ def _translation_worker(
             config,
             error_log_path,
             error_log_lock,
-            current_processing_file_name_for_worker # 传递文件名
+            source_file_name_for_worker 
         )
-        with results_lock:
-            translated_data_shared_dict.update(batch_results_from_retry_func)
-        progress_queue.put(batch_size_for_progress) # 报告完成的条目数
-        log.debug(f"工作线程完成文件 '{current_processing_file_name_for_worker or 'N/A'}' 的批次处理，大小: {batch_size_for_progress}。")
+        log.debug(f"工作线程完成文件 '{source_file_name_for_worker or 'N/A'}' 的批次处理，大小: {len(batch_metadata_items)}。")
     except Exception as worker_exception:
-        log.exception(f"工作线程处理文件 '{current_processing_file_name_for_worker or 'N/A'}' 的批次时发生意外顶层错误: {worker_exception} - 批内所有项目将回退")
-        final_fallback_reason_worker_ex = f"[工作线程顶层异常({current_processing_file_name_for_worker or 'N/A'}): {worker_exception}]"
+        log.exception(f"工作线程处理文件 '{source_file_name_for_worker or 'N/A'}' 的批次时发生意外顶层错误: {worker_exception} - 批内所有项目将回退")
+        final_fallback_reason_worker_ex = f"[工作线程顶层异常({source_file_name_for_worker or 'N/A'}): {worker_exception}]"
         _log_batch_error(error_log_path, error_log_lock, "工作线程意外错误", original_texts_in_batch_for_logging,
                          str(worker_exception), config.get("model"), {}, [], "无响应体", 0, 0,
-                         file_name_for_log=current_processing_file_name_for_worker) # 传递文件名
-        fallback_results_for_worker_ex = {}
+                         file_name_for_log=source_file_name_for_worker)
+        
+        batch_processing_result = {} # 确保出错时返回的是字典
         for item_data in batch_metadata_items:
             original_text_key = item_data["text_to_translate"]
-            fallback_results_for_worker_ex[original_text_key] = {
-                "text": original_text_key, "status": "fallback", "failure_context": final_fallback_reason_worker_ex,
-                "original_marker": item_data["original_marker"], "speaker_id": item_data["speaker_id"]
+            batch_processing_result[original_text_key] = {
+                "text": original_text_key, 
+                "status": "fallback", 
+                "failure_context": final_fallback_reason_worker_ex,
+                "original_marker": item_data["original_marker"], 
+                "speaker_id": item_data["speaker_id"]
             }
-        with results_lock:
-            translated_data_shared_dict.update(fallback_results_for_worker_ex)
-        progress_queue.put(batch_size_for_progress) # 仍然汇报进度
+    
+    # 返回源文件名和这个批次的结果
+    return source_file_name_for_worker, batch_processing_result
+
 
 # --- 主任务函数 ---
 def run_translate(game_path, works_dir, translate_config, world_dict_config, message_queue):
@@ -366,14 +369,13 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
     character_dictionary = [] 
     entity_dictionary = []   
     fallback_csv_filename = "fallback_corrections.csv"
-    # *** 新增：用于存储所有文件翻译结果的顶层字典 ***
-    all_files_translated_data = {}
+    all_files_translated_data = {} # *** 用于存储所有文件最终翻译结果的顶层字典 ***
 
     try:
-        message_queue.put(("status", "正在准备翻译任务..."))
-        message_queue.put(("log", ("normal", "步骤 5: 开始翻译 JSON 文件 (按文件隔离上下文)...")))
+        message_queue.put(("status", "正在准备翻译任务 (全局预切分)..."))
+        message_queue.put(("log", ("normal", "步骤 5: 开始翻译 JSON 文件 (全局预切分, 按文件隔离上下文)...")))
 
-        # --- 路径和配置加载 (与之前类似，但 untranslated_data 会是按文件组织的) ---
+        # --- 路径和配置加载 ---
         game_folder_name = text_processing.sanitize_filename(os.path.basename(game_path))
         if not game_folder_name: game_folder_name = "UntitledGame"
         work_game_dir = os.path.join(works_dir, game_folder_name)
@@ -393,16 +395,12 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             raise FileNotFoundError(f"未找到未翻译的 JSON 文件: {untranslated_json_path}")
         message_queue.put(("log", ("normal", "加载按文件组织的未翻译 JSON 文件...")))
         with open(untranslated_json_path, 'r', encoding='utf-8') as f_in:
-            # untranslated_data_per_file 的结构是 { "文件名1": {原文1: 元数据对象1,...}, "文件名2": {...} }
             untranslated_data_per_file = json.load(f_in)
         
         if not untranslated_data_per_file:
-            message_queue.put(("warning", "未翻译的 JSON 文件为空或无效，无需翻译。"))
-            message_queue.put(("status", "翻译跳过(无内容)"))
-            message_queue.put(("done", None))
-            return
+            message_queue.put(("warning", "未翻译的 JSON 文件为空或无效，无需翻译。")); message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("done", None)); return
         
-        # --- 加载词典 (全局共享，与之前相同) ---
+        # --- 加载词典 (全局共享) ---
         char_dict_filename = world_dict_config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
         entity_dict_filename = world_dict_config.get("entity_dict_filename", DEFAULT_WORLD_DICT_CONFIG["entity_dict_filename"])
         character_dict_path = os.path.join(work_game_dir, char_dict_filename)
@@ -420,116 +418,166 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 message_queue.put(("log", ("success", f"加载事物词典: {len(entity_dictionary)} 条。")))
             except Exception as e_ent: message_queue.put(("log", ("error", f"加载事物词典失败: {e_ent}")))
 
-        # --- 获取翻译配置 (与之前相同) ---
+        # --- 获取翻译配置 ---
         current_translate_config = translate_config.copy()
         api_url = current_translate_config.get("api_url", "").strip()
         api_key = current_translate_config.get("api_key", "").strip()
         model_name = current_translate_config.get("model", "").strip()
         batch_size_config = current_translate_config.get("batch_size", 10)
-        concurrency_config = current_translate_config.get("concurrency", 16) # 并发作用于文件内的批次
+        concurrency_config = current_translate_config.get("concurrency", 16)
+        context_lines_count = current_translate_config.get("context_lines", 10) # 获取上下文行数配置
         if not api_url or not api_key or not model_name:
              raise ValueError("DeepSeek/OpenAI 兼容 API 配置不完整 (URL, Key, Model)。")
         
-        try: # API客户端初始化
-            api_client_instance = deepseek.DeepSeekClient(api_url, api_key)
-            message_queue.put(("log", ("normal", "API 客户端初始化成功。")))
+        try: api_client_instance = deepseek.DeepSeekClient(api_url, api_key)
         except Exception as client_err: raise ConnectionError(f"初始化 API 客户端失败: {client_err}")
+        message_queue.put(("log", ("normal", f"API客户端初始化成功。翻译配置: 模型={model_name}, 并发={concurrency_config}, 批大小={batch_size_config}, 上下文行数={context_lines_count}")))
 
-        # --- 按文件遍历并处理 ---
-        total_files_to_process = len(untranslated_data_per_file)
-        processed_files_count = 0
-        overall_total_items_processed = 0 # 用于全局进度（可选）
-        overall_total_items_in_all_files = sum(len(data) for data in untranslated_data_per_file.values())
+        # --- *** 任务预切分 *** ---
+        global_translation_tasks = [] # 存储所有 (batch_meta, context_meta, file_name) 的任务单元
+        overall_total_items_in_all_files = 0
 
-
-        results_lock_obj = threading.Lock()
-        error_log_lock_obj = threading.Lock() # 全局错误日志锁
-
-        for current_file_name, data_for_this_file in untranslated_data_per_file.items():
-            processed_files_count += 1
-            message_queue.put(("status", f"正在处理文件: {current_file_name} ({processed_files_count}/{total_files_to_process})..."))
-            message_queue.put(("log", ("normal", f"--- 开始翻译文件: {current_file_name} ---")))
-
+        message_queue.put(("log", ("normal", "开始预切分所有翻译任务...")))
+        for file_name, data_for_this_file in untranslated_data_per_file.items():
             if not data_for_this_file:
-                log.info(f"文件 '{current_file_name}' 不包含可翻译条目，跳过。")
-                all_files_translated_data[current_file_name] = {} # 存储空结果
+                log.info(f"文件 '{file_name}' 为空，跳过预切分。")
+                all_files_translated_data[file_name] = {} # 预先设置空结果
                 continue
 
-            # all_metadata_items_for_this_file 是当前文件内所有元数据对象的列表
-            all_metadata_items_for_this_file = list(data_for_this_file.values())
-            total_items_in_this_file = len(all_metadata_items_for_this_file)
-            
-            # translated_data_for_this_file 存储当前文件的翻译结果
-            translated_data_for_this_file = {
-                item_data["text_to_translate"]: None for item_data in all_metadata_items_for_this_file
-            }
-            
-            progress_report_queue_for_file = queue.Queue() # 每个文件独立的进度队列，或调整全局队列的用法
+            items_with_original_key_for_this_file = []
+            for original_json_key, metadata_obj in data_for_this_file.items():
+                # 确保元数据对象中有一个字段存储这个原始的JSON键
+                metadata_obj['original_json_key'] = original_json_key 
+                items_with_original_key_for_this_file.append(metadata_obj)
 
-            with ThreadPoolExecutor(max_workers=concurrency_config) as executor_for_file_batches:
-                submitted_futures_for_file = []
-                for i in range(0, total_items_in_this_file, batch_size_config):
-                    batch_metadata_for_worker = all_metadata_items_for_this_file[i : i + batch_size_config]
-                    if not batch_metadata_for_worker: continue
+            all_metadata_items_for_this_file = items_with_original_key_for_this_file
+            num_items_in_file = len(all_metadata_items_for_this_file)
+            overall_total_items_in_all_files += num_items_in_file
+            
+            # 预先为这个文件在最终结果字典中创建条目
+            all_files_translated_data.setdefault(file_name, {})
 
-                    context_start_idx = max(0, i - current_translate_config.get("context_lines", 10))
-                    # 上下文严格从当前文件内选取
-                    context_metadata_for_worker = all_metadata_items_for_this_file[context_start_idx : i]
-                    
-                    submitted_futures_for_file.append(executor_for_file_batches.submit(
-                        _translation_worker,
-                        batch_metadata_for_worker,
-                        context_metadata_for_worker,
-                        character_dictionary, # 全局词典
-                        entity_dictionary,   # 全局词典
-                        api_client_instance,
-                        current_translate_config,
-                        translated_data_for_this_file, # 传递当前文件的结果字典
-                        results_lock_obj, # 可以是全局锁，如果 translated_data_for_this_file 在worker内部直接修改
-                        progress_report_queue_for_file,
-                        error_log_path, # 全局错误日志
-                        error_log_lock_obj,
-                        current_file_name # 传递当前文件名给worker
-                    ))
+
+            for i in range(0, num_items_in_file, batch_size_config):
+                batch_metadata_for_task = all_metadata_items_for_this_file[i : i + batch_size_config]
+                if not batch_metadata_for_task: continue
+
+                context_start_idx = max(0, i - context_lines_count)
+                # 上下文严格从当前文件内选取
+                context_metadata_for_task = all_metadata_items_for_this_file[context_start_idx : i]
                 
-                # 监控当前文件的进度
-                completed_items_in_file = 0
-                last_file_progress_update_time = time.time()
-                while completed_items_in_file < total_items_in_this_file:
-                    try:
-                        items_done_in_batch = progress_report_queue_for_file.get(timeout=1.0)
-                        completed_items_in_file += items_done_in_batch
-                        overall_total_items_processed += items_done_in_batch # 更新全局计数
+                global_translation_tasks.append({
+                    "batch_items": batch_metadata_for_task,
+                    "context_items": context_metadata_for_task,
+                    "source_file": file_name,
+                    # 其他参数可以作为字典传递给worker，或者worker直接从config取
+                })
+        
+        if not global_translation_tasks:
+            message_queue.put(("warning", "所有文件均为空，或未提取到任何可翻译条目。无需翻译。"))
+            message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("done", None)); return
 
-                        current_time = time.time()
-                        if current_time - last_file_progress_update_time > 0.5 or completed_items_in_file == total_items_in_this_file:
-                            # 文件内部进度
-                            file_progress_percent = (completed_items_in_file / total_items_in_this_file) * 100 if total_items_in_this_file > 0 else 0
-                            # 全局进度
-                            overall_progress_percent = (overall_total_items_processed / overall_total_items_in_all_files) * 100 if overall_total_items_in_all_files > 0 else 0
-                            
-                            status_msg_file = (f"文件 '{current_file_name}': {completed_items_in_file}/{total_items_in_this_file} ({file_progress_percent:.1f}%) "
-                                               f"| 总进度: {overall_progress_percent:.1f}%")
-                            message_queue.put(("status", status_msg_file))
-                            message_queue.put(("progress", overall_progress_percent)) # 主进度条用全局进度
-                            last_file_progress_update_time = current_time
-                    except queue.Empty:
-                        if all(f.done() for f in submitted_futures_for_file):
-                            if completed_items_in_file < total_items_in_this_file:
-                                log.warning(f"文件 '{current_file_name}' 所有线程结束，但完成计数({completed_items_in_file}) < 总数({total_items_in_this_file})。")
-                                # 强制完成当前文件计数，但不影响全局 overall_total_items_processed，因为它由实际完成的批次累加
-                            break 
-                    except Exception as monitor_file_err:
-                        log.error(f"文件 '{current_file_name}' 进度监控出错: {monitor_file_err}")
-                        break
-            
-            # 当前文件处理完毕，将其结果存入顶层字典
-            all_files_translated_data[current_file_name] = translated_data_for_this_file
-            message_queue.put(("log", ("normal", f"--- 文件 '{current_file_name}' 翻译完成 ({total_items_in_this_file} 条) ---")))
+        total_batches_to_process = len(global_translation_tasks)
+        message_queue.put(("log", ("normal", f"任务预切分完成。共 {total_batches_to_process} 个批次（来自 {len(untranslated_data_per_file)} 个文件），总计 {overall_total_items_in_all_files} 个原文条目。")))
+        message_queue.put(("status", f"开始翻译，总批次数: {total_batches_to_process}，并发数: {concurrency_config}..."))
 
-        # --- 所有文件处理完毕后，进行最终的整理和保存 ---
-        # (错误日志检查逻辑与之前相同，现在是全局的)
-        errors_found_in_log_file = 0
+        # --- 并发处理全局任务列表 ---
+        error_log_lock_obj = threading.Lock() # 全局错误日志锁
+        
+        # 使用 futures 字典来映射 future 到其对应的任务信息，方便调试或重试特定失败任务 (可选)
+        # futures_map = {} 
+
+        completed_batches_count = 0 # 按批次计数
+        # completed_items_count = 0 # 如果要按条目计数
+
+        with ThreadPoolExecutor(max_workers=concurrency_config) as executor:
+            # 提交所有任务
+            future_to_task_info = {
+                executor.submit(
+                    _translation_worker,
+                    task_unit["batch_items"],
+                    task_unit["context_items"],
+                    task_unit["source_file"], # 传递源文件名
+                    character_dictionary,
+                    entity_dictionary,
+                    api_client_instance,
+                    current_translate_config,
+                    error_log_path,
+                    error_log_lock_obj
+                ): task_unit 
+                for task_unit in global_translation_tasks
+            }
+
+            last_status_update_time = time.time()
+            status_update_interval_sec = 0.5
+
+            for future in as_completed(future_to_task_info):
+                task_info_for_this_future = future_to_task_info[future]
+                source_file_of_this_batch = task_info_for_this_future["source_file"]
+                num_items_in_this_batch = len(task_info_for_this_future["batch_items"])
+
+                try:
+                    # _translation_worker 现在返回 (source_file_name, batch_result_dict)
+                    processed_file_name, batch_result_dict_from_worker = future.result()
+                    
+                    # 将批次结果合并到对应文件的结果中
+                    # 注意：这里需要确保 all_files_translated_data[processed_file_name] 已经存在
+                    # 在预切分阶段，我们已经用 setdefault 初始化了
+                    if processed_file_name in all_files_translated_data:
+                        all_files_translated_data[processed_file_name].update(batch_result_dict_from_worker)
+                    else:
+                        # 理论上不应该发生，因为预切分时已初始化
+                        log.error(f"严重错误：尝试将批次结果存入未初始化的文件条目 '{processed_file_name}'")
+                        all_files_translated_data[processed_file_name] = batch_result_dict_from_worker # 尝试补救
+
+                except Exception as exc:
+                    log.exception(f"处理文件 '{source_file_of_this_batch}' 的一个批次时发生异常: {exc}")
+                    # 即使worker内部有回退，如果worker本身抛出异常，也需要在这里处理
+                    # 构建回退结果并合并
+                    fallback_reason_exc = f"[Future执行异常({source_file_of_this_batch}): {exc}]"
+                    for item_data_in_failed_batch in task_info_for_this_future["batch_items"]:
+                        original_text_key = item_data_in_failed_batch["text_to_translate"]
+                        if source_file_of_this_batch not in all_files_translated_data:
+                            all_files_translated_data[source_file_of_this_batch] = {}
+                        all_files_translated_data[source_file_of_this_batch][original_text_key] = {
+                            "text": original_text_key, 
+                            "status": "fallback", 
+                            "failure_context": fallback_reason_exc,
+                            "original_marker": item_data_in_failed_batch["original_marker"], 
+                            "speaker_id": item_data_in_failed_batch["speaker_id"]
+                        }
+                
+                completed_batches_count += 1
+                # completed_items_count += num_items_in_this_batch # 如果按条目报告进度
+
+                current_time = time.time()
+                if current_time - last_status_update_time >= status_update_interval_sec or completed_batches_count == total_batches_to_process:
+                    # 使用 overall_total_items_in_all_files 和实际处理的原文条目数来计算更精确的百分比
+                    # 需要一种方式从 all_files_translated_data 中统计实际已处理（包括成功和回退）的原文条目数
+                    current_processed_originals = sum(len(file_data) for file_data in all_files_translated_data.values())
+
+                    progress_percentage = (current_processed_originals / overall_total_items_in_all_files) * 100 if overall_total_items_in_all_files > 0 else 0
+                    elapsed_processing_time = current_time - start_time
+                    est_total_processing_time = (elapsed_processing_time / current_processed_originals) * overall_total_items_in_all_files if current_processed_originals > 0 else 0
+                    remaining_processing_time = max(0, est_total_processing_time - elapsed_processing_time)
+                    
+                    status_update_msg = (f"已处理批次: {completed_batches_count}/{total_batches_to_process} "
+                                         f"| 原文: {current_processed_originals}/{overall_total_items_in_all_files} ({progress_percentage:.1f}%) "
+                                         f"- 预计剩余: {remaining_processing_time:.0f}s")
+                    message_queue.put(("status", status_update_msg))
+                    message_queue.put(("progress", progress_percentage))
+                    last_status_update_time = current_time
+
+        message_queue.put(("log", ("normal", f"所有 {total_batches_to_process} 个翻译批次已提交处理。等待完成...")))
+        # （as_completed 循环结束后，所有任务都已完成或异常）
+        message_queue.put(("status", f"翻译处理完成: {completed_batches_count}/{total_batches_to_process} 批次。"))
+        message_queue.put(("progress", 100.0)) # 确保最终是100%
+        message_queue.put(("log", ("normal", "所有翻译工作线程已完成。")))
+
+
+        # --- 后续处理：错误日志检查、回退CSV生成、最终JSON保存 ---
+        # (这部分逻辑与上一版类似，但现在是基于 all_files_translated_data 和全局回退列表)
+        errors_found_in_log_file = 0 # 与之前相同
         if os.path.exists(error_log_path):
             try:
                 with open(error_log_path, 'r', encoding='utf-8') as elog_read:
@@ -538,61 +586,36 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     message_queue.put(("log", ("warning", f"翻译共检测到 {errors_found_in_log_file} 次错误，详情见日志: {error_log_path}")))
             except Exception as e_read_log: log.error(f"读取错误日志失败: {e_read_log}")
 
-        # --- 整理最终结果并生成回退CSV (现在需要遍历 all_files_translated_data) ---
-        # final_json_to_save_output 仍然是按文件组织的，结构与输入JSON一致
-        final_json_to_save_output = {} 
-        all_fallback_items_for_csv = [] # 用于全局回退CSV
-        overall_explicit_fallback_count = 0
-        overall_missing_results_count = 0
-
-        for file_name, translated_data_for_one_file in all_files_translated_data.items():
-            output_for_this_file = {}
-            # 原始数据也需要按文件名获取
-            original_metadata_for_this_file = untranslated_data_per_file.get(file_name, {})
-
-            for original_text_key, original_metadata_obj in original_metadata_for_this_file.items():
-                translated_result_obj = translated_data_for_one_file.get(original_text_key)
-                if translated_result_obj is None:
-                    log.error(f"严重(文件 '{file_name}'): 条目 '{original_text_key[:50]}...' 翻译结果丢失！将回退。")
-                    output_for_this_file[original_text_key] = {
-                        "text": original_text_key, 
-                        "original_marker": original_metadata_obj["original_marker"],
-                        "speaker_id": original_metadata_obj["speaker_id"]
-                    }
-                    overall_missing_results_count += 1
-                    all_fallback_items_for_csv.append((file_name, original_text_key, "[结果丢失，强制回退]", original_metadata_obj["original_marker"]))
-                    overall_explicit_fallback_count +=1
-                else:
-                    output_for_this_file[original_text_key] = {
-                        "text": translated_result_obj.get("text", original_text_key),
-                        "original_marker": translated_result_obj.get("original_marker", original_metadata_obj["original_marker"]),
-                        "speaker_id": translated_result_obj.get("speaker_id", original_metadata_obj["speaker_id"])
-                    }
-                    if translated_result_obj.get("status") == 'fallback':
-                        overall_explicit_fallback_count += 1
-                        output_for_this_file[original_text_key]["text"] = original_text_key # 确保回退用原文
-                        all_fallback_items_for_csv.append((
-                            file_name, 
-                            original_text_key, 
-                            translated_result_obj.get("failure_context") or "[未知回退原因]", 
-                            original_metadata_obj["original_marker"]
-                        ))
-            final_json_to_save_output[file_name] = output_for_this_file
+        # --- 整理最终结果并生成回退CSV ---
+        all_fallback_items_for_csv_global = [] 
+        overall_explicit_fallback_count_global = 0
         
-        if overall_missing_results_count > 0:
-            message_queue.put(("error", f"总警告: {overall_missing_results_count} 个翻译结果丢失，已强制回退。"))
-        if overall_explicit_fallback_count > 0:
-            message_queue.put(("log", ("warning", f"翻译总计完成，有 {overall_explicit_fallback_count} 个条目使用了原文回退。")))
+        # 遍历 all_files_translated_data 来收集回退项
+        for file_name_key, translated_content_for_file in all_files_translated_data.items():
+            if not isinstance(translated_content_for_file, dict): # 防御性编程
+                log.error(f"严重错误: 文件 '{file_name_key}' 的翻译结果不是预期的字典格式，无法收集回退项。")
+                continue
+            for original_text, result_obj in translated_content_for_file.items():
+                if isinstance(result_obj, dict) and result_obj.get("status") == "fallback":
+                    overall_explicit_fallback_count_global += 1
+                    all_fallback_items_for_csv_global.append((
+                        file_name_key, # 源文件名
+                        original_text, # 原文
+                        result_obj.get("original_marker", "UnknownMarker"),
+                        result_obj.get("failure_context", "[未知回退原因]")
+                    ))
+        
+        if overall_explicit_fallback_count_global > 0:
+            message_queue.put(("log", ("warning", f"翻译总计完成，有 {overall_explicit_fallback_count_global} 个条目使用了原文回退。")))
 
-        # --- 生成全局回退CSV (添加文件名列) ---
         message_queue.put(("log", ("normal", "检查并处理全局回退修正文件...")))
         try:
-            if all_fallback_items_for_csv:
-                log.info(f"检测到 {len(all_fallback_items_for_csv)} 个回退项，生成全局修正文件: {fallback_csv_path}")
+            if all_fallback_items_for_csv_global:
+                log.info(f"检测到 {len(all_fallback_items_for_csv_global)} 个回退项，生成全局修正文件: {fallback_csv_path}")
                 file_system.ensure_dir_exists(os.path.dirname(fallback_csv_path))
                 csv_header_fallback_global = ["源文件名", "原文", "原始标记", "最终尝试结果/原因", "修正译文"]
                 csv_data_fallback_global = [csv_header_fallback_global] + \
-                                           [[fname, key, marker, context, ""] for fname, key, context, marker in all_fallback_items_for_csv]
+                                           [[fname, key, marker, context, ""] for fname, key, marker, context in all_fallback_items_for_csv_global]
                 with open(fallback_csv_path, 'w', newline='', encoding='utf-8-sig') as f_csv_global:
                     writer_global = csv.writer(f_csv_global, quoting=csv.QUOTE_ALL)
                     writer_global.writerows(csv_data_fallback_global)
@@ -600,8 +623,6 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             elif os.path.exists(fallback_csv_path):
                 file_system.safe_remove(fallback_csv_path)
                 message_queue.put(("log", ("normal", "无回退项，旧的全局修正文件已删除。")))
-            else:
-                log.info("无回退项，无需生成或删除全局修正文件。")
         except Exception as csv_err_global:
             log.exception(f"处理全局回退 CSV 时出错: {csv_err_global}")
             message_queue.put(("log", ("error", f"处理全局回退文件 ({fallback_csv_filename}) 时出错: {csv_err_global}")))
@@ -611,7 +632,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         try:
             file_system.ensure_dir_exists(os.path.dirname(translated_json_path))
             with open(translated_json_path, 'w', encoding='utf-8') as f_json_final_out:
-                json.dump(final_json_to_save_output, f_json_final_out, ensure_ascii=False, indent=4)
+                # 保存的是 all_files_translated_data，它已经是 {文件名: {原文: 结果对象}} 的结构
+                json.dump(all_files_translated_data, f_json_final_out, ensure_ascii=False, indent=4)
             
             total_elapsed_time_overall = time.time() - start_time
             message_queue.put(("log", ("success", f"所有文件的翻译及保存完成。总耗时: {total_elapsed_time_overall:.2f} 秒。")))
@@ -619,8 +641,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             final_msg_overall = "所有文件翻译完成"
             final_status_overall = "翻译全部完成"
             final_log_level_overall = "success"
-            if overall_explicit_fallback_count > 0:
-                 final_msg_overall += f" (共 {overall_explicit_fallback_count} 个回退，详见 '{fallback_csv_filename}')"
+            if overall_explicit_fallback_count_global > 0:
+                 final_msg_overall += f" (共 {overall_explicit_fallback_count_global} 个回退，详见 '{fallback_csv_filename}')"
                  final_status_overall += f" (有回退)"
                  final_log_level_overall = "warning"
             message_queue.put((final_log_level_overall, f"{final_msg_overall}"))
