@@ -122,37 +122,85 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
             raise FileNotFoundError(f"未找到未翻译的 JSON 文件: {json_path}，请先执行步骤 3。")
 
         # --- 加载 JSON 并准备输入文本 ---
-        message_queue.put(("log", ("normal", "加载 JSON 文件并提取原文...")))
+        message_queue.put(("log", ("normal", "加载按文件组织的 JSON 文件并提取所有原文...")))
+        # all_texts_with_metadata_prefix 用于存储所有文件中带有前缀的 text_to_translate
+        all_texts_with_metadata_prefix = [] 
+
         try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                translations = json.load(f)
-            original_texts = list(translations.keys())
-            message_queue.put(("log", ("normal", f"共提取 {len(original_texts)} 条原文用于分析。")))
-            if not original_texts:
-                 message_queue.put(("warning", "JSON 文件中没有可用于分析的原文。"))
-                 message_queue.put(("status", "生成字典跳过(无文本)"))
+            with open(json_path, 'r', encoding='utf-8') as f_json_in:
+                untranslated_data_per_file = json.load(f_json_in)
+
+            if not untranslated_data_per_file:
+                message_queue.put(("warning", f"JSON 文件 '{json_path}' 为空或无效，无法提取原文。"))
+                message_queue.put(("status", "生成字典跳过(JSON无效)"))
+                message_queue.put(("done", None))
+                return
+
+            # 遍历每个文件的数据
+
+            for file_name, file_data_dict in untranslated_data_per_file.items():
+                if not isinstance(file_data_dict, dict):
+                    log.warning(f"文件 '{file_name}' 在JSON中的数据不是预期的字典格式，已跳过。")
+                    continue
+                
+                log.debug(f"为字典生成准备文件 '{file_name}' 的文本...")
+                # 遍历该文件内的所有条目 (其值是元数据对象)
+                for original_key, metadata_object in file_data_dict.items(): # 依赖字典保持顺序
+                    if isinstance(metadata_object, dict) and "text_to_translate" in metadata_object:
+                        text_content = metadata_object["text_to_translate"]
+                        original_marker = metadata_object.get("original_marker", "UnknownMarker")
+                        speaker_id = metadata_object.get("speaker_id") # 可能为 None
+
+                        if text_content and isinstance(text_content, str):
+                            # 将文本中的换行符替换为特殊标记
+                            text_content = text_content.replace('\n', '[LINEBREAK]')
+                            
+                            # 构建元数据前缀
+                            marker_tag = f"[MARKER: {original_marker}]"
+                            face_tag = ""
+                            if speaker_id: # 只有当 speaker_id 有效时才添加
+                                face_tag = f"[FACE: {speaker_id}]"
+                            
+                            # 组合前缀和文本内容
+                            line_with_prefix = f"{marker_tag} {face_tag}".strip() + f" {text_content}"
+                            all_texts_with_metadata_prefix.append(line_with_prefix)
+                        else:
+                            log.debug(f"文件 '{file_name}', 原文key '{original_key}' 的 text_to_translate 为空或非字符串，已跳过。")
+                    else:
+                        log.warning(f"文件 '{file_name}', 原文key '{original_key}' 对应的元数据对象格式不正确或缺少 'text_to_translate'，已跳过。 对象: {metadata_object}")
+            
+            total_extracted_lines_with_prefix = len(all_texts_with_metadata_prefix)
+            message_queue.put(("log", ("normal", f"共从所有文件中提取并格式化 {total_extracted_lines_with_prefix} 行带元数据前缀的文本用于世界观字典分析。")))
+            
+            if not all_texts_with_metadata_prefix: 
+                 message_queue.put(("warning", "未从任何文件中提取到有效的原文内容用于分析。"))
+                 message_queue.put(("status", "生成字典跳过(无有效文本)"))
                  message_queue.put(("done", None))
                  return
 
-            # 将原文写入临时文件
-            message_queue.put(("log", ("normal", "将原文写入临时文件...")))
-            with open(temp_text_path, 'w', encoding='utf-8') as f_temp:
-                f_temp.write("\n".join(original_texts))
-            log.info(f"临时原文聚合文件已创建: {temp_text_path}")
+            # 将提取的所有带前缀的原文行写入临时文件
+            message_queue.put(("log", ("normal", "将所有带前缀的原文行写入临时文件...")))
+            with open(temp_text_path, 'w', encoding='utf-8') as f_temp_out:
+                # 每行是一个带前缀的原文（可能包含多行）
+                f_temp_out.write("\n".join(all_texts_with_metadata_prefix).replace('[LINEBREAK]', '\\n')) 
+            log.info(f"带元数据前缀的临时原文聚合文件已创建: {temp_text_path}")
 
             # 读取游戏文本内容用于 Prompt 格式化
             with open(temp_text_path, 'r', encoding='utf-8') as f_temp_read:
-                game_text_content = f_temp_read.read()
+                game_text_content_for_prompt = f_temp_read.read() # 这个现在是带前缀的文本块
 
-            # 检查文本大小 (可选，但推荐)
-            MAX_TEXT_SIZE_MB = 10 # 假设一个合理的检查阈值 (Gemini Pro 可能更高)
-            if len(game_text_content.encode('utf-8')) / (1024*1024) > MAX_TEXT_SIZE_MB:
-                 log.warning(f"聚合后的游戏文本大小 ({len(game_text_content.encode('utf-8')) / (1024*1024):.2f} MB) 较大，API 调用可能耗时较长或失败。")
-                 message_queue.put(("log",("warning", "游戏文本内容较多，API处理可能需要较长时间。")))
+            # 检查文本大小 (与之前相同)
+            MAX_TEXT_SIZE_MB = 10 # 这个限制可能需要根据实际带前缀的文本长度调整
+            if len(game_text_content_for_prompt.encode('utf-8')) / (1024*1024) > MAX_TEXT_SIZE_MB:
+                 log.warning(f"聚合后的带前缀游戏文本大小 ({len(game_text_content_for_prompt.encode('utf-8')) / (1024*1024):.2f} MB) 较大，API 调用可能耗时较长或失败。")
+                 message_queue.put(("log",("warning", "游戏文本内容（含元数据前缀）较多，API处理可能需要较长时间。")))
 
-        except Exception as e:
-            log.exception(f"加载 JSON 或处理临时文件时出错: {e}")
-            raise RuntimeError(f"加载 JSON 或准备输入文本失败: {e}") from e
+        except json.JSONDecodeError as json_err: 
+            log.exception(f"加载或解析JSON文件 '{json_path}' 失败: {json_err}")
+            raise RuntimeError(f"加载或解析JSON文件失败: {json_err}") from json_err
+        except Exception as e_load_prepare: 
+            log.exception(f"加载 JSON 或准备临时输入文件时出错: {e_load_prepare}")
+            raise RuntimeError(f"加载 JSON 或准备输入文本失败: {e_load_prepare}") from e_load_prepare
 
         # --- 初始化 Gemini 客户端 ---
         try:

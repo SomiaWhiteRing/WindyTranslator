@@ -65,25 +65,13 @@ class ProModePanel(ttk.Frame):
         all_controls_list.extend([self.init_button, self.rtp_button])
         row_idx += 1
 
-        # --- 1. 重写文件名 ---
-        row_frame_1 = create_row(self, "1. 重写文件名", "非ASCII文件名转Unicode")
-        self.rename_button = ttk.Button(row_frame_1, text="执行", width=button_width,
-                                       command=lambda: self.app.start_task('rename'))
-        self.rename_button.pack(side=tk.RIGHT, padx=padx_val)
-        # self.log_checkbutton = ttk.Checkbutton(row_frame_1, text="RTP修正", variable=self.rtp_fix_check,
-        #                                        command=self._save_settings)
-        # self.log_checkbutton.pack(side=tk.RIGHT, padx=padx_val)
-        # all_controls_list.extend([self.rename_button, self.log_checkbutton])
-        all_controls_list.extend([self.rename_button])
-        row_idx += 1
-
-        # --- 2. 导出文本 ---
-        row_frame_2 = create_row(self, "2. 导出文本", "导出文本到 StringScripts")
-        self.export_button = ttk.Button(row_frame_2, text="执行", width=button_width,
+        # --- 1. 导出文本 ---
+        row_frame_1 = create_row(self, "1. 导出文本", "导出文本到 StringScripts")
+        self.export_button = ttk.Button(row_frame_1, text="执行", width=button_width,
                                        command=lambda: self.app.start_task('export'))
         self.export_button.pack(side=tk.RIGHT, padx=padx_val)
         # 编码控件组合 (也使用 pack)
-        encoding_frame_export = ttk.Frame(row_frame_2)
+        encoding_frame_export = ttk.Frame(row_frame_1)
         encoding_frame_export.pack(side=tk.RIGHT, padx=padx_val)
         self.export_encoding_combo = ttk.Combobox(encoding_frame_export, textvariable=self.export_encoding_var,
                                              values=self.encoding_display_values, state="readonly", width=config_control_width - 2)
@@ -92,6 +80,18 @@ class ProModePanel(ttk.Frame):
         self.export_encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
         self._set_combobox_value(self.export_encoding_combo, self.export_encoding_var.get())
         all_controls_list.extend([self.export_button, self.export_encoding_combo])
+        row_idx += 1
+
+        # --- 2. 重写文件名 ---
+        row_frame_2 = create_row(self, "2. 重写文件名", "非ASCII文件名转Unicode")
+        self.rename_button = ttk.Button(row_frame_2, text="执行", width=button_width,
+                                       command=lambda: self.app.start_task('rename'))
+        self.rename_button.pack(side=tk.RIGHT, padx=padx_val)
+        # self.log_checkbutton = ttk.Checkbutton(row_frame_1, text="RTP修正", variable=self.rtp_fix_check,
+        #                                        command=self._save_settings)
+        # self.log_checkbutton.pack(side=tk.RIGHT, padx=padx_val)
+        # all_controls_list.extend([self.rename_button, self.log_checkbutton])
+        all_controls_list.extend([self.rename_button])
         row_idx += 1
 
 

@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed # 使用 as_comp
 from core.api_clients import deepseek
 from core.utils import file_system, text_processing
 from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
+from collections import OrderedDict
 
 log = logging.getLogger(__name__)
 
@@ -631,8 +632,12 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         message_queue.put(("log", ("normal", f"正在保存按文件组织的翻译结果到: {translated_json_path}")))
         try:
             file_system.ensure_dir_exists(os.path.dirname(translated_json_path))
+            
+            # 在保存前重排序结果
+            message_queue.put(("log", ("normal", "正在重排序翻译结果以匹配原始文件顺序...")))
+            all_files_translated_data = _reorder_translation_results(untranslated_data_per_file, all_files_translated_data)
+            
             with open(translated_json_path, 'w', encoding='utf-8') as f_json_final_out:
-                # 保存的是 all_files_translated_data，它已经是 {文件名: {原文: 结果对象}} 的结构
                 json.dump(all_files_translated_data, f_json_final_out, ensure_ascii=False, indent=4)
             
             total_elapsed_time_overall = time.time() - start_time
@@ -665,3 +670,25 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         message_queue.put(("error", f"翻译过程中发生严重错误: {general_err}"))
         message_queue.put(("status", "翻译失败"))
         message_queue.put(("done", None))
+
+def _reorder_translation_results(untranslated_data, translated_data):
+    """
+    重排序翻译结果，确保与原始数据顺序一致。
+    
+    Args:
+        untranslated_data (dict): 原始未翻译数据字典，按文件组织
+        translated_data (dict): 翻译后的数据字典，按文件组织
+        
+    Returns:
+        OrderedDict: 重排序后的翻译结果字典
+    """
+    reordered_results = OrderedDict()
+    for file_name, original_file_data in untranslated_data.items():
+        if file_name not in translated_data:
+            continue
+        reordered_results[file_name] = OrderedDict()
+        # 按原始数据的键顺序重新排列
+        for original_key in original_file_data.keys():
+            if original_key in translated_data[file_name]:
+                reordered_results[file_name][original_key] = translated_data[file_name][original_key]
+    return reordered_results
