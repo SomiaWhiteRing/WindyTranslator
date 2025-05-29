@@ -187,12 +187,12 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
 
             # 读取游戏文本内容用于 Prompt 格式化
             with open(temp_text_path, 'r', encoding='utf-8') as f_temp_read:
-                game_text_content_for_prompt = f_temp_read.read() # 这个现在是带前缀的文本块
+                game_text_content = f_temp_read.read() # 这个现在是带前缀的文本块
 
             # 检查文本大小 (与之前相同)
             MAX_TEXT_SIZE_MB = 10 # 这个限制可能需要根据实际带前缀的文本长度调整
-            if len(game_text_content_for_prompt.encode('utf-8')) / (1024*1024) > MAX_TEXT_SIZE_MB:
-                 log.warning(f"聚合后的带前缀游戏文本大小 ({len(game_text_content_for_prompt.encode('utf-8')) / (1024*1024):.2f} MB) 较大，API 调用可能耗时较长或失败。")
+            if len(game_text_content.encode('utf-8')) / (1024*1024) > MAX_TEXT_SIZE_MB:
+                 log.warning(f"聚合后的带前缀游戏文本大小 ({len(game_text_content.encode('utf-8')) / (1024*1024):.2f} MB) 较大，API 调用可能耗时较长或失败。")
                  message_queue.put(("log",("warning", "游戏文本内容（含元数据前缀）较多，API处理可能需要较长时间。")))
 
         except json.JSONDecodeError as json_err: 

@@ -12,7 +12,8 @@ from app import RPGTranslatorApp
 def setup_logging():
     """配置全局日志记录。"""
     log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
-    log_level = logging.INFO # 默认级别，可以设为 DEBUG 获取更详细信息
+    # log_level = logging.INFO # 默认级别，可以设为 DEBUG 获取更详细信息
+    log_level = logging.DEBUG
 
     # 获取根 logger
     root_logger = logging.getLogger()
