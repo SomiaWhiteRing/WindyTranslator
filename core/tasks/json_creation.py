@@ -175,7 +175,27 @@ def _extract_strings_from_file(file_path):
                     else:
                         log.warning(f"    标记 #{original_marker}# (在 L{current_line_number_for_log}) 后没有内容行.")
 
-                else: # 其他所有标记（包括 Choice）都视为单行系统文本
+                elif original_marker == 'Choice': # 特别的，Choice 虽然以系统文本归类，但其内部存在不止一行，需要为这一个标记制作多个条目
+                    choice_lines = []
+                    while i < len(lines) and not lines[i].strip() == '##':
+                        choice_lines.append(lines[i])
+                        i += 1
+                    for choice_line in choice_lines:
+                        choice_line_key = choice_line.strip()
+                        if choice_line_key:
+                            text_to_translate_val = text_processing.convert_half_to_full_katakana(choice_line_key)
+                            strings_with_metadata[choice_line_key] = {
+                                "text_to_translate": text_to_translate_val,
+                                "original_marker": original_marker,
+                                "speaker_id": speaker_id_for_this_entry 
+                            }
+                            log.debug(f"    提取到 Choice 标记 '{original_marker}'. 原文Key: '{choice_line_key[:30].replace(chr(10),'/LF/') + ('...' if len(choice_line_key)>30 else '')}'. Speaker: '{speaker_id_for_this_entry}' (内容来自 L{i+1})")
+                            if choice_line_key != text_to_translate_val:
+                                log.debug(f"      半角假名已转换.")
+                    if i < len(lines) and lines[i].strip() == '##':
+                        i += 1
+                        
+                else: # 其他所有标记都视为单行系统文本
                     if i < len(lines): 
                         single_line_key = lines[i].strip()
                         if single_line_key:

@@ -83,9 +83,40 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
                     i += 1
             
             elif original_marker_type == 'EventName':
-                 if i < len(lines):
+                if i < len(lines):
                       new_lines.append(lines[i]) 
                       i+=1
+
+            elif original_marker_type == 'Choice': # 选项采用特殊的处理方式：逐行进行比对
+                choice_block_lines = []
+                while i < len(lines) and not lines[i].strip() == '##':
+                    choice_line = lines[i].strip()
+                    if choice_line in translations_for_this_file:
+                        translation_metadata_obj = translations_for_this_file[choice_line]
+                        if isinstance(translation_metadata_obj, dict) and "text" in translation_metadata_obj:
+                            translated_choice_text = translation_metadata_obj["text"]
+                            if translated_choice_text is not None and translated_choice_text.strip() != "":
+                                # 保持原有的缩进
+                                leading_spaces = len(lines[i]) - len(lines[i].lstrip())
+                                new_lines.append(' ' * leading_spaces + translated_choice_text + '\n')
+                                applied_count += 1
+                                log.debug(f"应用翻译到 {file_basename} (选项原文: '{choice_line}'): '{translated_choice_text}'")
+                            else:
+                                new_lines.append(lines[i])
+                                skipped_count += 1
+                                log.warning(f"在文件 {file_basename} 找到选项 '{choice_line}' 的翻译，但译文为空，保留原文。")
+                        else:
+                            new_lines.append(lines[i])
+                            skipped_count += 1
+                            log.warning(f"在文件 {file_basename} 找到选项 '{choice_line}'，但翻译元数据格式不正确 ({type(translation_metadata_obj)})，保留原文。")
+                    else:
+                        new_lines.append(lines[i])
+                    i += 1
+
+                if i < len(lines) and lines[i].strip() == '##':
+                    new_lines.append(lines[i])
+                    i += 1
+
             else: # 其他单行内容的标记
                 if i < len(lines):
                     single_line_content_key = lines[i].strip() 
