@@ -23,7 +23,7 @@ def run_export(game_path, export_encoding, message_queue):
     """
     try:
         message_queue.put(("status", f"正在导出文本 (编码: {export_encoding})..."))
-        message_queue.put(("log", ("normal", f"步骤 2: 开始导出文本 (读取编码: {export_encoding})...")))
+        message_queue.put(("log", ("normal", f"步骤 1: 开始导出文本 (读取编码: {export_encoding})...")))
 
         lmt_path = os.path.join(game_path, "RPG_RT.lmt")
         if not os.path.exists(lmt_path):

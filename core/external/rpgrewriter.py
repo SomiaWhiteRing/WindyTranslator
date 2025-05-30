@@ -3,6 +3,7 @@ import os
 import subprocess
 import logging
 import sys
+import platform # 新增导入
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,10 @@ def run_rpgrewriter_command(lmt_path, command_args, interact_input=None):
     # 完整命令列表
     full_command = [RPGREWRITER_EXE_PATH, lmt_path] + command_args
 
+    creation_flags = 0
+    if platform.system() == "Windows":
+        creation_flags = subprocess.CREATE_NO_WINDOW # 0x08000000
+
     log.info(f"执行 RPGRewriter 命令: {' '.join(full_command)} (工作目录: {run_dir})")
 
     try:
@@ -56,8 +61,9 @@ def run_rpgrewriter_command(lmt_path, command_args, interact_input=None):
             text=True,          # 使用文本模式读写 stdout/stderr
             encoding=sys.getdefaultencoding(), # 尝试使用系统默认编码，减少乱码问题
             errors='replace',   # 替换无法解码的字符
-            cwd=run_dir         # 在 lmt 文件所在目录执行
+            cwd=run_dir,         # 在 lmt 文件所在目录执行
             # cwd=program_dir     # 或者在程序所在目录执行？取决于 RPGRewriter 行为
+            creationflags=creation_flags # 新增此参数
         )
 
         stdout, stderr = process.communicate(input=interact_input if interact_input else None)

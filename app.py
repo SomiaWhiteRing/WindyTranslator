@@ -192,7 +192,7 @@ class RPGTranslatorApp:
         elif task_name == 'easy_flow':
              # 轻松模式需要检查 API Key 是否配置
              if not world_dict_config.get("api_key") or not translate_config.get("api_key"):
-                 messagebox.showerror("配置缺失", "请先在 Gemini 和 DeepSeek 配置中填写 API Key。", parent=self.root)
+                 messagebox.showerror("配置缺失", "请先在 字典API 和 翻译API 配置中填写 API Key。", parent=self.root)
                  return
 
              task_func = easy_mode_flow.run_easy_flow

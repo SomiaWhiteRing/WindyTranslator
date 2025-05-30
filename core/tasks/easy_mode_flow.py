@@ -1,7 +1,9 @@
 # core/tasks/easy_mode_flow.py
+import os
 import logging
 import queue # 需要引用 queue 来检查类型
 from . import initialize, rename, export, json_creation, dict_generation, translate, json_release, import_task
+from core.utils import (text_processing, dictionary_manager)
 
 log = logging.getLogger(__name__)
 
@@ -38,11 +40,11 @@ def run_easy_flow(
 
     steps = [
         {"name": "初始化", "func": initialize.run_initialize, "args": [game_path, rtp_options, message_queue]},
-        {"name": "重写文件名", "func": rename.run_rename, "args": [game_path, program_dir, rewrite_rtp_fix, message_queue]},
         {"name": "导出文本", "func": export.run_export, "args": [game_path, export_encoding, message_queue]},
+        {"name": "重写文件名", "func": rename.run_rename, "args": [game_path, program_dir, rewrite_rtp_fix, message_queue]},
         {"name": "制作JSON文件", "func": json_creation.run_create_json, "args": [game_path, works_dir, message_queue]},
         {"name": "生成世界观字典", "func": dict_generation.run_generate_dictionary, "args": [game_path, works_dir, world_dict_config, message_queue]},
-        {"name": "翻译JSON文件", "func": translate.run_translate, "args": [game_path, works_dir, translate_config, message_queue]},
+        {"name": "翻译JSON文件", "func": translate.run_translate, "args": [game_path, works_dir, translate_config, world_dict_config, message_queue]},
         # {"name": "释放JSON文件", "func": json_release.run_release_json, "args": [game_path, works_dir, selected_json_path, message_queue]}, # 需要 App 决定路径
         # {"name": "导入文本", "func": import_task.run_import, "args": [game_path, import_encoding, message_queue]},
     ]

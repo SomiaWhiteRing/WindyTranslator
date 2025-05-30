@@ -21,7 +21,7 @@ def _create_input_txt(lmt_path, program_dir, rtp_fix_check):
         str: 创建的 input.txt 的路径。
         int: 转换的非 ASCII 文件名数量。
     """
-    log.info("步骤 1.1: 生成原始文件列表 (filelist.txt)...")
+    log.info("步骤 2.1: 生成原始文件列表 (filelist.txt)...")
     # RPGRewriter 可能在 lmt_path 目录生成 filelist.txt
     game_dir = os.path.dirname(lmt_path)
     success, filelist_path = rpgrewriter.generate_filelist(lmt_path)
@@ -31,7 +31,7 @@ def _create_input_txt(lmt_path, program_dir, rtp_fix_check):
         return False, None, 0, "null"
 
     log.info(f"成功生成 filelist.txt: {filelist_path}")
-    log.info("步骤 1.2: 处理 filelist.txt 并生成 input.txt...")
+    log.info("步骤 2.2: 处理 filelist.txt 并生成 input.txt...")
 
     try:
         with open(filelist_path, 'r', encoding='utf-8', errors='replace') as file:
@@ -100,7 +100,7 @@ def run_rename(game_path, program_dir, rtp_fix, message_queue):
     """
     try:
         message_queue.put(("status", "正在重写文件名..."))
-        message_queue.put(("log", ("normal", "步骤 1: 开始重写文件名...")))
+        message_queue.put(("log", ("normal", "步骤 2: 开始重写文件名...")))
 
         lmt_path = os.path.join(game_path, "RPG_RT.lmt")
         if not os.path.exists(lmt_path):
@@ -118,7 +118,7 @@ def run_rename(game_path, program_dir, rtp_fix, message_queue):
             return
 
         # 2. 验证文件名 (RPGRewriter -V)
-        message_queue.put(("log", ("normal", "步骤 1.3: 验证文件名 (RPGRewriter -V)...")))
+        message_queue.put(("log", ("normal", "步骤 2.3: 验证文件名 (RPGRewriter -V)...")))
         return_code_v, stdout_v, stderr_v = rpgrewriter.validate_rename_input(lmt_path)
         if return_code_v != 0:
             message_queue.put(("error", f"文件名验证失败。退出码: {return_code_v}"))
@@ -131,7 +131,7 @@ def run_rename(game_path, program_dir, rtp_fix, message_queue):
         message_queue.put(("log", ("normal", "文件名验证通过。")))
 
         # 3. 重写游戏数据 (RPGRewriter -rewrite)
-        message_queue.put(("log", ("normal", "步骤 1.4: 重写游戏数据 (RPGRewriter -rewrite)...")))
+        message_queue.put(("log", ("normal", "步骤 2.4: 重写游戏数据 (RPGRewriter -rewrite)...")))
         return_code_rw, stdout_rw, stderr_rw = rpgrewriter.rewrite_game_data(lmt_path, rewrite_all=True)
         if return_code_rw != 0:
             message_queue.put(("error", f"重写游戏数据失败。退出码: {return_code_rw}"))
@@ -147,7 +147,7 @@ def run_rename(game_path, program_dir, rtp_fix, message_queue):
 
         # 进行RTP修正
         if rtp_fix:
-            message_queue.put(("log", ("normal", "步骤 1.5: 进行 RTP 修正...")))
+            message_queue.put(("log", ("normal", "步骤 2.5: 进行 RTP 修正...")))
             success_rtp = rtp.install_rtp_files(game_path, ["2000fix.zip"])
             if success_rtp:
                 message_queue.put(("log", ("success", "RTP 修正完成。")))

@@ -75,3 +75,7 @@ release.zip
 app_config.json
 
 repomix-output.xml
+
+venv*
+dist*
+build*

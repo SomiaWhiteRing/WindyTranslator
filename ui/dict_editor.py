@@ -116,7 +116,7 @@ class DictEditorWindow(tk.Toplevel):
         self.cancel_button = ttk.Button(button_frame, text="关闭", command=self.destroy)
         self.cancel_button.pack(side=tk.RIGHT, padx=5)
 
-        self.save_button = ttk.Button(button_frame, text="保存全部", command=self._on_apply_base_dictionary_clicked)
+        self.save_button = ttk.Button(button_frame, text="保存全部", command=self._on_save_data_clicked)
         self.save_button.pack(side=tk.RIGHT, padx=5)
 
         # --- 新增：“应用基础字典”按钮，仅在非基础字典编辑时显示 ---

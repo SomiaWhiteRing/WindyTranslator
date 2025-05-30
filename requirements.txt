@@ -1,3 +1,4 @@
 pyinstaller==6.12.0 
 google-genai
+google-api-core
 openai
