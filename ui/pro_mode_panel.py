@@ -118,7 +118,7 @@ class ProModePanel(ttk.Frame):
         row_idx += 1
 
         # --- 5. 翻译JSON文件 ---
-        row_frame_5 = create_row(self, "5. 翻译JSON文件", "DeepSeek API 翻译 JSON")
+        row_frame_5 = create_row(self, "5. 翻译JSON文件", "OpenAI兼容 API 翻译 JSON")
         self.translate_button = ttk.Button(row_frame_5, text="执行", width=button_width,
                                           command=lambda: self.app.start_task('translate'))
         self.translate_button.pack(side=tk.RIGHT, padx=padx_val)

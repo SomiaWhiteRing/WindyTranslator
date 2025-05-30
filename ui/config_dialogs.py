@@ -356,7 +356,7 @@ class TranslateConfigWindow(tk.Toplevel):
         self.connection_tested_ok = False
 
         # --- 窗口设置 ---
-        self.title("翻译JSON文件配置 (DeepSeek/OpenAI)")
+        self.title("翻译JSON文件配置 (OpenAI兼容 API)")
         self.geometry("600x580") # 保持原大小
         self.transient(parent)
         self.grab_set()
@@ -555,7 +555,7 @@ class TranslateConfigWindow(tk.Toplevel):
         except ConnectionError as e:
              self.after(0, lambda: self._test_connection_result(False, f"客户端初始化失败: {e}"))
         except Exception as e:
-            log.exception("DeepSeek 连接测试线程发生意外错误。")
+            log.exception("翻译API连接测试线程发生意外错误。")
             self.after(0, lambda: self._test_connection_result(False, f"测试时发生意外错误: {e}"))
 
     def _test_connection_result(self, success, message):

@@ -428,7 +428,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         concurrency_config = current_translate_config.get("concurrency", 16)
         context_lines_count = current_translate_config.get("context_lines", 10) # 获取上下文行数配置
         if not api_url or not api_key or not model_name:
-             raise ValueError("DeepSeek/OpenAI 兼容 API 配置不完整 (URL, Key, Model)。")
+             raise ValueError("翻译API 配置不完整 (URL, Key, Model)。")
         
         try: api_client_instance = deepseek.DeepSeekClient(api_url, api_key)
         except Exception as client_err: raise ConnectionError(f"初始化 API 客户端失败: {client_err}")

@@ -31,7 +31,7 @@ class EasyModePanel(ttk.Frame):
         # Gemini 配置按钮
         self.gemini_config_button = ttk.Button(
             button_container,
-            text="Gemini配置",
+            text="字典API配置",
             command=lambda: self.app.start_task('configure_gemini'), # 调用 App 的方法
             width=15
         )
@@ -40,7 +40,7 @@ class EasyModePanel(ttk.Frame):
         # Deepseek 配置按钮
         self.deepseek_config_button = ttk.Button(
             button_container,
-            text="Deepseek配置",
+            text="翻译API配置",
             command=lambda: self.app.start_task('configure_deepseek'), # 调用 App 的方法
             width=15
         )

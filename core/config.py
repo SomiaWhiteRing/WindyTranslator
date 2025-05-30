@@ -61,7 +61,7 @@ DEFAULT_TRANSLATE_CONFIG = {
     "batch_size": 32, 
     "context_lines": 8, 
     "concurrency": 16,
-    "max_retries": 3,
+    "max_retries": 1,
     "source_language": "日语",
     "target_language": "简体中文",
     # 更新Prompt模板
