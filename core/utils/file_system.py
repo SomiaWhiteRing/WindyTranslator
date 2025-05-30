@@ -1,5 +1,6 @@
 # core/utils/file_system.py
 import os
+import sys
 import shutil
 import logging
 
@@ -53,6 +54,29 @@ def safe_remove(path):
     except Exception as e:
         log.error(f"删除失败: {path} - {e}")
         return False
+
+def get_application_path():
+    """获取应用程序的基准路径。
+    如果是 PyInstaller 打包的程序，则返回解压资源的临时目录 (_MEIPASS)。
+    否则，返回主脚本所在的目录（适用于开发环境）。
+    """
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        return sys._MEIPASS  # 在 PyInstaller 打包后的环境中运行
+    else:
+        # 在正常的 Python 环境中运行，返回主执行脚本的目录
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+def get_executable_dir():
+    """获取可执行文件所在的目录。
+    如果是 PyInstaller 打包的程序，则返回 .exe 文件所在的目录。
+    否则，返回主脚本所在的目录（适用于开发环境）。
+    """
+    if getattr(sys, 'frozen', False):
+        # 如果是 PyInstaller 打包后的程序
+        return os.path.dirname(sys.executable)
+    else:
+        # 如果是直接运行的脚本
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 # 可以在这里添加更多文件系统相关的辅助函数，例如：
 # - get_relative_path(base_path, target_path)

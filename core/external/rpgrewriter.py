@@ -3,15 +3,13 @@ import os
 import subprocess
 import logging
 import sys
-import platform # 新增导入
+import platform
+from core.utils.file_system import get_application_path  # 导入路径辅助函数
 
 log = logging.getLogger(__name__)
 
-# 定义 RPGRewriter.exe 的预期相对路径或绝对路径
-# 更好的做法是在配置中管理这个路径，但暂时硬编码，后续可移到 config 或 app
-# 假设程序结构如前所述，RPGRewriter 在 modules 目录下
-PROGRAM_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) # 获取项目根目录 rpg_translator/
-RPGREWRITER_EXE_PATH = os.path.join(PROGRAM_DIR, "modules", "RPGRewriter", "RPGRewriter.exe")
+# 定义 RPGRewriter.exe 的路径
+RPGREWRITER_EXE_PATH = os.path.join(get_application_path(), "modules", "RPGRewriter", "RPGRewriter.exe")
 
 # --- RPGRewriter 核心交互函数 ---
 

@@ -2,14 +2,13 @@
 import os
 import csv
 import logging
-from . import file_system # 从 utils 导入
+from core.utils.file_system import get_application_path  # 导入路径辅助函数
+from . import file_system
 
 log = logging.getLogger(__name__)
 
 # --- 基础字典文件路径常量 ---
-# 假设 PROGRAM_DIR 是项目根目录，如果不是，需要调整获取方式
-PROGRAM_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-BASE_DICT_DIR = os.path.join(PROGRAM_DIR, "modules", "dict")
+BASE_DICT_DIR = os.path.join(get_application_path(), "modules", "dict")
 BASE_CHARACTER_DICT_FILENAME = "base_character_dictionary.csv"
 BASE_ENTITY_DICT_FILENAME = "base_entity_dictionary.csv"
 BASE_CHARACTER_DICT_PATH = os.path.join(BASE_DICT_DIR, BASE_CHARACTER_DICT_FILENAME)

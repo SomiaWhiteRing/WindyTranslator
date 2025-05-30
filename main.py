@@ -5,6 +5,7 @@ import logging
 import sys
 import os
 import datetime
+from core.utils.file_system import get_executable_dir  # 导入路径辅助函数
 
 # 导入主应用程序类
 from app import RPGTranslatorApp
@@ -31,7 +32,7 @@ def setup_logging():
     root_logger.addHandler(console_handler)
 
     # (可选) 创建文件处理器，将日志写入文件
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    log_dir = os.path.join(get_executable_dir(), "logs")
     if not os.path.exists(log_dir):
         try:
             os.makedirs(log_dir)

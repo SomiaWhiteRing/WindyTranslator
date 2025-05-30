@@ -4,13 +4,13 @@ import zipfile
 import tempfile
 import logging
 import shutil
+from core.utils.file_system import get_application_path  # 导入路径辅助函数
 from core.utils import file_system
 
 log = logging.getLogger(__name__)
 
-# RTP 集合源路径 (同样，最好由配置或 App 层提供)
-PROGRAM_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RTP_COLLECTION_DIR = os.path.join(PROGRAM_DIR, "modules", "RTPCollection")
+# RTP 集合源路径
+RTP_COLLECTION_DIR = os.path.join(get_application_path(), "modules", "RTPCollection")
 
 def install_rtp_files(target_game_dir, selected_rtp_zips):
     """
@@ -32,7 +32,7 @@ def install_rtp_files(target_game_dir, selected_rtp_zips):
         return False
     if not selected_rtp_zips:
         log.warning("未选择任何 RTP 文件进行安装。")
-        return True # 没有选择也算“成功”完成
+        return True # 没有选择也算"成功"完成
 
     overall_success = True
     log.info(f"开始安装 RTP 文件到 {target_game_dir}...")

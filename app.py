@@ -23,6 +23,7 @@ from core.tasks import (
 )
 from core.utils import (text_processing, dictionary_manager)
 from ui.dict_editor import DictEditorWindow
+from core.utils.file_system import get_executable_dir  # 导入路径辅助函数
 
 log = logging.getLogger(__name__) # 获取 logger 实例
 
@@ -39,9 +40,9 @@ class RPGTranslatorApp:
         self.root = root
         self.root.protocol("WM_DELETE_WINDOW", self._on_close) # 绑定关闭事件
 
-        self.program_dir = os.path.dirname(os.path.abspath(__file__))
-        self.works_dir = os.path.join(self.program_dir, "Works")
-        self.config_file_path = os.path.join(self.program_dir, "app_config.json") # 定义路径
+        self.executable_dir = get_executable_dir()
+        self.works_dir = os.path.join(self.executable_dir, "Works")
+        self.config_file_path = os.path.join(self.executable_dir, "app_config.json") # 定义路径
         self.config_manager = cfg.ConfigManager(self.config_file_path) # 实例化管理器
         self.config = self.config_manager.load_config() # 加载配置
 
@@ -149,7 +150,7 @@ class RPGTranslatorApp:
             task_args = [current_game_path, rtp_options, self.message_queue]
         elif task_name == 'rename':
             task_func = rename.run_rename
-            task_args = [current_game_path, self.program_dir, rewrite_rtp_fix, self.message_queue]
+            task_args = [current_game_path, self.executable_dir, rewrite_rtp_fix, self.message_queue]
         elif task_name == 'export':
             task_func = export.run_export
             task_args = [current_game_path, export_encoding, self.message_queue]
@@ -197,7 +198,7 @@ class RPGTranslatorApp:
 
              task_func = easy_mode_flow.run_easy_flow
              task_args = [
-                 current_game_path, self.program_dir, self.works_dir,
+                 current_game_path, self.executable_dir, self.works_dir,
                  rtp_options, export_encoding, import_encoding,
                  world_dict_config, translate_config, rewrite_rtp_fix,
                  self.message_queue

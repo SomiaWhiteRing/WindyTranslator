@@ -1,13 +1,13 @@
 # core/external/easyrpg.py
 import os
 import logging
-from core.utils import file_system # 导入我们的文件系统工具
+from core.utils.file_system import get_application_path  # 导入路径辅助函数
+from core.utils import file_system
 
 log = logging.getLogger(__name__)
 
-# EasyRPG 模块源路径 (同样，最好由配置或 App 层提供)
-PROGRAM_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-EASYRPG_SRC_DIR = os.path.join(PROGRAM_DIR, "modules", "EasyRPG")
+# EasyRPG 模块源路径
+EASYRPG_SRC_DIR = os.path.join(get_application_path(), "modules", "EasyRPG")
 
 def copy_easyrpg_files(target_game_dir):
     """
