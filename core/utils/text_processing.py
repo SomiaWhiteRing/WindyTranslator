@@ -147,6 +147,12 @@ def post_process_translation(text, original_text):
          log.debug(f"Removing extra '』' from translation: '{processed_text[:50]}...'")
          processed_text = processed_text.replace('』', '')
 
+    # 规则 2.1: 移除重复出现的引号
+    processed_text = processed_text.replace('“『', '『')
+    processed_text = processed_text.replace('“「', '「')
+    processed_text = processed_text.replace('』”', '』')
+    processed_text = processed_text.replace('」”', '」')
+
     # 规则 3: 引号平衡 (确保 「」 和 『』 成对出现，如果缺结尾，则补上)
     # 分别检查两种引号
     open_bracket_count = processed_text.count('「')
