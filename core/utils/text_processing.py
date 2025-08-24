@@ -85,7 +85,8 @@ def pre_process_text_for_llm(text):
     """在发送给 LLM 前替换特殊标记为 PUA 占位符"""
     if not isinstance(text, str): return text
     # 优先替换更长的模式或可能包含其他模式的模式
-    processed_text = text.replace(r'\!', '\uE002') # \!
+    processed_text = text.replace(r'\!\n', '\uE010') # \!\n
+    processed_text = processed_text.replace(r'\!', '\uE002') # \!
     processed_text = processed_text.replace(r'\.', '\uE005') # \.
     processed_text = processed_text.replace(r'\<', '\uE006') # \<
     processed_text = processed_text.replace(r'\>', '\uE007') # \>
