@@ -17,6 +17,8 @@ from collections import OrderedDict
 
 log = logging.getLogger(__name__)
 
+TRANSLATION_METADATA_PREFIX_RE = re.compile(r'^(?:\s*\[(?:MARKER|FACE):[^\]]+\]\s*)+')
+
 # --- 批量翻译工作单元 (与上一版几乎一致，增加了 current_processing_file_name 的使用) ---
 def _translate_batch_with_retry(
     batch_metadata_items, 
@@ -157,15 +159,26 @@ def _translate_batch_with_retry(
             raw_lines_from_api = raw_translated_text_block_from_api.split('\n')
             current_collecting_number = -1; current_collecting_text_parts = []
             for line_from_api in raw_lines_from_api:
-                stripped_line_for_num_match = line_from_api.lstrip()
+                line_without_meta = line_from_api
+                leading_meta_match = TRANSLATION_METADATA_PREFIX_RE.match(line_without_meta)
+                removed_only_meta = False
+                if leading_meta_match:
+                    line_without_meta = line_without_meta[leading_meta_match.end():]
+                    removed_only_meta = line_without_meta == ""
+                stripped_line_for_num_match = line_without_meta.lstrip()
                 num_line_match = re.match(r'^(\d+)\.\s*(.*)', stripped_line_for_num_match)
                 if num_line_match:
                     num_val = int(num_line_match.group(1)); text_after_num = num_line_match.group(2)
-                    if current_collecting_number != -1: numbered_translations_from_api[current_collecting_number] = "\n".join(current_collecting_text_parts).rstrip()
+                    if current_collecting_number != -1:
+                        numbered_translations_from_api[current_collecting_number] = "\n".join(current_collecting_text_parts).rstrip()
                     current_collecting_number = num_val; current_collecting_text_parts = [text_after_num]
                     max_number_found_in_response = max(max_number_found_in_response, current_collecting_number)
-                elif current_collecting_number != -1: current_collecting_text_parts.append(line_from_api)
-            if current_collecting_number != -1: numbered_translations_from_api[current_collecting_number] = "\n".join(current_collecting_text_parts).rstrip()
+                elif current_collecting_number != -1:
+                    if removed_only_meta and line_without_meta == "":
+                        continue
+                    current_collecting_text_parts.append(line_without_meta)
+            if current_collecting_number != -1:
+                numbered_translations_from_api[current_collecting_number] = "\n".join(current_collecting_text_parts).rstrip()
         else:
             log.warning(f"API 响应未找到 <textarea> (文件: {current_processing_file_name or 'N/A'}). 响应: '{api_response_content[:100]}...'")
             last_failed_raw_translation_block = api_response_content.strip()
