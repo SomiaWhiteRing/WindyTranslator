@@ -26,10 +26,32 @@ def _count_term_in_json_originals(json_path, term):
     try:
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
-        for original_text in data.keys():
-            count += original_text.count(term)
-            
+
+        if isinstance(data, dict):
+            for item in data.values():
+                if isinstance(item, dict):
+                    for original_text in item.keys():
+                        if isinstance(original_text, str):
+                            count += original_text.count(term)
+                elif isinstance(item, list):
+                    for sub_item in item:
+                        if isinstance(sub_item, str):
+                            count += sub_item.count(term)
+                        elif isinstance(sub_item, dict):
+                            for original_text in sub_item.keys():
+                                if isinstance(original_text, str):
+                                    count += original_text.count(term)
+                elif isinstance(item, str):
+                    count += item.count(term)
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, str):
+                    count += item.count(term)
+                elif isinstance(item, dict):
+                    for original_text in item.keys():
+                        if isinstance(original_text, str):
+                            count += original_text.count(term)
+
     except Exception as e:
         log.exception(f"读取或解析 JSON 文件进行术语计数时出错 ({json_path}): {e}")
         return 0 # 出错则返回0

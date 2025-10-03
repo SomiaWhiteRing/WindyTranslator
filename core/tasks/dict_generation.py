@@ -4,6 +4,8 @@ import json
 import csv
 import io # 用于将字符串模拟成文件给 csv reader
 import logging
+import time
+import re
 from core.api_clients import gemini # 导入 Gemini API 客户端模块
 from core.utils import file_system, text_processing
 # 导入默认配置以获取默认文件名
@@ -67,6 +69,58 @@ def _parse_csv_response(csv_response_text, expected_columns, message_queue):
         # 解析出错时，返回已成功解析的部分（如果有）
 
     return parsed_data
+
+
+RE_RETRY_DELAY = re.compile(r"retry(?: in)?\s*(?P<seconds>\d+(?:\.\d+)?)s", re.IGNORECASE)
+RE_RETRYINFO_DELAY = re.compile(r"'retryDelay':\s*'(?P<seconds>\d+)s'", re.IGNORECASE)
+DEFAULT_RETRY_WAIT = 20
+MAX_RETRY_WAIT = 60
+MAX_GEMINI_RETRIES = 3
+
+def _extract_retry_delay_seconds(error_message):
+    if not error_message:
+        return None
+    match = RE_RETRY_DELAY.search(error_message)
+    if match:
+        try:
+            return min(float(match.group('seconds')), MAX_RETRY_WAIT)
+        except ValueError:
+            pass
+    match = RE_RETRYINFO_DELAY.search(error_message)
+    if match:
+        try:
+            return min(float(match.group('seconds')), MAX_RETRY_WAIT)
+        except ValueError:
+            pass
+    return None
+
+def _call_gemini_with_retry(client, model_name, prompt, stage_desc, message_queue, generation_config=None, safety_settings=None):
+    last_error = None
+    wait_seconds = DEFAULT_RETRY_WAIT
+    for attempt in range(1, MAX_GEMINI_RETRIES + 1):
+        success, response_text, error_message = client.generate_content(
+            model_name,
+            prompt,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+        )
+        if success:
+            if attempt > 1:
+                log.info(f"{stage_desc} - 在第 {attempt} 次尝试时成功。")
+            return True, response_text, None
+        last_error = error_message or 'Gemini API 未返回错误信息'
+        if last_error and ('RESOURCE_EXHAUSTED' in last_error or '429' in last_error or 'quota' in last_error.lower()):
+            suggested = _extract_retry_delay_seconds(last_error)
+            if suggested is not None:
+                wait_seconds = max(1, suggested)
+            message_queue.put(('log', ('warning', f"{stage_desc} 因配额限制暂停 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_GEMINI_RETRIES})...")))
+            log.warning(f"{stage_desc} 命中配额限制，等待 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_GEMINI_RETRIES})。错误: {last_error}")
+            time.sleep(wait_seconds)
+            wait_seconds = min(wait_seconds * 2, MAX_RETRY_WAIT)
+            continue
+        else:
+            break
+    return False, None, last_error
 
 # --- 主任务函数 ---
 def run_generate_dictionary(game_path, works_dir, world_dict_config, message_queue):
@@ -218,7 +272,9 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         try:
             char_final_prompt = char_prompt_template.format(game_text=game_text_content)
             message_queue.put(("log", ("normal", f"调用 Gemini API (人物提取)...")))
-            success, char_csv_response, error_message = client.generate_content(model_name, char_final_prompt)
+            success, char_csv_response, error_message = _call_gemini_with_retry(
+                client, model_name, char_final_prompt, '人物词典生成', message_queue
+            )
 
             if not success:
                 message_queue.put(("log", ("error", f"人物词典生成失败: Gemini API 调用失败: {error_message}")))
@@ -293,7 +349,9 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                 character_reference_csv_content=character_reference_csv_content
             )
             message_queue.put(("log", ("normal", f"调用 Gemini API (事物提取)...")))
-            success, entity_csv_response, error_message = client.generate_content(model_name, entity_final_prompt)
+            success, entity_csv_response, error_message = _call_gemini_with_retry(
+                client, model_name, entity_final_prompt, '事物词典生成', message_queue
+            )
 
             if not success:
                 message_queue.put(("log", ("error", f"事物词典生成失败: Gemini API 调用失败: {error_message}")))
