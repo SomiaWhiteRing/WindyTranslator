@@ -9,8 +9,13 @@ log = logging.getLogger(__name__)
 
 # --- 默认世界观字典生成配置 ---
 DEFAULT_WORLD_DICT_CONFIG = {
+    "provider": "gemini",
     "api_key": "",
+    "api_url": "",
     "model": "gemini-2.5-pro-preview-05-06",
+    "openai_temperature": 0.2,
+    "openai_max_tokens": None,
+    "openai_extra_params": {},
     "character_dict_filename": "character_dictionary.csv", # 人物词典文件名
     "entity_dict_filename": "entity_dictionary.csv",       # 事物词典文件名
     "enable_base_dictionary": True, # <--- 启用基础字典

@@ -6,7 +6,7 @@ import io # 用于将字符串模拟成文件给 csv reader
 import logging
 import time
 import re
-from core.api_clients import gemini # 导入 Gemini API 客户端模块
+from core.api_clients import gemini, deepseek # 导入 Gemini 或 OpenAI 兼容客户端模块
 from core.utils import file_system, text_processing
 # 导入默认配置以获取默认文件名
 from core.config import DEFAULT_WORLD_DICT_CONFIG
@@ -14,13 +14,16 @@ from . import apply_base_dictionary
 
 log = logging.getLogger(__name__)
 
+PROVIDER_GEMINI = 'gemini'
+PROVIDER_OPENAI = 'openai'
+
 # --- CSV 解析辅助函数 ---
 def _parse_csv_response(csv_response_text, expected_columns, message_queue):
     """
-    解析 Gemini 返回的 CSV 文本。
+    解析字典模型返回的 CSV 文本。
 
     Args:
-        csv_response_text (str): Gemini 返回的原始文本。
+        csv_response_text (str): 字典模型返回的原始文本。
         expected_columns (int): 期望的列数。
         message_queue (queue.Queue): 用于发送日志消息的队列。
 
@@ -30,16 +33,16 @@ def _parse_csv_response(csv_response_text, expected_columns, message_queue):
     """
     parsed_data = []
     if not csv_response_text:
-        log.warning("Gemini API 未返回任何内容。")
-        message_queue.put(("log", ("warning", "Gemini API 未返回任何内容。")))
+        log.warning("字典模型 API 未返回任何内容。")
+        message_queue.put(("log", ("warning", "字典模型 API 未返回任何内容。")))
         return parsed_data
 
     try:
         # 移除响应前后可能存在的空白或```csv标记
         clean_csv_response = csv_response_text.strip().strip('```csv').strip('```').strip()
         if not clean_csv_response:
-            log.warning("清理后的 Gemini CSV 响应为空。")
-            message_queue.put(("log", ("warning", "Gemini API 返回的 CSV 内容为空或仅包含标记。")))
+            log.warning("清理后的字典模型 CSV 响应为空。")
+            message_queue.put(("log", ("warning", "字典模型 API 返回的 CSV 内容为空或仅包含标记。")))
             return parsed_data
 
         csv_file = io.StringIO(clean_csv_response)
@@ -58,14 +61,14 @@ def _parse_csv_response(csv_response_text, expected_columns, message_queue):
                 message_queue.put(("log", ("warning", f"跳过格式错误的 CSV 行 #{i+1} (期望{expected_columns}列): {row}")))
 
     except csv.Error as csv_err: # 捕捉更具体的 CSV 解析错误
-        log.error(f"解析 Gemini 返回的 CSV 数据时发生 CSV 错误: {csv_err}")
+        log.error(f"解析字典模型返回的 CSV 数据时发生 CSV 错误: {csv_err}")
         log.error(f"原始 CSV 响应内容 (前500字符):\n{csv_response_text[:500]}") # 记录部分原始响应供调试
-        message_queue.put(("error", f"解析 Gemini 返回的 CSV 数据失败 (CSV格式问题): {csv_err}"))
+        message_queue.put(("error", f"解析字典模型返回的 CSV 数据失败 (CSV格式问题): {csv_err}"))
         # 解析出错时，返回已成功解析的部分（如果有）
     except Exception as parse_err:
-        log.error(f"解析 Gemini 返回的 CSV 数据时发生意外错误: {parse_err}")
+        log.error(f"解析字典模型返回的 CSV 数据时发生意外错误: {parse_err}")
         log.error(f"原始 CSV 响应内容 (前500字符):\n{csv_response_text[:500]}") # 记录部分原始响应供调试
-        message_queue.put(("error", f"解析 Gemini 返回的 CSV 数据失败: {parse_err}"))
+        message_queue.put(("error", f"解析字典模型返回的 CSV 数据失败: {parse_err}"))
         # 解析出错时，返回已成功解析的部分（如果有）
 
     return parsed_data
@@ -75,7 +78,8 @@ RE_RETRY_DELAY = re.compile(r"retry(?: in)?\s*(?P<seconds>\d+(?:\.\d+)?)s", re.I
 RE_RETRYINFO_DELAY = re.compile(r"'retryDelay':\s*'(?P<seconds>\d+)s'", re.IGNORECASE)
 DEFAULT_RETRY_WAIT = 20
 MAX_RETRY_WAIT = 60
-MAX_GEMINI_RETRIES = 3
+MAX_WORLD_DICT_RETRIES = 3
+RATE_LIMIT_KEYWORDS = ("resource_exhausted", "429", "quota", "rate limit", "频率超限", "超限")
 
 def _extract_retry_delay_seconds(error_message):
     if not error_message:
@@ -94,27 +98,23 @@ def _extract_retry_delay_seconds(error_message):
             pass
     return None
 
-def _call_gemini_with_retry(client, model_name, prompt, stage_desc, message_queue, generation_config=None, safety_settings=None):
+def _call_world_dict_model_with_retry(request_callable, stage_desc, message_queue):
     last_error = None
     wait_seconds = DEFAULT_RETRY_WAIT
-    for attempt in range(1, MAX_GEMINI_RETRIES + 1):
-        success, response_text, error_message = client.generate_content(
-            model_name,
-            prompt,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-        )
+    for attempt in range(1, MAX_WORLD_DICT_RETRIES + 1):
+        success, response_text, error_message = request_callable()
         if success:
             if attempt > 1:
                 log.info(f"{stage_desc} - 在第 {attempt} 次尝试时成功。")
             return True, response_text, None
-        last_error = error_message or 'Gemini API 未返回错误信息'
-        if last_error and ('RESOURCE_EXHAUSTED' in last_error or '429' in last_error or 'quota' in last_error.lower()):
+        last_error = error_message or '模型调用未返回错误信息'
+        lower_err = last_error.lower() if isinstance(last_error, str) else ''
+        if any(keyword in lower_err for keyword in RATE_LIMIT_KEYWORDS):
             suggested = _extract_retry_delay_seconds(last_error)
             if suggested is not None:
                 wait_seconds = max(1, suggested)
-            message_queue.put(('log', ('warning', f"{stage_desc} 因配额限制暂停 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_GEMINI_RETRIES})...")))
-            log.warning(f"{stage_desc} 命中配额限制，等待 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_GEMINI_RETRIES})。错误: {last_error}")
+            message_queue.put(('log', ('warning', f"{stage_desc} 因配额限制暂停 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_WORLD_DICT_RETRIES})...")))
+            log.warning(f"{stage_desc} 命中配额限制，等待 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_WORLD_DICT_RETRIES})。错误: {last_error}")
             time.sleep(wait_seconds)
             wait_seconds = min(wait_seconds * 2, MAX_RETRY_WAIT)
             continue
@@ -125,12 +125,12 @@ def _call_gemini_with_retry(client, model_name, prompt, stage_desc, message_queu
 # --- 主任务函数 ---
 def run_generate_dictionary(game_path, works_dir, world_dict_config, message_queue):
     """
-    使用 Gemini API 从提取的文本生成人物词典和事物词典 (CSV 文件)。
+    使用字典模型 API 从提取的文本生成人物词典和事物词典 (CSV 文件)。
 
     Args:
         game_path (str): 游戏根目录路径。
         works_dir (str): Works 工作目录的根路径。
-        world_dict_config (dict): 包含 Gemini API Key、模型、两个Prompt模板和词典文件名的配置字典。
+        world_dict_config (dict): 包含字典模型所需的 API 配置（Key、模型、Prompt模板、词典文件名等）。
         message_queue (queue.Queue): 用于向主线程发送消息的队列。
     """
     # 定义两个阶段的状态变量
@@ -142,8 +142,6 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
 
     try:
         message_queue.put(("status", "正在准备生成字典..."))
-        message_queue.put(("log", ("normal", "步骤 4: 开始生成世界观字典 (使用 Gemini API)...")))
-
         # --- 获取配置 ---
         api_key = world_dict_config.get("api_key", "").strip()
         model_name = world_dict_config.get("model", "").strip()
@@ -152,14 +150,50 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         char_dict_filename = world_dict_config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
         entity_dict_filename = world_dict_config.get("entity_dict_filename", DEFAULT_WORLD_DICT_CONFIG["entity_dict_filename"])
         enable_base_dict = world_dict_config.get("enable_base_dictionary", True)
+        provider_raw = world_dict_config.get("provider", PROVIDER_GEMINI)
+        provider = (provider_raw or PROVIDER_GEMINI).strip().lower()
+        if provider not in (PROVIDER_GEMINI, PROVIDER_OPENAI):
+            raise ValueError(f"不支持的字典模型提供方: {provider_raw}")
+        provider_display = "Gemini API" if provider == PROVIDER_GEMINI else "OpenAI 兼容 API"
+        api_url = world_dict_config.get("api_url", "").strip()
+        openai_temperature = world_dict_config.get("openai_temperature", 0.2)
+        openai_max_tokens = world_dict_config.get("openai_max_tokens")
+        openai_extra_params = world_dict_config.get("openai_extra_params", {})
+        if provider == PROVIDER_OPENAI:
+            try:
+                openai_temperature = float(openai_temperature)
+            except (TypeError, ValueError):
+                log.warning("OpenAI 温度配置无效，使用默认 0.2。")
+                openai_temperature = 0.2
+            if isinstance(openai_max_tokens, str) and openai_max_tokens.strip():
+                try:
+                    openai_max_tokens = int(openai_max_tokens.strip())
+                except ValueError:
+                    log.warning("OpenAI max_tokens 配置无效，已忽略。")
+                    openai_max_tokens = None
+        else:
+            openai_max_tokens = None
+        if not isinstance(openai_extra_params, dict):
+            log.warning("openai_extra_params 配置不是字典类型，已忽略。")
+            openai_extra_params = {}
 
         # --- 检查配置 ---
-        if not api_key: raise ValueError("Gemini API Key 未配置。")
-        if not model_name: raise ValueError("Gemini 模型名称未配置。")
-        if not char_prompt_template: raise ValueError("人物提取 Prompt 模板未配置。")
-        if not entity_prompt_template: raise ValueError("事物提取 Prompt 模板未配置。")
-        if not char_dict_filename: raise ValueError("人物词典文件名未配置。")
-        if not entity_dict_filename: raise ValueError("事物词典文件名未配置。")
+        if not api_key:
+            raise ValueError(f"{provider_display} Key 未配置。")
+        if provider == PROVIDER_OPENAI and not api_url:
+            raise ValueError("OpenAI 兼容 API 基础地址 (api_url) 未配置。")
+        if not model_name:
+            raise ValueError("字典模型名称未配置。")
+        if not char_prompt_template:
+            raise ValueError("人物提取 Prompt 模板未配置。")
+        if not entity_prompt_template:
+            raise ValueError("事物提取 Prompt 模板未配置。")
+        if not char_dict_filename:
+            raise ValueError("人物词典文件名未配置。")
+        if not entity_dict_filename:
+            raise ValueError("事物词典文件名未配置。")
+
+        message_queue.put(("log", ("normal", f"步骤 4: 开始生成世界观字典 (使用 {provider_display})...")))
 
         # --- 确定文件路径 ---
         game_folder_name = text_processing.sanitize_filename(os.path.basename(game_path))
@@ -256,12 +290,41 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
             log.exception(f"加载 JSON 或准备临时输入文件时出错: {e_load_prepare}")
             raise RuntimeError(f"加载 JSON 或准备输入文本失败: {e_load_prepare}") from e_load_prepare
 
-        # --- 初始化 Gemini 客户端 ---
+        # --- 初始化字典模型客户端 ---
         try:
-            client = gemini.GeminiClient(api_key)
-            log.info("Gemini 客户端初始化成功。")
+            if provider == PROVIDER_GEMINI:
+                client = gemini.GeminiClient(api_key)
+                log.info("Gemini 客户端初始化成功。")
+                def request_model(prompt):
+                    return client.generate_content(model_name, prompt)
+            else:
+                client = deepseek.DeepSeekClient(api_url, api_key)
+                log.info(f"OpenAI 兼容客户端初始化成功 (URL: {api_url}).")
+                def request_model(prompt):
+                    extra_kwargs = dict(openai_extra_params)
+                    temperature = extra_kwargs.pop('temperature', openai_temperature)
+                    try:
+                        temperature = float(temperature)
+                    except (TypeError, ValueError):
+                        temperature = openai_temperature
+                    max_tokens_value = extra_kwargs.pop('max_tokens', openai_max_tokens)
+                    if isinstance(max_tokens_value, str) and max_tokens_value.strip():
+                        try:
+                            max_tokens_value = int(max_tokens_value.strip())
+                        except ValueError:
+                            log.warning("openai_extra_params 中的 max_tokens 无效，已忽略。")
+                            max_tokens_value = openai_max_tokens
+                    if isinstance(max_tokens_value, float):
+                        max_tokens_value = int(max_tokens_value)
+                    return client.chat_completion(
+                        model_name,
+                        [{"role": "user", "content": prompt}],
+                        temperature=temperature,
+                        max_tokens=max_tokens_value,
+                        **extra_kwargs
+                    )
         except Exception as client_err:
-            raise ConnectionError(f"初始化 Gemini API 客户端失败: {client_err}") from client_err
+            raise ConnectionError(f"初始化字典模型 API 客户端失败: {client_err}") from client_err
 
         # ==================================================
         # === 阶段一：生成人物词典 (Character Dictionary) ===
@@ -271,13 +334,13 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         character_data = []
         try:
             char_final_prompt = char_prompt_template.format(game_text=game_text_content)
-            message_queue.put(("log", ("normal", f"调用 Gemini API (人物提取)...")))
-            success, char_csv_response, error_message = _call_gemini_with_retry(
-                client, model_name, char_final_prompt, '人物词典生成', message_queue
+            message_queue.put(("log", ("normal", f"调用 {provider_display} (人物提取)...")))
+            success, char_csv_response, error_message = _call_world_dict_model_with_retry(
+                lambda: request_model(char_final_prompt), '人物词典生成', message_queue
             )
 
             if not success:
-                message_queue.put(("log", ("error", f"人物词典生成失败: Gemini API 调用失败: {error_message}")))
+                message_queue.put(("log", ("error", f"人物词典生成失败: {provider_display} 调用失败: {error_message}")))
                 # 不抛出异常，允许继续尝试生成事物词典，但记录失败状态
             else:
                 message_queue.put(("log", ("success", "人物提取 API 调用成功，正在解析...")))
@@ -348,13 +411,13 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                 game_text=game_text_content,
                 character_reference_csv_content=character_reference_csv_content
             )
-            message_queue.put(("log", ("normal", f"调用 Gemini API (事物提取)...")))
-            success, entity_csv_response, error_message = _call_gemini_with_retry(
-                client, model_name, entity_final_prompt, '事物词典生成', message_queue
+            message_queue.put(("log", ("normal", f"调用 {provider_display} (事物提取)...")))
+            success, entity_csv_response, error_message = _call_world_dict_model_with_retry(
+                lambda: request_model(entity_final_prompt), '事物词典生成', message_queue
             )
 
             if not success:
-                message_queue.put(("log", ("error", f"事物词典生成失败: Gemini API 调用失败: {error_message}")))
+                message_queue.put(("log", ("error", f"事物词典生成失败: {provider_display} 调用失败: {error_message}")))
                 # 记录失败状态
             else:
                 message_queue.put(("log", ("success", "事物提取 API 调用成功，正在解析...")))
@@ -441,3 +504,4 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                  log.info(f"已清理临时原文聚合文件: {temp_text_path}")
             else:
                  log.warning(f"清理临时文件失败: {temp_text_path}")
+

@@ -1,4 +1,4 @@
-# ui/config_dialogs.py
+﻿# ui/config_dialogs.py
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import threading
@@ -11,261 +11,321 @@ from core.config import DEFAULT_WORLD_DICT_CONFIG
 
 log = logging.getLogger(__name__)
 
-# --- Gemini (世界观字典) 配置窗口 ---
+PROVIDER_GEMINI = 'gemini'
+PROVIDER_OPENAI = 'openai'
+
+# --- 世界观字典配置窗口 ---
+
 class WorldDictConfigWindow(tk.Toplevel):
-    """世界观字典 (Gemini) 配置对话框。"""
+    """世界观字典配置对话框。"""
 
     def __init__(self, parent, app_controller, world_dict_config):
-        """
-        初始化 Gemini 配置窗口。
-
-        Args:
-            parent (tk.Widget): 父窗口。
-            app_controller (RPGTranslatorApp): 应用控制器实例。
-            world_dict_config (dict): 当前的世界观字典配置字典 (来自 app.config)。
-                                     窗口将直接修改这个字典。
-        """
+        """初始化配置窗口并绑定 UI 控件。"""
         super().__init__(parent)
         self.app = app_controller
-        self.config = world_dict_config # 直接引用配置字典
+        self.config = world_dict_config  # 直接引用配置字典
 
-        # --- 状态标志 ---
-        self.initializing = True # 防止初始化期间触发 on_change
-        self.connection_tested_ok = True # 标记连接测试是否通过
+        self.initializing = True
+        self.connection_tested_ok = False
 
-        # --- 窗口设置 ---
-        self.title("世界观字典配置 (Gemini)")
-        self.geometry("800x550") # 增加宽度以适应并排 Prompt
+        self.provider_display_map = {
+            PROVIDER_GEMINI: "Google Gemini 原生",
+            PROVIDER_OPENAI: "OpenAI 兼容端点",
+        }
+        self.provider_value_map = {label: value for value, label in self.provider_display_map.items()}
+
+        provider_value = (self.config.get("provider") or PROVIDER_GEMINI).lower()
+        if provider_value not in self.provider_display_map:
+            provider_value = PROVIDER_GEMINI
+
+        self.provider_var = tk.StringVar(value=provider_value)
+        self.provider_display_var = tk.StringVar(value=self.provider_display_map[provider_value])
+        self.api_key_var = tk.StringVar(value=self.config.get("api_key", ""))
+        self.api_url_var = tk.StringVar(value=self.config.get("api_url", ""))
+        self.model_var = tk.StringVar(value=self.config.get("model", DEFAULT_WORLD_DICT_CONFIG["model"]))
+        self.openai_temp_var = tk.StringVar(value=str(self.config.get("openai_temperature", DEFAULT_WORLD_DICT_CONFIG["openai_temperature"])))
+        max_tokens_cfg = self.config.get("openai_max_tokens", DEFAULT_WORLD_DICT_CONFIG["openai_max_tokens"])
+        self.openai_max_tokens_var = tk.StringVar(value="" if max_tokens_cfg in (None, "") else str(max_tokens_cfg))
+        self.enable_base_dict_var = tk.BooleanVar(value=self.config.get("enable_base_dictionary", True))
+        self.show_key_var = tk.BooleanVar(value=False)
+        self.status_var = tk.StringVar(value="请输入配置并测试连接")
+
+        self.title("世界观字典配置")
+        self.geometry("820x560")
         self.transient(parent)
         self.grab_set()
 
-        # --- 框架 ---
         frame = ttk.Frame(self, padding="10")
         frame.pack(fill=tk.BOTH, expand=True)
-        frame.columnconfigure(1, weight=1) # API Key 和 Model 输入框列
-        frame.columnconfigure(2, weight=0) # API Key 显示按钮列
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(2, weight=1)
 
-        # --- 控件变量 ---
-        self.api_key_var = tk.StringVar(value=self.config.get("api_key", ""))
-        self.model_var = tk.StringVar(value=self.config.get("model", DEFAULT_WORLD_DICT_CONFIG["model"]))
-        self.enable_base_dict_var = tk.BooleanVar(value=self.config.get("enable_base_dictionary", True))
-        self.show_key_var = tk.BooleanVar(value=False)
-        self.status_var = tk.StringVar(value="请先测试连接")
-
-        # --- 创建控件 ---
         row_idx = 0
 
-        # API Key
-        ttk.Label(frame, text="Gemini API Key:").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-        key_frame = ttk.Frame(frame) # 使用 Frame 容纳输入框和显示按钮
+        ttk.Label(frame, text="模型供应商:").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+        self.provider_combo = ttk.Combobox(
+            frame,
+            textvariable=self.provider_display_var,
+            values=list(self.provider_display_map.values()),
+            state='readonly',
+            width=40,
+        )
+        self.provider_combo.grid(row=row_idx, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        self.provider_combo.bind("<<ComboboxSelected>>", self._on_provider_combo_selected)
+        row_idx += 1
+
+        self.api_key_label = ttk.Label(frame, text="API Key:")
+        self.api_key_label.grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+        key_frame = ttk.Frame(frame)
         key_frame.grid(row=row_idx, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
         key_frame.columnconfigure(0, weight=1)
         self.api_key_entry = ttk.Entry(key_frame, textvariable=self.api_key_var, width=50, show="*")
         self.api_key_entry.grid(row=0, column=0, sticky="ew")
-        key_toggle_button = ttk.Checkbutton(key_frame, text="显示", variable=self.show_key_var, command=self._toggle_key_visibility)
-        key_toggle_button.grid(row=0, column=1, padx=(5, 0))
+        self.key_toggle_button = ttk.Checkbutton(key_frame, text="显示", variable=self.show_key_var, command=self._toggle_key_visibility)
+        self.key_toggle_button.grid(row=0, column=1, padx=(5, 0))
         row_idx += 1
 
-        # Model Name
+        self.api_url_row = row_idx
+        self.api_url_label = ttk.Label(frame, text="API 基础地址:")
+        self.api_url_label.grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+        self.api_url_entry = ttk.Entry(frame, textvariable=self.api_url_var, width=50)
+        self.api_url_entry.grid(row=row_idx, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        row_idx += 1
+
         ttk.Label(frame, text="模型名称:").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-        model_combobox = ttk.Combobox(frame, textvariable=self.model_var, values=[
-            "gemini-1.5-pro-latest", # 推荐
-            "gemini-pro",            # 旧版稳定 Pro
-            "gemini-1.0-pro",        # 明确版本
-            "gemini-1.5-flash-latest", # Flash 版本
-        ], width=48)
-        model_combobox.grid(row=row_idx, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        model_values = [
+            "gemini-2.5-pro-preview-05-06",
+            "gemini-1.5-pro-latest",
+            "gemini-1.5-flash-latest",
+            "gemini-pro",
+        ]
+        self.model_combobox = ttk.Combobox(frame, textvariable=self.model_var, values=model_values, width=48)
+        self.model_combobox.grid(row=row_idx, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
         row_idx += 1
 
-        # --- 并排 Prompt 区域 ---
+        self.openai_params_row = row_idx
+        self.openai_params_frame = ttk.Frame(frame)
+        self.openai_params_frame.grid(row=row_idx, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+        self.openai_params_frame.columnconfigure(1, weight=1)
+        self.openai_params_frame.columnconfigure(3, weight=1)
+        ttk.Label(self.openai_params_frame, text="温度 (0-2):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.openai_temp_entry = ttk.Entry(self.openai_params_frame, textvariable=self.openai_temp_var, width=10)
+        self.openai_temp_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ttk.Label(self.openai_params_frame, text="最大 tokens:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
+        self.openai_max_tokens_entry = ttk.Entry(self.openai_params_frame, textvariable=self.openai_max_tokens_var, width=12)
+        self.openai_max_tokens_entry.grid(row=0, column=3, padx=5, pady=5, sticky="w")
+        ttk.Label(self.openai_params_frame, text="(留空使用服务端默认)").grid(row=0, column=4, padx=5, pady=5, sticky="w")
+        row_idx += 1
+
         prompt_area_frame = ttk.Frame(frame)
         prompt_area_frame.grid(row=row_idx, column=0, columnspan=3, padx=5, pady=5, sticky="nsew")
-        # 配置 prompt_area_frame 的列权重，使其内部控件能平均分配宽度
         prompt_area_frame.columnconfigure(0, weight=1)
         prompt_area_frame.columnconfigure(1, weight=1)
-        # 配置 prompt_area_frame 的行权重，使其能够垂直扩展
         prompt_area_frame.rowconfigure(0, weight=1)
-        # 配置主 frame 的该行权重，允许 Prompt 区域垂直扩展
         frame.rowconfigure(row_idx, weight=1)
-        row_idx += 1 # Prompt 区域占据一行
+        row_idx += 1
 
-        # 人物提取 Prompt Frame 和 Text
         char_prompt_frame = ttk.LabelFrame(prompt_area_frame, text="人物提取 Prompt", padding="5")
         char_prompt_frame.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="nsew")
         char_prompt_frame.rowconfigure(0, weight=1)
         char_prompt_frame.columnconfigure(0, weight=1)
         self.char_prompt_text = scrolledtext.ScrolledText(char_prompt_frame, wrap=tk.WORD, height=15)
         self.char_prompt_text.grid(row=0, column=0, sticky="nsew")
-        # 从配置或默认值加载 Prompt
         self.char_prompt_text.insert(tk.END, self.config.get("character_prompt_template", DEFAULT_WORLD_DICT_CONFIG["character_prompt_template"]))
-        self.char_prompt_text.edit_modified(False) # 初始化修改状态
+        self.char_prompt_text.edit_modified(False)
 
-        # 事物提取 Prompt Frame 和 Text
         entity_prompt_frame = ttk.LabelFrame(prompt_area_frame, text="事物提取 Prompt", padding="5")
         entity_prompt_frame.grid(row=0, column=1, padx=(5, 0), pady=5, sticky="nsew")
         entity_prompt_frame.rowconfigure(0, weight=1)
         entity_prompt_frame.columnconfigure(0, weight=1)
         self.entity_prompt_text = scrolledtext.ScrolledText(entity_prompt_frame, wrap=tk.WORD, height=15)
         self.entity_prompt_text.grid(row=0, column=0, sticky="nsew")
-        # 从配置或默认值加载 Prompt
         self.entity_prompt_text.insert(tk.END, self.config.get("entity_prompt_template", DEFAULT_WORLD_DICT_CONFIG["entity_prompt_template"]))
-        self.entity_prompt_text.edit_modified(False) # 初始化修改状态
+        self.entity_prompt_text.edit_modified(False)
 
-        # 状态标签
         self.status_label = ttk.Label(frame, textvariable=self.status_var, foreground="orange")
         self.status_label.grid(row=row_idx, column=0, columnspan=3, padx=5, pady=(10, 0), sticky="ew")
         row_idx += 1
 
-        # 按钮区域
         button_frame = ttk.Frame(frame)
         button_frame.grid(row=row_idx, column=0, columnspan=3, pady=10, sticky="e")
 
-
-        # --- 新增：基础字典相关控件，放在按钮组左侧 ---
         self.enable_base_dict_checkbutton = ttk.Checkbutton(
             button_frame,
             text="启用基础字典",
             variable=self.enable_base_dict_var,
-            command=self._on_config_change # 勾选变化也视为配置更改
+            command=self._on_config_change,
         )
-        self.enable_base_dict_checkbutton.pack(side=tk.LEFT, padx=5) # 增加右边距
-        self.edit_base_dict_button = ttk.Button(
-            button_frame,
-            text="编辑基础字典",
-            command=self._open_base_dict_editor_modal # 修改命令
-        )
-        self.edit_base_dict_button.pack(side=tk.LEFT, padx=5) # 增加右边距
+        self.enable_base_dict_checkbutton.pack(side=tk.LEFT, padx=5)
+
+        self.edit_base_dict_button = ttk.Button(button_frame, text="编辑基础字典", command=self._open_base_dict_editor_modal)
+        self.edit_base_dict_button.pack(side=tk.LEFT, padx=5)
+
         self.test_button = ttk.Button(button_frame, text="测试连接", command=self._test_connection)
         self.test_button.pack(side=tk.LEFT, padx=5)
+
         self.save_button = ttk.Button(button_frame, text="保存", command=self._save_config)
         self.save_button.pack(side=tk.LEFT, padx=5)
+
         cancel_button = ttk.Button(button_frame, text="取消", command=self.destroy)
         cancel_button.pack(side=tk.LEFT, padx=5)
 
-        # --- 绑定事件 ---
+        self.provider_var.trace_add("write", self._on_provider_var_changed)
         self.api_key_var.trace_add("write", self._on_config_change)
+        self.api_url_var.trace_add("write", self._on_config_change)
         self.model_var.trace_add("write", self._on_config_change)
+        self.openai_temp_var.trace_add("write", self._on_config_change)
+        self.openai_max_tokens_var.trace_add("write", self._on_config_change)
         self.char_prompt_text.bind("<<Modified>>", self._on_prompt_modified)
         self.entity_prompt_text.bind("<<Modified>>", self._on_prompt_modified)
-        self.protocol("WM_DELETE_WINDOW", self.destroy) # 处理关闭按钮
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
-        # --- 初始化完成 ---
-        self.initializing = False
-        # 检查初始状态
-        if self.api_key_var.get():
+        self.controls_to_manage = []  # 占位，稍后填充
+
+        self._sync_provider_display()
+        self._update_provider_ui(initial=True)
+
+        minimal_ready = bool(self.api_key_var.get().strip())
+        if self.provider_var.get() == PROVIDER_OPENAI:
+            minimal_ready = minimal_ready and bool(self.api_url_var.get().strip())
+        self.connection_tested_ok = minimal_ready
+        if self.connection_tested_ok:
             self._set_status("配置已加载", "green")
         else:
-            self._set_status("请输入 API Key 并测试连接", "red")
+            self._set_status("请输入必要信息并测试连接", "red")
 
-    
+        self.controls_to_manage = [
+            self.provider_combo,
+            self.api_key_entry,
+            self.key_toggle_button,
+            self.api_url_entry,
+            self.model_combobox,
+            self.openai_temp_entry,
+            self.openai_max_tokens_entry,
+            self.char_prompt_text,
+            self.entity_prompt_text,
+            self.enable_base_dict_checkbutton,
+            self.edit_base_dict_button,
+            self.test_button,
+            self.save_button,
+        ]
+
+        self.initializing = False
+        self._update_connection_signature()
+        if self.connection_tested_ok:
+            self.save_button.config(state=tk.NORMAL)
+        else:
+            self.save_button.config(state=tk.DISABLED)
+
+    def _sync_provider_display(self):
+        provider = self.provider_var.get()
+        display_value = self.provider_display_map.get(provider, self.provider_display_map[PROVIDER_GEMINI])
+        if self.provider_display_var.get() != display_value:
+            self.provider_display_var.set(display_value)
+
+    def _on_provider_combo_selected(self, event=None):
+        display = self.provider_display_var.get()
+        provider = self.provider_value_map.get(display, PROVIDER_GEMINI)
+        if provider != self.provider_var.get():
+            self.provider_var.set(provider)
+
+    def _on_provider_var_changed(self, *args):
+        self._sync_provider_display()
+        self._update_provider_ui()
+        self._on_config_change()
+
+    def _update_provider_ui(self, initial=False):
+        provider = self.provider_var.get()
+        if provider == PROVIDER_GEMINI:
+            self.title("世界观字典配置 (Gemini)")
+            self.api_key_label.config(text="Gemini API Key:")
+            self.api_url_label.grid_remove()
+            self.api_url_entry.grid_remove()
+            self.openai_params_frame.grid_remove()
+        else:
+            self.title("世界观字典配置 (OpenAI 兼容)")
+            self.api_key_label.config(text="OpenAI API Key:")
+            self.api_url_label.grid(row=self.api_url_row, column=0, padx=5, pady=5, sticky="w")
+            self.api_url_entry.grid(row=self.api_url_row, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+            self.openai_params_frame.grid(row=self.openai_params_row, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+        if not initial:
+            self._set_status("供应商已切换，请重新测试连接", "orange")
+
     def _open_base_dict_editor_modal(self):
-        """
-        以模态方式打开基础字典编辑器。
-        在编辑器打开期间，禁用当前配置窗口的交互。
-        """
-        # 禁用当前配置窗口的主要控件
         self._set_controls_enabled(False)
-
-        # 调用 App 的方法打开编辑器，传递当前窗口作为父级，以便编辑器可以正确设置 transient
-        # App 的 open_base_dict_editor 方法需要能够接收这个父窗口
         editor_window = self.app.open_base_dict_editor(parent_for_editor=self)
-
         if editor_window:
-            # 等待编辑器窗口关闭
-            # wait_window 会阻塞，直到 editor_window 被销毁
             self.wait_window(editor_window)
-
-        # 编辑器关闭后，重新启用当前配置窗口的控件
         self._set_controls_enabled(True)
-        # 将焦点带回此窗口 (可选)
         self.focus_set()
-        self.grab_set() # 重新获取事件焦点
+        self.grab_set()
 
     def _set_controls_enabled(self, enabled):
-        """启用或禁用当前配置窗口的主要控件。"""
         state = tk.NORMAL if enabled else tk.DISABLED
-        # 列出需要禁用/启用的控件
-        controls_to_manage = [
-            self.api_key_entry, self.show_key_var, # Key 和显示按钮
-            self.model_var, # 模型下拉框 (Combobox)
-            self.char_prompt_text, self.entity_prompt_text, # 两个 ScrolledText
-            self.enable_base_dict_checkbutton,
-            self.edit_base_dict_button, # 编辑基础字典按钮本身也应管理
-            self.test_button, self.save_button,
-            # 通常不禁用取消按钮，但根据需求可以加上
-        ]
-        # Combobox 需要特殊处理 state
-        if hasattr(self, 'model_var_combobox'): # 假设 model_var 是 Combobox
-             self.model_var_combobox.config(state='readonly' if enabled else tk.DISABLED)
-
-
-        for control in controls_to_manage:
-            if control and hasattr(control, 'winfo_exists') and control.winfo_exists():
-                try:
-                    if isinstance(control, (tk.Entry, ttk.Entry, tk.Text, scrolledtext.ScrolledText, ttk.Spinbox)):
-                        control.config(state=state)
-                    elif isinstance(control, (ttk.Button, ttk.Checkbutton)):
-                        control.config(state=state)
-                    elif isinstance(control, tk.StringVar) or isinstance(control, tk.BooleanVar) or isinstance(control, tk.IntVar):
-                        pass # 变量本身没有 state
-                    elif isinstance(control, ttk.Combobox):
-                         control.config(state='readonly' if enabled else tk.DISABLED)
-                    else:
-                        # 对于其他类型的控件，可能需要不同的处理方式
-                        # print(f"未处理的控件类型: {type(control)}")
-                        pass
-                except tk.TclError:
-                    pass # 忽略错误
+        for control in self.controls_to_manage:
+            if not control or not control.winfo_exists():
+                continue
+            try:
+                if isinstance(control, ttk.Combobox):
+                    control.config(state='readonly' if enabled else tk.DISABLED)
+                elif isinstance(control, (tk.Entry, ttk.Entry, scrolledtext.ScrolledText, tk.Text, ttk.Spinbox)):
+                    control.config(state=state)
+                elif isinstance(control, (ttk.Button, ttk.Checkbutton)):
+                    control.config(state=state)
+            except tk.TclError:
+                pass
 
     def _toggle_key_visibility(self):
-        """切换 API Key 的显示状态。"""
         if self.show_key_var.get():
             self.api_key_entry.config(show="")
         else:
             self.api_key_entry.config(show="*")
 
     def _on_prompt_modified(self, event=None):
-        """处理任一 Prompt 文本框的修改事件。"""
         if not self.initializing and event:
-            widget = event.widget # 获取触发事件的控件
-            # 检查控件是否真的被修改了
+            widget = event.widget
             if widget.edit_modified():
-                widget.edit_modified(False) # 重置该控件的标志位
-                self._on_config_change() # 触发通用配置更改处理
+                widget.edit_modified(False)
+                self._on_config_change()
+
+    def _current_connection_signature(self):
+        provider = self.provider_var.get()
+        api_key = self.api_key_var.get().strip()
+        model = self.model_var.get().strip()
+        api_url = self.api_url_var.get().strip() if provider == PROVIDER_OPENAI else ""
+        return (provider, api_key, api_url, model)
+
+    def _update_connection_signature(self):
+        self._last_connection_signature = self._current_connection_signature()
 
     def _on_config_change(self, *args):
-        """配置发生变化时的处理。只有API Key或Model变化时才重置测试状态。"""
-        if self.initializing: return
-        # 检查API Key和Model是否发生变化
-        api_key = self.api_key_var.get().strip()
-        model = self.model_var.get().strip()
-        if not hasattr(self, '_last_api_key'):
-            self._last_api_key = api_key
-        if not hasattr(self, '_last_model'):
-            self._last_model = model
-        api_key_changed = (api_key != self._last_api_key)
-        model_changed = (model != self._last_model)
-        if api_key_changed or model_changed:
+        if self.initializing:
+            return
+        current_signature = self._current_connection_signature()
+        if getattr(self, '_last_connection_signature', None) != current_signature:
             self.connection_tested_ok = False
-            if hasattr(self, 'save_button') and self.save_button.winfo_exists():
+            if self.save_button.winfo_exists():
                 self.save_button.config(state=tk.DISABLED)
-            self._set_status("API Key 或模型已更改，请重新测试连接", "orange")
-            self._last_api_key = api_key
-            self._last_model = model
-        # 其他配置变化不影响连接测试状态
+            self._set_status("关键配置已修改，请重新测试连接", "orange")
+            self._last_connection_signature = current_signature
 
     def _set_status(self, message, color):
-        """更新状态标签的文本和颜色。"""
-        if self.winfo_exists(): # 检查窗口是否存在
-             self.status_var.set(message)
-             self.status_label.config(foreground=color)
+        if self.winfo_exists():
+            self.status_var.set(message)
+            self.status_label.config(foreground=color)
 
     def _test_connection(self):
-        """启动 Gemini 连接测试线程。"""
+        provider = self.provider_var.get()
         api_key = self.api_key_var.get().strip()
         model = self.model_var.get().strip()
+        api_url = self.api_url_var.get().strip()
+        provider_display = self.provider_display_map.get(provider, provider)
+
         if not api_key:
-            messagebox.showerror("错误", "请输入 Gemini API Key", parent=self)
+            messagebox.showerror("错误", f"请输入 {provider_display} Key", parent=self)
+            return
+        if provider == PROVIDER_OPENAI and not api_url:
+            messagebox.showerror("错误", "请输入 OpenAI 兼容 API 的基础地址", parent=self)
             return
         if not model:
             messagebox.showerror("错误", "请选择或输入模型名称", parent=self)
@@ -275,32 +335,37 @@ class WorldDictConfigWindow(tk.Toplevel):
         self.test_button.config(state=tk.DISABLED)
         self.save_button.config(state=tk.DISABLED)
 
-        # 使用线程执行测试
-        thread = threading.Thread(target=self._test_connection_thread, args=(api_key, model), daemon=True)
+        thread = threading.Thread(
+            target=self._test_connection_thread,
+            args=(provider, api_url, api_key, model),
+            daemon=True,
+        )
         thread.start()
 
-    def _test_connection_thread(self, api_key, model):
-        """在线程中执行实际的 Gemini API 连接测试。"""
+    def _test_connection_thread(self, provider, api_url, api_key, model):
+        provider_display = self.provider_display_map.get(provider, provider)
         try:
-            client = gemini.GeminiClient(api_key) # 初始化客户端
-            # 使用一个非常简单的 prompt 进行测试，不依赖于复杂的模板
+            if provider == PROVIDER_GEMINI:
+                client = gemini.GeminiClient(api_key)
+            else:
+                client = deepseek.DeepSeekClient(base_url=api_url, api_key=api_key)
             success, message = client.test_connection(model)
-            # 使用 after 在主线程更新 UI
             self.after(0, lambda: self._test_connection_result(success, message))
-        except ConnectionError as e: # 捕获客户端初始化失败
-             self.after(0, lambda: self._test_connection_result(False, f"客户端初始化失败: {e}"))
-        except Exception as e: # 捕获其他意外错误
-            log.exception("Gemini 连接测试线程发生意外错误。")
-            self.after(0, lambda: self._test_connection_result(False, f"测试时发生意外错误: {e}"))
+        except ConnectionError as exc:
+            self.after(0, lambda: self._test_connection_result(False, f"客户端初始化失败: {exc}"))
+        except Exception as exc:
+            log.exception("世界观字典连接测试线程发生意外错误。")
+            self.after(0, lambda: self._test_connection_result(False, f"测试时发生意外错误: {exc}"))
 
     def _test_connection_result(self, success, message):
-        """处理连接测试结果，更新 UI。"""
-        if not self.winfo_exists(): return # 窗口已关闭
+        if not self.winfo_exists():
+            return
         self.test_button.config(state=tk.NORMAL)
         if success:
             self.connection_tested_ok = True
+            self._update_connection_signature()
             self._set_status("连接成功!", "green")
-            self.save_button.config(state=tk.NORMAL) # 测试成功才允许保存
+            self.save_button.config(state=tk.NORMAL)
             messagebox.showinfo("成功", message, parent=self)
         else:
             self.connection_tested_ok = False
@@ -309,28 +374,57 @@ class WorldDictConfigWindow(tk.Toplevel):
             messagebox.showerror("连接失败", message, parent=self)
 
     def _save_config(self):
-        """保存配置到 App 持有的字典并关闭窗口。"""
         if not self.connection_tested_ok:
             messagebox.showwarning("无法保存", "请先成功测试连接后再保存。", parent=self)
             return
 
-        # 更新 App 持有的配置字典
-        self.config["api_key"] = self.api_key_var.get().strip()
-        self.config["model"] = self.model_var.get().strip()
-        # 保存两个 Prompt 的内容
+        provider = self.provider_var.get()
+        api_key = self.api_key_var.get().strip()
+        api_url = self.api_url_var.get().strip()
+        model = self.model_var.get().strip()
+
+        temp_text = self.openai_temp_var.get().strip()
+        if temp_text:
+            try:
+                openai_temperature = float(temp_text)
+            except ValueError:
+                messagebox.showerror("错误", "OpenAI 温度必须是数字。", parent=self)
+                return
+        else:
+            openai_temperature = DEFAULT_WORLD_DICT_CONFIG["openai_temperature"]
+
+        max_tokens_text = self.openai_max_tokens_var.get().strip()
+        if max_tokens_text:
+            try:
+                openai_max_tokens = int(max_tokens_text)
+            except ValueError:
+                messagebox.showerror("错误", "OpenAI 最大 tokens 必须是整数。", parent=self)
+                return
+        else:
+            openai_max_tokens = None
+
+        self.config["provider"] = provider
+        self.config["api_key"] = api_key
+        self.config["api_url"] = api_url
+        self.config["model"] = model
+        self.config["openai_temperature"] = openai_temperature
+        self.config["openai_max_tokens"] = openai_max_tokens
+
         self.config["character_prompt_template"] = self.char_prompt_text.get("1.0", tk.END).strip()
         self.config["entity_prompt_template"] = self.entity_prompt_text.get("1.0", tk.END).strip()
-        # --- 新增：保存基础字典启用状态 ---
         self.config["enable_base_dictionary"] = self.enable_base_dict_var.get()
-        # 确保文件名也保存（如果之前没在配置里，会用默认值，这里保存确保一致性）
-        self.config["character_dict_filename"] = self.config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
-        self.config["entity_dict_filename"] = self.config.get("entity_dict_filename", DEFAULT_WORLD_DICT_CONFIG["entity_dict_filename"])
+        self.config["character_dict_filename"] = self.config.get(
+            "character_dict_filename",
+            DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"],
+        )
+        self.config["entity_dict_filename"] = self.config.get(
+            "entity_dict_filename",
+            DEFAULT_WORLD_DICT_CONFIG["entity_dict_filename"],
+        )
 
-
-        # 通知 App 保存整个配置到文件
         self.app.save_config()
         log.info("世界观字典配置已更新。")
-        self.destroy() # 关闭窗口
+        self.destroy()
 
 
 # --- DeepSeek (翻译) 配置窗口 ---
@@ -612,3 +706,5 @@ class TranslateConfigWindow(tk.Toplevel):
         self.app.save_config()
         log.info("翻译配置已更新。")
         self.destroy()
+
+
