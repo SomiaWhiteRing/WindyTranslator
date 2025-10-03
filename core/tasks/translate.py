@@ -158,6 +158,7 @@ def _translate_batch_with_retry(
             raw_translated_text_block_from_api = textarea_match.group(1).strip()
             raw_lines_from_api = raw_translated_text_block_from_api.split('\n')
             current_collecting_number = -1; current_collecting_text_parts = []
+            expected_number = 1
             for line_from_api in raw_lines_from_api:
                 line_without_meta = line_from_api
                 leading_meta_match = TRANSLATION_METADATA_PREFIX_RE.match(line_without_meta)
@@ -169,11 +170,14 @@ def _translate_batch_with_retry(
                 num_line_match = re.match(r'^(\d+)\.\s*(.*)', stripped_line_for_num_match)
                 if num_line_match:
                     num_val = int(num_line_match.group(1)); text_after_num = num_line_match.group(2)
-                    if current_collecting_number != -1:
-                        numbered_translations_from_api[current_collecting_number] = "\n".join(current_collecting_text_parts).rstrip()
-                    current_collecting_number = num_val; current_collecting_text_parts = [text_after_num]
-                    max_number_found_in_response = max(max_number_found_in_response, current_collecting_number)
-                elif current_collecting_number != -1:
+                    if num_val == expected_number:
+                        if current_collecting_number != -1:
+                            numbered_translations_from_api[current_collecting_number] = "\n".join(current_collecting_text_parts).rstrip()
+                        current_collecting_number = num_val; current_collecting_text_parts = [text_after_num]
+                        max_number_found_in_response = max(max_number_found_in_response, current_collecting_number)
+                        expected_number += 1
+                        continue
+                if current_collecting_number != -1:
                     if removed_only_meta and line_without_meta == "":
                         continue
                     current_collecting_text_parts.append(line_without_meta)
