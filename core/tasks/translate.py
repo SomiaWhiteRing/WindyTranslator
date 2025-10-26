@@ -11,7 +11,7 @@ import threading
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed # 使用 as_completed
 from core.api_clients import deepseek
-from core.utils import file_system, text_processing
+from core.utils import file_system, text_processing, default_database
 from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
 from collections import OrderedDict
 
@@ -446,14 +446,18 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         context_lines_count = current_translate_config.get("context_lines", 10) # 获取上下文行数配置
         if not api_url or not api_key or not model_name:
              raise ValueError("翻译API 配置不完整 (URL, Key, Model)。")
-        
+
         try: api_client_instance = deepseek.DeepSeekClient(api_url, api_key)
         except Exception as client_err: raise ConnectionError(f"初始化 API 客户端失败: {client_err}")
         message_queue.put(("log", ("normal", f"API客户端初始化成功。翻译配置: 模型={model_name}, 并发={concurrency_config}, 批大小={batch_size_config}, 上下文行数={context_lines_count}")))
 
+        # --- 默认数据库过滤与自动填充准备（固定启用，读取 modules/dict） ---
+        default_db_mapping, default_db_originals = default_database.load_default_db_mapping()
+
         # --- *** 任务预切分 *** ---
         global_translation_tasks = [] # 存储所有 (batch_meta, context_meta, file_name) 的任务单元
         overall_total_items_in_all_files = 0
+        overall_default_db_prefilled_count = 0
 
         message_queue.put(("log", ("normal", "开始预切分所有翻译任务...")))
         for file_name, data_for_this_file in untranslated_data_per_file.items():
@@ -463,14 +467,40 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 continue
 
             items_with_original_key_for_this_file = []
+            prefilled_count_for_this_file = 0
             for original_json_key, metadata_obj in data_for_this_file.items():
                 # 确保元数据对象中有一个字段存储这个原始的JSON键
                 metadata_obj['original_json_key'] = original_json_key 
+                # 过滤默认数据库条目（精确匹配），并就地自动填充译文
+                # 注意：以原始JSON键(原文)做精确匹配，避免半角片假名转换造成的不一致
+                if default_database.should_exclude_text(original_json_key, default_db_originals):
+                    prefilled = default_database.get_prefill_for_text(
+                        original_json_key,
+                        default_db_mapping,
+                        metadata_obj.get('original_marker'),
+                        metadata_obj.get('speaker_id')
+                    )
+                    # 确保文件条目存在
+                    all_files_translated_data.setdefault(file_name, {})
+                    if prefilled is not None:
+                        all_files_translated_data[file_name][original_json_key] = prefilled
+                    else:
+                        # 如果参考库中没翻译，仅标记为 success 但使用原文，避免进入API
+                        all_files_translated_data[file_name][original_json_key] = {
+                            'text': metadata_obj.get('text_to_translate'),
+                            'status': 'success',
+                            'failure_context': None,
+                            'original_marker': metadata_obj.get('original_marker', 'UnknownMarker'),
+                            'speaker_id': metadata_obj.get('speaker_id')
+                        }
+                    prefilled_count_for_this_file += 1
+                    continue
                 items_with_original_key_for_this_file.append(metadata_obj)
 
             all_metadata_items_for_this_file = items_with_original_key_for_this_file
             num_items_in_file = len(all_metadata_items_for_this_file)
             overall_total_items_in_all_files += num_items_in_file
+            overall_default_db_prefilled_count += prefilled_count_for_this_file
             
             # 预先为这个文件在最终结果字典中创建条目
             all_files_translated_data.setdefault(file_name, {})
@@ -497,6 +527,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         total_batches_to_process = len(global_translation_tasks)
         message_queue.put(("log", ("normal", f"任务预切分完成。共 {total_batches_to_process} 个批次（来自 {len(untranslated_data_per_file)} 个文件），总计 {overall_total_items_in_all_files} 个原文条目。")))
+        if overall_default_db_prefilled_count > 0:
+            message_queue.put(("log", ("normal", f"按默认数据库规则自动填充 {overall_default_db_prefilled_count} 条模板词条译文，避免重复请求 API。")))
         message_queue.put(("status", f"开始翻译，总批次数: {total_batches_to_process}，并发数: {concurrency_config}..."))
 
         # --- 并发处理全局任务列表 ---
@@ -506,7 +538,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         # futures_map = {} 
 
         completed_batches_count = 0 # 按批次计数
-        # completed_items_count = 0 # 如果要按条目计数
+        processed_items_count = 0   # 仅统计需要翻译的条目数（不含预填）
 
         with ThreadPoolExecutor(max_workers=concurrency_config) as executor:
             # 提交所有任务
@@ -566,21 +598,19 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                         }
                 
                 completed_batches_count += 1
-                # completed_items_count += num_items_in_this_batch # 如果按条目报告进度
+                processed_items_count += num_items_in_this_batch
 
                 current_time = time.time()
                 if current_time - last_status_update_time >= status_update_interval_sec or completed_batches_count == total_batches_to_process:
-                    # 使用 overall_total_items_in_all_files 和实际处理的原文条目数来计算更精确的百分比
-                    # 需要一种方式从 all_files_translated_data 中统计实际已处理（包括成功和回退）的原文条目数
-                    current_processed_originals = sum(len(file_data) for file_data in all_files_translated_data.values())
-
-                    progress_percentage = (current_processed_originals / overall_total_items_in_all_files) * 100 if overall_total_items_in_all_files > 0 else 0
+                    # 仅按需要翻译的条目统计进度（排除预填）
+                    progress_percentage = (processed_items_count / overall_total_items_in_all_files) * 100 if overall_total_items_in_all_files > 0 else 0
                     elapsed_processing_time = current_time - start_time
-                    est_total_processing_time = (elapsed_processing_time / current_processed_originals) * overall_total_items_in_all_files if current_processed_originals > 0 else 0
+                    est_total_processing_time = (elapsed_processing_time / processed_items_count) * overall_total_items_in_all_files if processed_items_count > 0 else 0
                     remaining_processing_time = max(0, est_total_processing_time - elapsed_processing_time)
                     
                     status_update_msg = (f"已处理批次: {completed_batches_count}/{total_batches_to_process} "
-                                         f"| 原文: {current_processed_originals}/{overall_total_items_in_all_files} ({progress_percentage:.1f}%) "
+                                         f"| 需译原文: {processed_items_count}/{overall_total_items_in_all_files} ({progress_percentage:.1f}%) "
+                                         f"| 预填: {overall_default_db_prefilled_count} "
                                          f"- 预计剩余: {remaining_processing_time:.0f}s")
                     message_queue.put(("status", status_update_msg))
                     message_queue.put(("progress", progress_percentage))

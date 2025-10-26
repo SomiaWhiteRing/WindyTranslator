@@ -7,7 +7,7 @@ import logging
 import time
 import re
 from core.api_clients import gemini, deepseek # 导入 Gemini 或 OpenAI 兼容客户端模块
-from core.utils import file_system, text_processing
+from core.utils import file_system, text_processing, default_database
 # 导入默认配置以获取默认文件名
 from core.config import DEFAULT_WORLD_DICT_CONFIG
 from . import apply_base_dictionary
@@ -213,6 +213,11 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         message_queue.put(("log", ("normal", "加载按文件组织的 JSON 文件并提取所有原文...")))
         # all_texts_with_metadata_prefix 用于存储所有文件中带有前缀的 text_to_translate
         all_texts_with_metadata_prefix = [] 
+        default_db_filtered_count = 0
+
+        # 默认数据库过滤/映射
+        # 固定从 modules/dict 默认数据库映射加载
+        default_db_mapping, default_db_originals = default_database.load_default_db_mapping()
 
         try:
             with open(json_path, 'r', encoding='utf-8') as f_json_in:
@@ -240,6 +245,15 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                         speaker_id = metadata_object.get("speaker_id") # 可能为 None
 
                         if text_content and isinstance(text_content, str):
+                            # 先用原始JSON键(原文)进行精确匹配排除，避免半角->全角转换导致的不一致
+                            if default_database.should_exclude_text(original_key, default_db_originals):
+                                default_db_filtered_count += 1
+                                continue
+                            # 过滤默认数据库原文（精确匹配）
+                            # 冗余保护：如上一步未命中，再比对 text_to_translate（通常两者一致）
+                            if default_database.should_exclude_text(text_content, default_db_originals):
+                                default_db_filtered_count += 1
+                                continue
                             # 将文本中的换行符替换为特殊标记
                             text_content = text_content.replace('\n', '[LINEBREAK]')
                             
@@ -259,6 +273,8 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
             
             total_extracted_lines_with_prefix = len(all_texts_with_metadata_prefix)
             message_queue.put(("log", ("normal", f"共从所有文件中提取并格式化 {total_extracted_lines_with_prefix} 行带元数据前缀的文本用于世界观字典分析。")))
+            if default_db_filtered_count > 0:
+                message_queue.put(("log", ("normal", f"已按默认数据库排除 {default_db_filtered_count} 条重复/模板条目 (精确匹配)。")))
             
             if not all_texts_with_metadata_prefix: 
                  message_queue.put(("warning", "未从任何文件中提取到有效的原文内容用于分析。"))
