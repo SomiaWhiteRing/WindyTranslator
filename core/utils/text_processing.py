@@ -290,3 +290,18 @@ def convert_half_to_full_katakana(text):
         text = text.replace(half_comb, full_comb)
 
     return text
+
+
+# --- 语言相关的简单检测 ---
+def has_japanese_letters(text):
+    """
+    粗略检测文本中是否包含日文字符（假名或汉字）。
+    包含范围：平假名、片假名、半角片假名、CJK汉字。
+
+    用途：用于在源语言为日语时，判断某条文本是否需要翻译。
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    # 平假名 3040-309F，片假名 30A0-30FF，片假名扩展 31F0-31FF，半角片假名 FF66-FF9F，CJK 4E00-9FFF
+    pattern = re.compile(r"[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\uFF66-\uFF9F\u4E00-\u9FFF]")
+    return pattern.search(text) is not None
