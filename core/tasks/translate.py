@@ -49,6 +49,8 @@ def _translate_batch_with_retry(
     last_failed_response_content = None
     last_validation_reason = "未知错误"
     failure_context_for_batch_item = None
+    # 在批次范围内去重人物词典不一致的噪声告警（按 昵称-对应原名 配对）
+    warned_missing_main_names = set()
 
     processed_original_texts_for_glossary_matching = [
         text_processing.pre_process_text_for_llm(item["text_to_translate"]) for item in batch_metadata_items
@@ -66,24 +68,30 @@ def _translate_batch_with_retry(
         originals_to_include_in_glossary = set()
         char_lookup = {}
         if character_dictionary:
-             char_lookup = {entry.get('原文'): entry for entry in character_dictionary if entry.get('原文')}
-             for entry in character_dictionary:
-                 char_original = entry.get('原文')
-                 if not char_original: continue
-                 if char_original.lower() in combined_processed_lower_for_glossary:
-                     originals_to_include_in_glossary.add(char_original)
-                     main_name_ref = entry.get('对应原名')
-                     if main_name_ref and main_name_ref in char_lookup:
-                         originals_to_include_in_glossary.add(main_name_ref)
-                     elif main_name_ref and main_name_ref not in char_lookup:
-                          log.warning(f"人物词典不一致(文件: {current_processing_file_name or 'N/A'}): 昵称 '{char_original}' 的对应原名 '{main_name_ref}' 未找到。")
-             char_cols_for_prompt = ['原文', '译文', '对应原名', '性别', '年龄', '性格', '口吻', '描述']
-             for char_original in sorted(list(originals_to_include_in_glossary)):
-                 entry = char_lookup.get(char_original)
-                 if entry:
-                     values = [str(entry.get(col, '')) for col in char_cols_for_prompt]
-                     entry_line = "|".join(values)
-                     relevant_char_entries.append(entry_line)
+            char_lookup = {entry.get('原文'): entry for entry in character_dictionary if entry.get('原文')}
+            for entry in character_dictionary:
+                char_original = entry.get('原文')
+                if not char_original:
+                    continue
+                if char_original.lower() in combined_processed_lower_for_glossary:
+                    originals_to_include_in_glossary.add(char_original)
+                    main_name_ref = entry.get('对应原名')
+                    if main_name_ref and main_name_ref in char_lookup:
+                        originals_to_include_in_glossary.add(main_name_ref)
+                    elif main_name_ref and main_name_ref not in char_lookup:
+                        pair_key = (char_original, main_name_ref)
+                        if pair_key not in warned_missing_main_names:
+                            log.warning(
+                                f"人物词典不一致(文件: {current_processing_file_name or 'N/A'}): 昵称 '{char_original}' 的对应原名 '{main_name_ref}' 未找到。"
+                            )
+                            warned_missing_main_names.add(pair_key)
+            char_cols_for_prompt = ['原文', '译文', '对应原名', '性别', '年龄', '性格', '口吻', '描述']
+            for char_original in sorted(list(originals_to_include_in_glossary)):
+                entry = char_lookup.get(char_original)
+                if entry:
+                    values = [str(entry.get(col, '')) for col in char_cols_for_prompt]
+                    entry_line = "|".join(values)
+                    relevant_char_entries.append(entry_line)
         character_glossary_section = ""
         if relevant_char_entries:
             character_glossary_section = f"### 人物术语参考 (格式: {'|'.join(char_cols_for_prompt)})\n" + "\n".join(relevant_char_entries) + "\n"
@@ -167,7 +175,8 @@ def _translate_batch_with_retry(
                     line_without_meta = line_without_meta[leading_meta_match.end():]
                     removed_only_meta = line_without_meta == ""
                 stripped_line_for_num_match = line_without_meta.lstrip()
-                num_line_match = re.match(r'^(\d+)\.\s*(.*)', stripped_line_for_num_match)
+                # 兼容多种编号分隔符：1. / 1: / 1：/ 1、/ 1) / 1]
+                num_line_match = re.match(r'^(\d+)[\.:：、\)\]]\s*(.*)', stripped_line_for_num_match)
                 if num_line_match:
                     num_val = int(num_line_match.group(1)); text_after_num = num_line_match.group(2)
                     if num_val == expected_number:
@@ -213,16 +222,20 @@ def _translate_batch_with_retry(
                 original_text_for_validation = original_item_data["text_to_translate"] # 这个仍然是用于翻译和验证的文本
                 raw_translation_for_this_item = final_translated_lines_from_api[i] 
                 restored_text_for_validation = text_processing.restore_pua_placeholders(raw_translation_for_this_item)
+                # 在验证前进行最小化修复，避免因模型引入/丢失控制码导致的频繁失败
+                repaired_text_for_validation = text_processing.repair_translation_format(
+                    original_text_for_validation, restored_text_for_validation
+                )
                 post_processed_text_for_validation = text_processing.post_process_translation(
-                    restored_text_for_validation, original_text_for_validation
+                    repaired_text_for_validation, original_text_for_validation
                 )
                 is_line_valid, line_validation_reason = text_processing.validate_translation(
-                    original_text_for_validation, restored_text_for_validation, post_processed_text_for_validation
+                    original_text_for_validation, repaired_text_for_validation, post_processed_text_for_validation
                 )
                 if not is_line_valid:
                     log.warning(f"批次内单行验证失败 (文件: {current_processing_file_name or 'N/A'}, 尝试 {attempt+1}): '{original_text_for_validation[:30]}...' 原因: {line_validation_reason}")
                     last_validation_reason = f"单行验证失败: {line_validation_reason} (原文: {original_text_for_validation[:30]}...)"
-                    failure_context_for_batch_item = f"单行验证失败 ({line_validation_reason}): \"{restored_text_for_validation[:50]}...\""
+                    failure_context_for_batch_item = f"单行验证失败 ({line_validation_reason}): \"{repaired_text_for_validation[:50]}...\""
                     batch_is_fully_valid = False
                     _log_batch_error(error_log_path, error_log_lock, "单行验证失败", batch_original_texts_for_logging,
                                      last_validation_reason, model_name, last_failed_api_kwargs,

@@ -27,9 +27,35 @@ def validate_translation(original, translated, post_processed_translation):
         # \u3040-\u309F: Hiragana, \u30A0-\u30FF: Katakana
         kana_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF]')
         if kana_pattern.search(post_processed_translation):
-            reason = f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
-            log.warning(reason)
-            return False, reason
+            # 放宽规则：若假名仅出现在“角色名：”的冒号之前，视为可接受
+            try:
+                # 同时支持全角冒号和半角冒号
+                colon_pos_full = post_processed_translation.find('：')
+                colon_pos_half = post_processed_translation.find(':')
+                colon_idx = colon_pos_full if colon_pos_full != -1 else colon_pos_half
+                if colon_idx > 0:
+                    kana_positions = [m.start() for m in kana_pattern.finditer(post_processed_translation)]
+                    if kana_positions and max(kana_positions) < colon_idx:
+                        log.debug("忽略角色名中的假名: '%s'", post_processed_translation[:50])
+                    else:
+                        reason = (
+                            f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
+                        )
+                        log.warning(reason)
+                        return False, reason
+                else:
+                    reason = (
+                        f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
+                    )
+                    log.warning(reason)
+                    return False, reason
+            except Exception:
+                # 保守处理：异常时维持原有失败逻辑
+                reason = (
+                    f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
+                )
+                log.warning(reason)
+                return False, reason
 
         # 规则 2: 如果原文以 \\ 开头，译文是否也以 \\ 开头 (检查原始译文)
         if original.startswith('\\\\') and not translated.startswith('\\\\'):
@@ -37,12 +63,18 @@ def validate_translation(original, translated, post_processed_translation):
              log.warning(reason)
              return False, reason
 
-        # 规则 3: 检查反斜杠 + 半角字符 (排除 \\ 和 \n) (检查原始译文)
-        pattern_backslash_ascii = r'(?<!\\)\\[ -~]'
-        original_backslash_count = len(re.findall(pattern_backslash_ascii, original))
-        translated_backslash_count = len(re.findall(pattern_backslash_ascii, translated))
-        if original_backslash_count != translated_backslash_count:
-            reason = f"验证失败: 反斜杠标记数量不匹配。原文({original_backslash_count}): '{original[:50]}...', 译文({translated_backslash_count}): '{translated[:50]}...'"
+        # 规则 3: RPG 控制码按类型逐一对齐，减少误报（检查“译文-已还原PUA未后处理”）
+        allowed_codes = [r'\\\.', r'\\<', r'\\>', r'\\\|', r'\\\^', r'\\!']
+        def _count_codes(text: str):
+            return {pat: len(re.findall(pat, text)) for pat in allowed_codes}
+        orig_counts = _count_codes(original)
+        tran_counts = _count_codes(translated)
+        if any(orig_counts[k] != tran_counts[k] for k in allowed_codes):
+            diff_repr = ", ".join([f"{k}:{orig_counts[k]}->{tran_counts[k]}" for k in allowed_codes])
+            reason = (
+                f"验证失败: 反斜杠标记数量不匹配。原文({sum(orig_counts.values())}): '{original[:50]}...', "
+                f"译文({sum(tran_counts.values())}): '{translated[:50]}...'；差异: {diff_repr}"
+            )
             log.warning(reason)
             return False, reason
 
@@ -114,8 +146,65 @@ def restore_pua_placeholders(text):
     processed_text = processed_text.replace('\uE007', r'\>') 
     processed_text = processed_text.replace('\uE008', r'\|')
     processed_text = processed_text.replace('\uE009', r'\^')
+    processed_text = processed_text.replace('\uE010', r'\!\n')
     # log.debug(f"Restored PUA: '{text[:50]}...' -> '{processed_text[:50]}...'")
     return processed_text
+
+
+def repair_translation_format(original_text: str, restored_translation: str) -> str:
+    """
+    对译文的控制码进行最小化修复：
+    - 移除原文不存在的“未知”反斜杠序列（白名单之外）。
+    - 按类型对齐白名单控制码数量；缺少则前置补齐，多余则自末尾移除。
+
+    尽量不影响可行流程，仅为提高通过率与可用性。
+    """
+    if not isinstance(restored_translation, str):
+        return restored_translation
+
+    text = restored_translation
+
+    # 1) 移除未知反斜杠序列（白名单之外）
+    whitelist = [r'\.', r'\<', r'\>', r'\|', r'\^', r'\!']
+    any_bs_ascii = re.compile(r'(?<!\\)\\[ -~]')
+    whitelist_set = set(whitelist)
+
+    def _is_whitelisted(seq: str) -> bool:
+        return seq in whitelist_set
+
+    original_unknown = [m.group(0) for m in any_bs_ascii.finditer(original_text)
+                        if not _is_whitelisted(m.group(0))]
+    if not original_unknown:
+        matches = [m for m in any_bs_ascii.finditer(text) if not _is_whitelisted(m.group(0))]
+        if matches:
+            new_text_chars = list(text)
+            for m in reversed(matches):
+                s, e = m.span()
+                for i in range(s, e):
+                    new_text_chars[i] = ''
+            text = ''.join(new_text_chars)
+
+    # 2) 按类型对齐白名单控制码数量
+    def _count_type(t: str, s: str) -> int:
+        return len(re.findall(re.escape(t), s))
+
+    # 记录译文修复前的前导换行位置（用于插入）
+    leading_nl_len = len(text) - len(text.lstrip('\n'))
+
+    for code in whitelist:
+        o_cnt = _count_type(code, original_text)
+        t_cnt = _count_type(code, text)
+        if t_cnt > o_cnt:
+            for _ in range(t_cnt - o_cnt):
+                last_idx = text.rfind(code)
+                if last_idx >= 0:
+                    text = text[:last_idx] + text[last_idx + len(code):]
+        elif t_cnt < o_cnt:
+            missing = o_cnt - t_cnt
+            insert_at = leading_nl_len
+            text = text[:insert_at] + (code * missing) + text[insert_at:]
+
+    return text
 
 def post_process_translation(text, original_text):
     """
