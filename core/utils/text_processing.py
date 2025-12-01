@@ -27,35 +27,11 @@ def validate_translation(original, translated, post_processed_translation):
         # \u3040-\u309F: Hiragana, \u30A0-\u30FF: Katakana
         kana_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF]')
         if kana_pattern.search(post_processed_translation):
-            # 放宽规则：若假名仅出现在“角色名：”的冒号之前，视为可接受
-            try:
-                # 同时支持全角冒号和半角冒号
-                colon_pos_full = post_processed_translation.find('：')
-                colon_pos_half = post_processed_translation.find(':')
-                colon_idx = colon_pos_full if colon_pos_full != -1 else colon_pos_half
-                if colon_idx > 0:
-                    kana_positions = [m.start() for m in kana_pattern.finditer(post_processed_translation)]
-                    if kana_positions and max(kana_positions) < colon_idx:
-                        log.debug("忽略角色名中的假名: '%s'", post_processed_translation[:50])
-                    else:
-                        reason = (
-                            f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
-                        )
-                        log.warning(reason)
-                        return False, reason
-                else:
-                    reason = (
-                        f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
-                    )
-                    log.warning(reason)
-                    return False, reason
-            except Exception:
-                # 保守处理：异常时维持原有失败逻辑
-                reason = (
-                    f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
-                )
-                log.warning(reason)
-                return False, reason
+            reason = (
+                f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
+            )
+            log.warning(reason)
+            return False, reason
 
         # 规则 2: 如果原文以 \\ 开头，译文是否也以 \\ 开头 (检查原始译文)
         if original.startswith('\\\\') and not translated.startswith('\\\\'):
