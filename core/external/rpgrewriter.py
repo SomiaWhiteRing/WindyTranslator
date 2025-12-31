@@ -183,7 +183,7 @@ def export_text_command(lmt_path, encoding_code):
     Returns:
         tuple: (return_code, stdout, stderr)
     """
-    args = ["-export", "-readcode", str(encoding_code)]
+    args = ["-export", "-readcode", str(encoding_code), "-filereadcode", str(encoding_code), "-miscreadcode", str(encoding_code)]
     # 注意：这个命令不需要交互输入
     return run_rpgrewriter_command(lmt_path, args)
 
