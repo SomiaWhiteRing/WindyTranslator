@@ -7,6 +7,15 @@ import logging # 使用标准日志库记录更底层的细节
 # 在主应用中可能会有更高级的日志配置
 log = logging.getLogger(__name__)
 
+# --- 翻译污染（提示词/元数据）防护 ---
+# 说明：项目会在 prompt 中注入如 [MARKER: ...] / [FACE: ...] 以及编号前缀（见 core/tasks/translate.py），
+# 模型有时会将其回显到译文里。这里在后处理与校验阶段做清洗与兜底拒收，避免污染写入最终译文。
+TRANSLATION_METADATA_PREFIX_RE = re.compile(r'^(?:\s*\[(?:MARKER|FACE):[^\]]+\]\s*)+')
+TRANSLATION_METADATA_ANYWHERE_RE = re.compile(r'\[(?:MARKER|FACE):[^\]]+\]')
+# 兼容多种编号分隔符：1. / 1: / 1：/ 1、/ 1) / 1]
+# 额外限制：分隔符后不能直接跟数字，避免误判日期/版本号（如 2025.12.31）。
+TRANSLATION_NUMBER_PREFIX_RE = re.compile(r'^\s*\d{1,3}[\.:：、\)\]]\s*(?!\d)')
+
 # --- 文本验证 ---
 
 def validate_translation(original, translated, post_processed_translation):
@@ -23,6 +32,26 @@ def validate_translation(original, translated, post_processed_translation):
         str: 如果失败，返回失败原因描述；如果成功，返回空字符串。
     """
     try:
+        # 规则 0: 提示词/元数据污染兜底拒收（后处理后仍残留则判失败，触发上层重试/拆分/回退）
+        if isinstance(post_processed_translation, str) and isinstance(original, str):
+            if not TRANSLATION_METADATA_ANYWHERE_RE.search(original) and TRANSLATION_METADATA_ANYWHERE_RE.search(post_processed_translation):
+                reason = (
+                    f"验证失败: 译文包含元数据标记([MARKER]/[FACE])污染。原文: '{original[:50]}...', "
+                    f"处理后译文: '{post_processed_translation[:50]}...'"
+                )
+                log.warning(reason)
+                return False, reason
+
+            original_has_numbered_lines = any(TRANSLATION_NUMBER_PREFIX_RE.match(line or "") for line in original.splitlines())
+            translated_has_numbered_lines = any(TRANSLATION_NUMBER_PREFIX_RE.match(line or "") for line in post_processed_translation.splitlines())
+            if not original_has_numbered_lines and translated_has_numbered_lines:
+                reason = (
+                    f"验证失败: 译文包含编号前缀污染。原文: '{original[:50]}...', "
+                    f"处理后译文: '{post_processed_translation[:50]}...'"
+                )
+                log.warning(reason)
+                return False, reason
+
         # 规则 1: 检查后处理后的译文中是否残留日语假名
         # \u3040-\u309F: Hiragana, \u30A0-\u30FF: Katakana
         kana_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF]')
@@ -189,6 +218,25 @@ def post_process_translation(text, original_text):
     if not isinstance(text, str): return text
 
     processed_text = text
+
+    # 规则 0: 清理提示词/元数据污染（仅在原文不包含这些标记时启用）
+    # - 去除 [MARKER: ...] / [FACE: ...] 回显
+    # - 去除模型自发的编号前缀（1. / 2: / 3、 等）
+    # 说明：按“逐行”清理，避免影响正文中间的合法括号内容。
+    if isinstance(original_text, str) and not TRANSLATION_METADATA_ANYWHERE_RE.search(original_text):
+        original_has_numbered_lines = any(TRANSLATION_NUMBER_PREFIX_RE.match(line or "") for line in original_text.splitlines())
+        cleaned_lines = []
+        for line in processed_text.splitlines(keepends=False):
+            cleaned = line
+            # 先移除行首元数据前缀（可能多段连续）
+            cleaned = TRANSLATION_METADATA_PREFIX_RE.sub("", cleaned)
+            # 再移除行首编号（仅当原文不含编号时）
+            if not original_has_numbered_lines:
+                cleaned = TRANSLATION_NUMBER_PREFIX_RE.sub("", cleaned)
+            # 编号之后可能紧跟元数据，再清一次
+            cleaned = TRANSLATION_METADATA_PREFIX_RE.sub("", cleaned)
+            cleaned_lines.append(cleaned)
+        processed_text = "\n".join(cleaned_lines)
 
     # 规则 1: 日语标点转中文/半角 (这些在 validate 前执行，确保验证时使用的是最终格式)
     processed_text = processed_text.replace('・', '·') # 日语点 -> 中文点
