@@ -229,13 +229,56 @@ def _translate_batch_with_retry(
                 post_processed_text_for_validation = text_processing.post_process_translation(
                     repaired_text_for_validation, original_text_for_validation
                 )
-                is_line_valid, line_validation_reason = text_processing.validate_translation(
-                    original_text_for_validation, repaired_text_for_validation, post_processed_text_for_validation
-                )
+                # 方案A：StringPicture 强制行数一致校验（包含空行）
+                marker_for_item = original_item_data.get("original_marker")
+                if marker_for_item == 'StringPicture':
+                    orig_lines = original_text_for_validation.splitlines()
+                    tran_lines = post_processed_text_for_validation.splitlines()
+                    if len(orig_lines) != len(tran_lines):
+                        is_line_valid = False
+                        line_validation_reason = f"StringPicture 行数不一致: 原文 {len(orig_lines)} 行, 译文 {len(tran_lines)} 行"
+                    else:
+                        is_line_valid, line_validation_reason = text_processing.validate_translation(
+                            original_text_for_validation, repaired_text_for_validation, post_processed_text_for_validation
+                        )
+                else:
+                    is_line_valid, line_validation_reason = text_processing.validate_translation(
+                        original_text_for_validation, repaired_text_for_validation, post_processed_text_for_validation
+                    )
                 if not is_line_valid:
                     log.warning(f"批次内单行验证失败 (文件: {current_processing_file_name or 'N/A'}, 尝试 {attempt+1}): '{original_text_for_validation[:30]}...' 原因: {line_validation_reason}")
-                    last_validation_reason = f"单行验证失败: {line_validation_reason} (原文: {original_text_for_validation[:30]}...)"
-                    failure_context_for_batch_item = f"单行验证失败 ({line_validation_reason}): \"{repaired_text_for_validation[:50]}...\""
+                    # 方案B：如果是 StringPicture 且因行数失败，尝试按行回退翻译
+                    if marker_for_item == 'StringPicture' and (line_validation_reason and '行数不一致' in line_validation_reason):
+                        success_linewise, repaired_block, post_processed_block, fallback_reason = _translate_stringpicture_by_lines(
+                            original_text_for_validation,
+                            marker_for_item,
+                            original_item_data.get('speaker_id'),
+                            api_client,
+                            model_name,
+                            config,
+                            prompt_template,
+                            character_glossary_section,
+                            entity_glossary_section,
+                            context_section,
+                            current_processing_file_name,
+                            error_log_path,
+                            error_log_lock,
+                        )
+                        if success_linewise:
+                            temp_results_for_this_attempt[result_key] = {
+                                "text": post_processed_block,
+                                "status": "success",
+                                "failure_context": None,
+                                "original_marker": original_item_data["original_marker"],
+                                "speaker_id": original_item_data["speaker_id"]
+                            }
+                            continue
+                        else:
+                            last_validation_reason = f"单行验证失败(行数)且回退失败: {fallback_reason}"
+                            failure_context_for_batch_item = f"按行回退失败: {fallback_reason}"
+                    else:
+                        last_validation_reason = f"单行验证失败: {line_validation_reason} (原文: {original_text_for_validation[:30]}...)"
+                        failure_context_for_batch_item = f"单行验证失败 ({line_validation_reason}): \"{repaired_text_for_validation[:50]}...\""
                     batch_is_fully_valid = False
                     _log_batch_error(error_log_path, error_log_lock, "单行验证失败", batch_original_texts_for_logging,
                                      last_validation_reason, model_name, last_failed_api_kwargs,
@@ -332,6 +375,138 @@ def _log_batch_error(
                 elog.write("-" * 20 + "\n")
     except Exception as log_err:
         log.error(f"写入批次错误日志失败: {log_err}")
+
+
+# --- 辅助函数：当 StringPicture 块行数不一致时，按“逐行”进行回退翻译 ---
+def _translate_stringpicture_by_lines(
+    original_block_text,
+    marker_type,
+    speaker_id,
+    api_client,
+    model_name,
+    config,
+    prompt_template,
+    character_glossary_section,
+    entity_glossary_section,
+    context_section,
+    current_processing_file_name,
+    error_log_path,
+    error_log_lock,
+):
+    try:
+        orig_lines = original_block_text.splitlines()
+        # 仅对“有实质内容”的行送翻译：排除纯空白（含全角空格）
+        non_empty_lines = [line for line in orig_lines if line.strip() != ""]
+        if len(non_empty_lines) == 0:
+            return True, original_block_text, original_block_text, ""
+
+        numbered_lines_for_prompt = []
+        for idx, line in enumerate(non_empty_lines):
+            pua_processed = text_processing.pre_process_text_for_llm(line)
+            marker_tag = f"[MARKER: {marker_type}]"
+            face_tag = f"[FACE: {speaker_id}]" if speaker_id else ""
+            numbered_lines_for_prompt.append(f"{marker_tag} {face_tag} {idx+1}.{pua_processed}".strip())
+
+        batch_text_for_prompt_payload = "\n".join(numbered_lines_for_prompt)
+        final_prompt = prompt_template.format(
+            source_language=config.get("source_language", "日语"),
+            target_language=config.get("target_language", "简体中文"),
+            character_glossary_section=character_glossary_section or "",
+            entity_glossary_section=entity_glossary_section or "",
+            context_section=context_section or "",
+            batch_text=batch_text_for_prompt_payload
+        )
+
+        api_messages = [{"role": "user", "content": final_prompt}]
+        api_kwargs = {}
+        if "temperature" in config: api_kwargs["temperature"] = config["temperature"]
+        if "max_tokens" in config: api_kwargs["max_tokens"] = config["max_tokens"]
+
+        ok, api_resp_content, api_err_msg = api_client.chat_completion(model_name, api_messages, **api_kwargs)
+        if not ok:
+            _log_batch_error(error_log_path, error_log_lock, "按行回退(API失败)", non_empty_lines, f"API调用失败: {api_err_msg}", model_name, api_kwargs, api_messages, api_resp_content or "", 0, 0, file_name_for_log=current_processing_file_name)
+            return False, None, None, f"API失败: {api_err_msg}"
+
+        textarea_match = re.search(r'<textarea>(.*?)</textarea>', api_resp_content, re.DOTALL | re.IGNORECASE)
+        if not textarea_match:
+            _log_batch_error(error_log_path, error_log_lock, "按行回退(响应格式错误)", non_empty_lines, "未找到<textarea>", model_name, api_kwargs, api_messages, api_resp_content or "", 0, 0, file_name_for_log=current_processing_file_name)
+            return False, None, None, "响应格式错误: 缺少<textarea>"
+
+        raw_textarea = textarea_match.group(1).strip()
+        raw_lines = raw_textarea.splitlines()
+        numbered_translations = {}
+        current_num = -1; parts = []; expected_number = 1
+        for ln in raw_lines:
+            line_without_meta = ln
+            leading_meta_match = TRANSLATION_METADATA_PREFIX_RE.match(line_without_meta)
+            removed_only_meta = False
+            if leading_meta_match:
+                line_without_meta = line_without_meta[leading_meta_match.end():]
+                removed_only_meta = line_without_meta == ""
+            stripped = line_without_meta.lstrip()
+            num_match = re.match(r'^(\d+)[\.:：、\)\]]\s*(.*)', stripped)
+            if num_match:
+                num_val = int(num_match.group(1)); text_after_num = num_match.group(2)
+                if num_val == expected_number:
+                    if current_num != -1:
+                        numbered_translations[current_num] = "\n".join(parts).rstrip()
+                    current_num = num_val; parts = [text_after_num]
+                    expected_number += 1
+                    continue
+            if current_num != -1:
+                if removed_only_meta and line_without_meta == "":
+                    continue
+                parts.append(line_without_meta)
+        if current_num != -1:
+            numbered_translations[current_num] = "\n".join(parts).rstrip()
+
+        for n in range(1, len(non_empty_lines) + 1):
+            if n not in numbered_translations:
+                reason = f"响应缺少编号: {n}"
+                _log_batch_error(error_log_path, error_log_lock, "按行回退(编号缺失)", non_empty_lines, reason, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
+                return False, None, None, reason
+
+        repaired_lines = []; post_processed_lines = []
+        for idx, orig_line in enumerate(non_empty_lines, start=1):
+            raw_tran = numbered_translations[idx]
+            restored = text_processing.restore_pua_placeholders(raw_tran)
+            repaired = text_processing.repair_translation_format(orig_line, restored)
+            postp = text_processing.post_process_translation(repaired, orig_line)
+            is_valid, reason = text_processing.validate_translation(orig_line, repaired, postp)
+            if not is_valid:
+                _log_batch_error(error_log_path, error_log_lock, "按行回退(单行验证失败)", non_empty_lines, reason, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, failed_item_index=idx-1, raw_item_translation=raw_tran, file_name_for_log=current_processing_file_name)
+                return False, None, None, f"单行验证失败: {reason}"
+            repaired_lines.append(repaired); post_processed_lines.append(postp)
+
+        # 重组为原始行数，空行保留
+        repaired_full = []; post_full = []; j = 0
+        for line in orig_lines:
+            if line.strip() == "":
+                # 纯空白行：不消耗译行，原样保留（含全角空格等）
+                repaired_full.append(line); post_full.append(line)
+            else:
+                repaired_full.append(repaired_lines[j]); post_full.append(post_processed_lines[j]); j += 1
+
+        repaired_block_text = "\n".join(repaired_full)
+        post_processed_block_text = "\n".join(post_full)
+
+        # 硬行数校验
+        orig_cnt = len(original_block_text.splitlines())
+        tran_cnt = len(post_processed_block_text.splitlines())
+        if orig_cnt != tran_cnt:
+            reason_len = f"按行回退后行数不一致: 原文 {orig_cnt} 行, 译文 {tran_cnt} 行"
+            _log_batch_error(error_log_path, error_log_lock, "按行回退(整体验证-行数不一致)", [original_block_text], reason_len, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
+            return False, None, None, reason_len
+
+        ok_final, reason_final = text_processing.validate_translation(original_block_text, repaired_block_text, post_processed_block_text)
+        if not ok_final:
+            _log_batch_error(error_log_path, error_log_lock, "按行回退(整体验证失败)", [original_block_text], reason_final, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
+            return False, None, None, f"整体验证失败: {reason_final}"
+
+        return True, repaired_block_text, post_processed_block_text, ""
+    except Exception as e:
+        _log_batch_error(error_log_path, error_log_lock, "按行回退(异常)", [original_block_text], str(e), model_name, None, None, "", 0, 0, file_name_for_log=current_processing_file_name)
+        return False, None, None, f"异常: {e}"
 
 
 # --- 线程工作函数 (返回文件名和结果) ---

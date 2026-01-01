@@ -139,11 +139,12 @@ def _extract_strings_from_file(file_path):
             marker_match = RE_MARKER_LINE.match(line_content_stripped)
             if marker_match:
                 original_marker = marker_match.group(1)
+                # 对话类与图文说明类（StringPicture）按多行块处理；其他标记按单行处理
                 speaker_id_for_this_entry = current_speaker_id if original_marker in ['Message'] else SYSTEM_TEXT_SPEAKER_ID # Choice 文本也可能需要发言人ID，但RPG Maker 2000/2003的Choice通常不直接关联脸图，所以默认为SYSTEM
                 log.debug(f"  [L{current_line_number_for_log}, {current_page_for_log}] 处理标记 '#{original_marker}#'. 使用 Speaker ID: '{speaker_id_for_this_entry}' (基于 current_speaker_id='{current_speaker_id}').")
                 i += 1 
                 
-                if original_marker in ['Message']: # 现在只处理 Message 作为对话，Choice 视为系统文本的一部分
+                if original_marker in ['Message', 'StringPicture']: # Message 与 StringPicture 都按多行块处理
                     message_block_lines = []
                     while i < len(lines) and not lines[i].strip() == '##':
                         message_block_lines.append(lines[i])
@@ -157,7 +158,7 @@ def _extract_strings_from_file(file_path):
                         strings_with_metadata[message_key_as_original] = {
                             "text_to_translate": text_to_translate_val,
                             "original_marker": original_marker,
-                            "speaker_id": speaker_id_for_this_entry
+                            "speaker_id": speaker_id_for_this_entry if original_marker == 'Message' else SYSTEM_TEXT_SPEAKER_ID
                         }
                         log.debug(f"    提取到 '{original_marker}' 块. 原文Key: '{message_key_as_original[:30].replace(chr(10),'/LF/') + ('...' if len(message_key_as_original)>30 else '')}'. Speaker: '{speaker_id_for_this_entry}'")
                         if message_key_as_original != text_to_translate_val:

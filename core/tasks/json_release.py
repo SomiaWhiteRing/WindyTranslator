@@ -44,7 +44,7 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
             new_lines.append(line) 
             i += 1 
 
-            if original_marker_type in ['Message']: # 只处理 Message 作为对话型文本
+            if original_marker_type in ['Message', 'StringPicture']: # Message 与 StringPicture 都按多行块处理
                 message_block_original_text = ""
                 temp_block_lines = []
                 while i < len(lines) and not lines[i].strip() == '##':
