@@ -27,7 +27,7 @@ MANIFEST
 
 # PyInstaller
 *.manifest
-*.spec
+# *.spec
 
 # Logs
 logs/
