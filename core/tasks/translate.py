@@ -738,10 +738,9 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("done", None)); return
 
         total_batches_to_process = len(global_translation_tasks)
-        # 计算仅需翻译的总条目（排除默认库预填+无内容预填）
-        overall_only_need_translate = overall_total_items_in_all_files - overall_no_content_prefilled_count
-        total_need_translate = overall_only_need_translate
-        message_queue.put(("log", ("normal", f"任务预切分完成。共 {total_batches_to_process} 个批次（来自 {len(untranslated_data_per_file)} 个文件），总计 {overall_only_need_translate} 个需翻译原文条目。")))
+        # overall_total_items_in_all_files 已经是过滤后需要API翻译的条目数（不包含预填充和无需翻译的）
+        total_need_translate = overall_total_items_in_all_files
+        message_queue.put(("log", ("normal", f"任务预切分完成。共 {total_batches_to_process} 个批次（来自 {len(untranslated_data_per_file)} 个文件），总计 {total_need_translate} 个需翻译原文条目。")))
         if overall_default_db_prefilled_count > 0:
             message_queue.put(("log", ("normal", f"按默认数据库规则自动填充 {overall_default_db_prefilled_count} 条模板词条译文，避免重复请求 API。")))
         if overall_no_content_prefilled_count > 0:
