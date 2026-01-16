@@ -276,20 +276,20 @@ def prompt_for_replacement(
 
     Returns the chosen replacement (without control codes) or None if skipped.
     """
-    print(f"\nSpeaker: {speaker} (missing in {len(entries)} line(s))")
-    print(f"Suggested: {suggested or '(none)'}")
+    print(f"\n说话人: {speaker}（缺少 {len(entries)} 行）")
+    print(f"建议: {suggested or '（无）'}")
     preview_count = min(max_preview, len(entries))
     for idx in range(preview_count):
         sample = entries[idx]
-        print(f"  [{idx + 1}] orig: {format_single_line(sample.original)}")
-        print(f"      curr: {format_single_line(sample.translation)}")
+        print(f"  [{idx + 1}] 原文: {format_single_line(sample.original)}")
+        print(f"      译文: {format_single_line(sample.translation)}")
         fixed_preview = (
             f"{sample.speaker_prefix}{suggested}\\n{sample.translation}"
         )
-        print(f"      fix : {format_single_line(fixed_preview)}")
-    print("Choices: [Enter]=use suggested, 's'=skip, 'q'=stop here, or type a custom replacement")
+        print(f"      预览: {format_single_line(fixed_preview)}")
+    print("选择: 回车=用建议，s=跳过，q=停止，或直接输入自定义名字")
     while True:
-        resp = input("Replacement > ").strip()
+        resp = input("替换 > ").strip()
         if resp == "":
             if not suggested:
                 return None
