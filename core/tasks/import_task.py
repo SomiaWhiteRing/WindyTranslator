@@ -2,6 +2,7 @@
 import os
 import logging
 from core.external import rpgrewriter
+from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
@@ -16,6 +17,24 @@ def run_import(game_path, import_encoding, message_queue):
         message_queue (queue.Queue): 用于向主线程发送消息的队列。
     """
     try:
+        detected = detect_game_engine(game_path)
+        if detected and detected.engine == "vxace":
+            message_queue.put(("status", "正在导入文本 (VX Ace)..."))
+            message_queue.put(("log", ("normal", "步骤 7(VX Ace): 从 StringScripts 写回 rvdata2...")))
+            try:
+                from core.engines import vxace
+
+                modified_files = vxace.import_from_string_scripts(game_path, message_queue)
+                message_queue.put(("success", f"VX Ace 导入完成：更新了 {modified_files} 个数据文件。"))
+                message_queue.put(("status", "文本导入完成(VX Ace)"))
+            except Exception as e:
+                log.exception("VX Ace 导入失败。")
+                message_queue.put(("error", f"VX Ace 导入失败: {e}"))
+                message_queue.put(("status", "导入文本失败"))
+            finally:
+                message_queue.put(("done", None))
+            return
+
         message_queue.put(("status", f"正在导入文本 (编码: {import_encoding})..."))
         message_queue.put(("log", ("normal", f"步骤 7: 开始导入文本 (写入编码: {import_encoding})...")))
 

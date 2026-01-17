@@ -5,6 +5,7 @@ import shutil
 import logging
 from core.external import easyrpg, rtp # 导入外部交互模块
 from core.utils import file_system     # 导入文件系统工具
+from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
@@ -202,6 +203,14 @@ def run_initialize(game_path, rtp_options, message_queue):
     try:
         message_queue.put(("status", "正在初始化游戏环境..."))
         message_queue.put(("log", ("normal", "步骤 0: 开始初始化...")))
+
+        detected = detect_game_engine(game_path)
+        if detected and detected.engine == "vxace":
+            message_queue.put(("log", ("success", "检测到 RPG Maker VX Ace：初始化步骤自动跳过（无需 EasyRPG/RTP/编码转换）。")))
+            message_queue.put(("success", "初始化完成（VX Ace：跳过）"))
+            message_queue.put(("status", "初始化完成（VX Ace：跳过）"))
+            message_queue.put(("done", None))
+            return
 
         # 1. 复制 EasyRPG 文件
         message_queue.put(("log", ("normal", "复制 EasyRPG 文件...")))

@@ -24,6 +24,7 @@ from core.tasks import (
 from core.utils import (text_processing, dictionary_manager)
 from ui.dict_editor import DictEditorWindow
 from core.utils.file_system import get_executable_dir  # 导入路径辅助函数
+from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__) # 获取 logger 实例
 
@@ -77,16 +78,19 @@ class RPGTranslatorApp:
         """弹出目录选择对话框，更新游戏路径。"""
         path = filedialog.askdirectory(title="选择游戏目录", parent=self.root)
         if path:
-            # 验证路径是否有效 (基本检查)
-            lmt_path = os.path.join(path, "RPG_RT.lmt")
-            if os.path.exists(lmt_path):
+            detected = detect_game_engine(path)
+            if detected:
                 self.game_path.set(path)
-                self.log_message(f"已选择游戏目录: {path}")
+                self.log_message(f"已选择游戏目录: {path} ({detected.engine})")
                 self.update_status("游戏目录已选择，可以开始操作。")
                 # 清理旧状态？或者在任务开始时清理
                 self._check_and_update_ui_states() # <--- 新增: 路径改变后检查按钮状态
             else:
-                messagebox.showerror("路径无效", "选择的目录不是有效的 RPG Maker 2000/2003 游戏目录（未找到 RPG_RT.lmt）。", parent=self.root)
+                messagebox.showerror(
+                    "路径无效",
+                    "选择的目录不是有效的 RPG Maker 2000/2003 或 RPG Maker VX Ace 游戏目录（未找到 RPG_RT.lmt 或 Data/MapInfos.rvdata2）。",
+                    parent=self.root,
+                )
                 self.log_message("选择了无效的游戏目录。", "error")
 
     def get_game_path(self):
@@ -550,15 +554,18 @@ class RPGTranslatorApp:
 
         player_exe = os.path.join(current_game_path, "Player.exe") # EasyRPG Player
         rpg_rt_exe = os.path.join(current_game_path, "RPG_RT.exe") # 原版
+        vxace_exe = os.path.join(current_game_path, "Game.exe") # VX Ace
 
         exe_to_run = None
         if os.path.exists(player_exe):
             exe_to_run = player_exe
+        elif os.path.exists(vxace_exe):
+            exe_to_run = vxace_exe
         elif os.path.exists(rpg_rt_exe):
             exe_to_run = rpg_rt_exe
         else:
-            messagebox.showerror("启动失败", f"未在游戏目录中找到 Player.exe 或 RPG_RT.exe。", parent=self.root)
-            self.log_message("无法启动游戏：未找到 Player.exe 或 RPG_RT.exe。", "error")
+            messagebox.showerror("启动失败", f"未在游戏目录中找到 Player.exe、Game.exe 或 RPG_RT.exe。", parent=self.root)
+            self.log_message("无法启动游戏：未找到 Player.exe、Game.exe 或 RPG_RT.exe。", "error")
             return
 
         self.log_message(f"尝试启动游戏: {exe_to_run}")

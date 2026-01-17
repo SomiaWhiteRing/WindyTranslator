@@ -4,6 +4,7 @@ import logging
 from core.external import rpgrewriter # 导入 RPGRewriter 交互模块
 from core.utils import file_system
 from core.external import rtp # 导入外部交互模块
+from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +102,14 @@ def run_rename(game_path, program_dir, rtp_fix, message_queue):
     try:
         message_queue.put(("status", "正在重写文件名..."))
         message_queue.put(("log", ("normal", "步骤 2: 开始重写文件名...")))
+
+        detected = detect_game_engine(game_path)
+        if detected and detected.engine == "vxace":
+            message_queue.put(("log", ("success", "检测到 RPG Maker VX Ace：重写文件名步骤自动跳过（无需 RPGRewriter）。")))
+            message_queue.put(("success", "重写文件名完成（VX Ace：跳过）"))
+            message_queue.put(("status", "重写文件名完成（VX Ace：跳过）"))
+            message_queue.put(("done", None))
+            return
 
         lmt_path = os.path.join(game_path, "RPG_RT.lmt")
         if not os.path.exists(lmt_path):

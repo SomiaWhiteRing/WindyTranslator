@@ -2,3 +2,4 @@ pyinstaller
 google-genai
 google-api-core
 openai
+rubymarshal==1.2.10
