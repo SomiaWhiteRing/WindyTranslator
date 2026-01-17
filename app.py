@@ -75,7 +75,7 @@ class RPGTranslatorApp:
         initial_mode = self.config.get('selected_mode', 'easy')
         self.main_window.switch_to_mode(initial_mode)
 
-        log.info("RPG 翻译助手应用程序已初始化。")
+        log.info("WindyTranslator 应用程序已初始化。")
         self.log_message("程序已启动，请选择游戏目录", "normal")
 
     # --- UI 调用接口 ---

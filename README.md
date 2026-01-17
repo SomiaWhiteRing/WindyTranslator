@@ -1,13 +1,13 @@
-# RPG Maker 翻译助手
+# WindyTranslator
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/SomiaWhiteRing/RPGTranslationAssistant)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/SomiaWhiteRing/WindyTranslator)
 
 ## 下载与安装
 
 1. 克隆此仓库：
    ```
-   git clone https://github.com/SomiaWhiteRing/RPGTranslationAssistant.git
-   cd RPGTranslationAssistant
+   git clone https://github.com/SomiaWhiteRing/WindyTranslator.git
+   cd WindyTranslator
    ```
 
 2. 确保已安装Python 3.9或更高版本
@@ -42,14 +42,14 @@
 
 3. 使用已维护好的 spec 构建（默认 onedir，GUI，无控制台）
    ```
-   python -m PyInstaller --noconfirm --clean RPGTranslationAssistant.spec
+   python -m PyInstaller --noconfirm --clean WindyTranslator.spec
    ```
 
 4. 产物位置与启动方式
-   - 可执行文件：`dist/RPGTranslationAssistant/RPGTranslationAssistant.exe`
+   - 可执行文件：`dist/WindyTranslator/WindyTranslator.exe`
    - 运行：双击上述 exe，或在命令行执行：
      ```
-     .\dist\RPGTranslationAssistant\RPGTranslationAssistant.exe
+     .\dist\WindyTranslator\WindyTranslator.exe
      ```
 
 5. 打包内容说明（由 spec 配置）
@@ -66,7 +66,7 @@
    - 跨平台打包需在目标平台执行（例如 Windows 可执行文件应在 Windows 上构建）。
 
 7. 发布建议
-   - 将 `dist/RPGTranslationAssistant/` 目录整体打包为 zip 分发。
+   - 将 `dist/WindyTranslator/` 目录整体打包为 zip 分发。
    - 初次运行会在程序同级目录生成 `logs/`，日志与配置会写到可执行文件同级目录。
 
 ## 贡献指南

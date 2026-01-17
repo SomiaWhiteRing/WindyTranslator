@@ -5,7 +5,7 @@ import logging
 import sys
 import os
 import datetime
-from core.utils.file_system import get_executable_dir  # 导入路径辅助函数
+from core.utils.file_system import get_application_path, get_executable_dir  # 导入路径辅助函数
 
 # 导入主应用程序类
 from app import RPGTranslatorApp
@@ -62,6 +62,18 @@ if __name__ == "__main__":
 
     # 创建 Tkinter 根窗口
     root = tk.Tk()
+    # 避免启动时窗口先以默认小尺寸显示再调整到最终尺寸（减少闪烁）
+    root.withdraw()
+
+    # 设置窗口标题栏图标（与可执行文件图标保持一致）
+    try:
+        icon_path = os.path.join(get_application_path(), "assets", "icon.ico")
+        if os.path.exists(icon_path):
+            # 设置默认图标（影响后续 Toplevel）与当前窗口图标
+            root.iconbitmap(default=icon_path)
+            root.iconbitmap(icon_path)
+    except Exception as e:
+        logging.debug(f"设置窗口图标失败: {e}")
 
     # (可选) 设置主题样式
     # 需要确保 'Breeze' 主题已安装 (例如通过 pip install ttkthemes)
@@ -97,6 +109,13 @@ if __name__ == "__main__":
         except:
             pass # 如果连 messagebox 都无法显示，也没办法了
         sys.exit(1) # 退出程序
+
+    # 在显示主窗口前，让布局计算完成，避免“先小后大”
+    try:
+        root.update_idletasks()
+        root.deiconify()
+    except Exception:
+        pass
 
     # 启动 Tkinter 事件循环
     logging.info("启动 Tkinter 主事件循环...")

@@ -1,6 +1,6 @@
 # 第三方许可证
 
-本文件包含RPG Maker 翻译助手项目使用的所有第三方组件的许可证信息。
+本文件包含 WindyTranslator 项目使用的所有第三方组件的许可证信息。
 
 ## EasyRPG Player
 

@@ -17,8 +17,8 @@ jobs:
     permissions:
       contents: write
     env:
-      APP_NAME: RPGTranslationAssistant
-      SPEC_FILE: RPGTranslationAssistant.spec
+      APP_NAME: WindyTranslator
+      SPEC_FILE: WindyTranslator.spec
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
     steps:
@@ -92,8 +92,8 @@ jobs:
           if ($LASTEXITCODE -eq 0) { $exists = $true }
 
           if (-not $exists) {
-            gh release create $tag $zip --repo $repo --title "Nightly" --notes-file $notesFile --prerelease --target $env:GITHUB_SHA
+            gh release create $tag $zip --repo $repo --title "$env:APP_NAME Nightly" --notes-file $notesFile --prerelease --target $env:GITHUB_SHA
           } else {
-            gh release edit $tag --repo $repo --title "Nightly" --notes-file $notesFile --prerelease
+            gh release edit $tag --repo $repo --title "$env:APP_NAME Nightly" --notes-file $notesFile --prerelease
             gh release upload $tag $zip --repo $repo --clobber
           }

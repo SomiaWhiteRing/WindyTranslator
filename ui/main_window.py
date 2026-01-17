@@ -27,7 +27,7 @@ class MainWindow:
         self.root = root
         self.app = app_controller # 保留对 App 控制器的引用
         self.config = config
-        self.root.title("RPG Maker 200X 翻译助手")
+        self.root.title("WindyTranslator")
         # 初始大小将在切换模式时设置
         # self.root.geometry("600x750") # 初始大小由模式决定
 
