@@ -1,0 +1,104 @@
+name: Package (Windows)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      APP_NAME: RPGTranslationAssistant
+      SPEC_FILE: RPGTranslationAssistant.spec
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ensure app_config.json exists for packaging
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "app_config.json")) {
+            "{}" | Set-Content -Path "app_config.json" -Encoding utf8
+          }
+
+      - name: Build with PyInstaller (.spec)
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean $env:SPEC_FILE
+
+      - name: Zip dist output
+        id: zip
+        shell: pwsh
+        run: |
+          $shortSha = $env:GITHUB_SHA.Substring(0,7)
+          if ($env:GITHUB_EVENT_NAME -eq "push") {
+            $zipName = "$env:APP_NAME-windows-nightly.zip"
+          } else {
+            $zipName = "$env:APP_NAME-windows-sha-$shortSha.zip"
+          }
+          if (Test-Path $zipName) { Remove-Item -Force $zipName }
+          Push-Location "dist"
+          Compress-Archive -Path "$env:APP_NAME" -DestinationPath "..\\$zipName" -Force
+          Pop-Location
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-windows
+          path: ${{ steps.zip.outputs.zip_name }}
+          if-no-files-found: error
+
+      - name: Update nightly tag
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f nightly $env:GITHUB_SHA
+          git push -f origin nightly
+
+      - name: Publish/Update Nightly Release
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "nightly"
+          $zip = "${{ steps.zip.outputs.zip_name }}"
+          $notesFile = "release_notes.txt"
+          $notes = "Automated build from $env:GITHUB_SHA`n`nCommit: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/commit/$env:GITHUB_SHA`n"
+          $notes | Set-Content -Path $notesFile -Encoding utf8
+
+          $exists = $true
+          try { gh release view $tag | Out-Null } catch { $exists = $false }
+
+          if (-not $exists) {
+            gh release create $tag $zip --title "Nightly" --notes-file $notesFile --prerelease --target $env:GITHUB_SHA
+          } else {
+            gh release edit $tag --title "Nightly" --notes-file $notesFile --prerelease
+            gh release upload $tag $zip --clobber
+          }
