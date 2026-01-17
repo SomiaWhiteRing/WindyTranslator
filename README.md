@@ -55,10 +55,11 @@
 5. 打包内容说明（由 spec 配置）
    - 代码入口：`main.py`
    - 资源与数据（打包进入 `_internal`）：
-     - `modules/EasyRPG`, `modules/RPGRewriter`, `modules/RTPCollection`, `modules/dict`
-     - `Works`（工作目录种子）
-     - `app_config.json`（默认配置）
-     - `assets/icon.ico`（应用图标）
+      - `modules/EasyRPG`, `modules/RPGRewriter`, `modules/RTPCollection`, `modules/dict`
+      - `assets/icon.ico`（应用图标）
+   - 运行时自动生成（与可执行文件同级）：
+     - `Works`（工作目录）
+     - `app_config.json`（配置文件）
 
 6. 常见问题
    - 构建日志可能提示：`Hidden import "tzdata" not found!`，通常可忽略。如需消除，可将 `tzdata` 加入 `requirements.txt` 或在 spec 的 `hiddenimports` 中显式添加。

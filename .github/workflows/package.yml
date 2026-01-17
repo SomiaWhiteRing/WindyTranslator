@@ -37,13 +37,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Ensure app_config.json exists for packaging
-        shell: pwsh
-        run: |
-          if (-not (Test-Path "app_config.json")) {
-            "{}" | Set-Content -Path "app_config.json" -Encoding utf8
-          }
-
       - name: Build with PyInstaller (.spec)
         shell: pwsh
         run: |

@@ -23,7 +23,7 @@ from core.tasks import (
 )
 from core.utils import (text_processing, dictionary_manager)
 from ui.dict_editor import DictEditorWindow
-from core.utils.file_system import get_executable_dir  # 导入路径辅助函数
+from core.utils.file_system import get_executable_dir, ensure_dir_exists  # 导入路径辅助函数
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__) # 获取 logger 实例
@@ -44,8 +44,14 @@ class RPGTranslatorApp:
         self.executable_dir = get_executable_dir()
         self.works_dir = os.path.join(self.executable_dir, "Works")
         self.config_file_path = os.path.join(self.executable_dir, "app_config.json") # 定义路径
+        ensure_dir_exists(self.works_dir)
         self.config_manager = cfg.ConfigManager(self.config_file_path) # 实例化管理器
         self.config = self.config_manager.load_config() # 加载配置
+        if not os.path.exists(self.config_file_path):
+            try:
+                self.config_manager.save_config(self.config)
+            except Exception as e:
+                log.exception(f"创建默认配置文件失败: {e}")
 
         # --- 应用状态 ---
         self.game_path = tk.StringVar()

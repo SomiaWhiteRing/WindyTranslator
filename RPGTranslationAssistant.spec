@@ -10,9 +10,6 @@ a = Analysis(
         ('modules/RPGRewriter', 'modules/RPGRewriter'),
         ('modules/RTPCollection', 'modules/RTPCollection'),
         ('modules/dict', 'modules/dict'),
-        # App runtime data
-        ('app_config.json', '.'),
-        ('Works', 'Works'),
         ('assets/icon.ico', 'assets')
     ],
     hiddenimports=[
