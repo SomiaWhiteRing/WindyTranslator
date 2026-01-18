@@ -240,6 +240,42 @@ def _new_event_command(code: int, indent: int, parameters: List[Any]) -> Any:
     )
 
 
+def _detach_event_command_parameter_aliases(cmd_list: Any) -> None:
+    """
+    Work around a rubymarshal writer bug with Marshal link references.
+
+    Some VX Ace data files share the same `@parameters` Array between multiple
+    RPG::EventCommand objects (Marshal LINK). When writing back, rubymarshal may
+    corrupt those links, resulting in malformed commands such as:
+        code=101 parameters=["<ORIGINAL_TEXT:...>"] or parameters=[]
+
+    Detaching the list objects and RubyString values removes the need for LINKs,
+    keeping serialization stable while preserving values.
+    """
+    _, _, _, RubyString = _import_rubymarshal()
+
+    def detach_value(val: Any) -> Any:
+        if isinstance(val, list):
+            return [detach_value(x) for x in val]
+        if isinstance(val, RubyString):
+            return RubyString(str(val.text), attributes=dict(getattr(val, "attributes", {}) or {}))
+        if isinstance(val, str):
+            # Ensure a unique object instance to avoid Marshal LINKs for strings.
+            return RubyString(val, attributes={"E": True})
+        return val
+
+    if not isinstance(cmd_list, list):
+        return
+    for cmd in cmd_list:
+        attrs = getattr(cmd, "attributes", None)
+        if not isinstance(attrs, dict):
+            continue
+        params = attrs.get("@parameters")
+        if not isinstance(params, list):
+            continue
+        attrs["@parameters"] = [detach_value(x) for x in params]
+
+
 def _encode_message_marker(original_text: str) -> str:
     encoded = base64.b64encode(original_text.encode("utf-8")).decode("ascii")
     return f"{MESSAGE_MARKER_PREFIX}{encoded}{MESSAGE_MARKER_SUFFIX}"
@@ -1320,6 +1356,15 @@ def import_from_string_scripts(game_path: str, message_queue) -> int:
                     map_modified = True
 
         if map_modified:
+            for ev in events.values():
+                if ev is None:
+                    continue
+                pages = _get_attr(ev, "pages", [])
+                if not isinstance(pages, list):
+                    continue
+                for page in pages:
+                    cmd_list = _get_attr(page, "list", [])
+                    _detach_event_command_parameter_aliases(cmd_list)
             _save_rvdata2(map_path, map_obj)
             modified_files += 1
 
@@ -1349,6 +1394,11 @@ def import_from_string_scripts(game_path: str, message_queue) -> int:
                         if _update_event_command_list(cmd_list, tmap):
                             common_modified = True
                     if common_modified:
+                        for ce in common_events:
+                            if ce is None:
+                                continue
+                            cmd_list = _get_attr(ce, "list", [])
+                            _detach_event_command_parameter_aliases(cmd_list)
                         _save_rvdata2(common_path, common_events)
                         modified_files += 1
 
