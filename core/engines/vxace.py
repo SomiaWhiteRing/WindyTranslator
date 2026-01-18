@@ -171,6 +171,30 @@ def _save_rvdata2(path: str, obj: Any) -> None:
     os.replace(tmp_path, path)
 
 
+def _save_rvdata2_with_validation(path: str, obj: Any, validator) -> None:
+    """
+    Write a rvdata2 file via a temporary file, then reload and validate before
+    replacing the original.
+
+    This prevents silently writing broken Marshal structures when the writer
+    corrupts LINK references.
+    """
+    _, writer, _, _ = _import_rubymarshal()
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "wb") as f:
+        writer.write(f, obj)
+    try:
+        reloaded = _load_rvdata2(tmp_path)
+        validator(reloaded)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+    os.replace(tmp_path, path)
+
+
 def _ivar(name: str) -> str:
     return name if name.startswith("@") else f"@{name}"
 
@@ -274,6 +298,91 @@ def _detach_event_command_parameter_aliases(cmd_list: Any) -> None:
         if not isinstance(params, list):
             continue
         attrs["@parameters"] = [detach_value(x) for x in params]
+
+
+def _validate_no_corrupted_show_text_commands_in_map(map_obj: Any, path_hint: str) -> None:
+    """
+    Validate that no Show Text (101) commands are malformed after serialization.
+
+    The writer corruption we observed typically turns:
+        101 params=["<ORIGINAL_TEXT:...>"] (or params_len != 4)
+    which breaks face/background/position in-game.
+    """
+    _, _, _, RubyString = _import_rubymarshal()
+
+    events = _get_attr(map_obj, "events", {})
+    if not isinstance(events, dict):
+        return
+    for ev_id, ev in events.items():
+        if ev is None:
+            continue
+        pages = _get_attr(ev, "pages", [])
+        if not isinstance(pages, list):
+            continue
+        for page_idx, page in enumerate(pages):
+            cmd_list = _get_attr(page, "list", [])
+            if not isinstance(cmd_list, list):
+                continue
+            for cmd_idx, cmd in enumerate(cmd_list):
+                code, _indent, params = _event_command_fields(cmd)
+                if code != 101:
+                    continue
+                if not isinstance(params, list) or len(params) != 4:
+                    raise VXAceError(
+                        f"写入后校验失败: {path_hint} 存在被写坏的 Show Text(101) 指令 "
+                        f"(Event {ev_id} Page {page_idx + 1} Cmd {cmd_idx}, params_len={len(params) if isinstance(params, list) else 'N/A'})。"
+                        "请从原版 Data 还原后重试。"
+                    )
+                face_name = params[0]
+                face_str = str(face_name.text) if isinstance(face_name, RubyString) else str(face_name or "")
+                if face_str.startswith(MESSAGE_MARKER_PREFIX) or face_str.startswith(CHOICE_MARKER_PREFIX):
+                    raise VXAceError(
+                        f"写入后校验失败: {path_hint} 的 Show Text(101) face_name 被 marker 污染 "
+                        f"(Event {ev_id} Page {page_idx + 1} Cmd {cmd_idx}): {face_str[:80]!r}。"
+                        "请从原版 Data 还原后重试。"
+                    )
+                if not (isinstance(params[1], int) and isinstance(params[2], int) and isinstance(params[3], int)):
+                    raise VXAceError(
+                        f"写入后校验失败: {path_hint} 的 Show Text(101) 参数类型异常 "
+                        f"(Event {ev_id} Page {page_idx + 1} Cmd {cmd_idx})。"
+                        "请从原版 Data 还原后重试。"
+                    )
+
+
+def _validate_no_corrupted_show_text_commands_in_common_events(common_events: Any, path_hint: str) -> None:
+    _, _, _, RubyString = _import_rubymarshal()
+    if not isinstance(common_events, list):
+        return
+    for ce_idx, ce in enumerate(common_events):
+        if ce is None:
+            continue
+        cmd_list = _get_attr(ce, "list", [])
+        if not isinstance(cmd_list, list):
+            continue
+        for cmd_idx, cmd in enumerate(cmd_list):
+            code, _indent, params = _event_command_fields(cmd)
+            if code != 101:
+                continue
+            if not isinstance(params, list) or len(params) != 4:
+                raise VXAceError(
+                    f"写入后校验失败: {path_hint} 存在被写坏的 Show Text(101) 指令 "
+                    f"(CommonEvent[{ce_idx}] Cmd {cmd_idx}, params_len={len(params) if isinstance(params, list) else 'N/A'})。"
+                    "请从原版 Data 还原后重试。"
+                )
+            face_name = params[0]
+            face_str = str(face_name.text) if isinstance(face_name, RubyString) else str(face_name or "")
+            if face_str.startswith(MESSAGE_MARKER_PREFIX) or face_str.startswith(CHOICE_MARKER_PREFIX):
+                raise VXAceError(
+                    f"写入后校验失败: {path_hint} 的 Show Text(101) face_name 被 marker 污染 "
+                    f"(CommonEvent[{ce_idx}] Cmd {cmd_idx}): {face_str[:80]!r}。"
+                    "请从原版 Data 还原后重试。"
+                )
+            if not (isinstance(params[1], int) and isinstance(params[2], int) and isinstance(params[3], int)):
+                raise VXAceError(
+                    f"写入后校验失败: {path_hint} 的 Show Text(101) 参数类型异常 "
+                    f"(CommonEvent[{ce_idx}] Cmd {cmd_idx})。"
+                    "请从原版 Data 还原后重试。"
+                )
 
 
 def _encode_message_marker(original_text: str) -> str:
@@ -1365,7 +1474,11 @@ def import_from_string_scripts(game_path: str, message_queue) -> int:
                 for page in pages:
                     cmd_list = _get_attr(page, "list", [])
                     _detach_event_command_parameter_aliases(cmd_list)
-            _save_rvdata2(map_path, map_obj)
+            _save_rvdata2_with_validation(
+                map_path,
+                map_obj,
+                lambda reloaded, p=map_path: _validate_no_corrupted_show_text_commands_in_map(reloaded, p),
+            )
             modified_files += 1
 
     # --- Common events ---
@@ -1399,7 +1512,13 @@ def import_from_string_scripts(game_path: str, message_queue) -> int:
                                 continue
                             cmd_list = _get_attr(ce, "list", [])
                             _detach_event_command_parameter_aliases(cmd_list)
-                        _save_rvdata2(common_path, common_events)
+                        _save_rvdata2_with_validation(
+                            common_path,
+                            common_events,
+                            lambda reloaded, p=common_path: _validate_no_corrupted_show_text_commands_in_common_events(
+                                reloaded, p
+                            ),
+                        )
                         modified_files += 1
 
     # --- Database import ---

@@ -282,7 +282,10 @@ def post_process_translation(text, original_text):
         missing_count = open_double_bracket_count - close_double_bracket_count
         log.debug(f"Adding {missing_count} missing '』' to translation: '{processed_text[:50]}...'")
         processed_text += '』' * missing_count
-        
+
+    # 规则 3.1: 移除『“xxx”』这种多余引号（仅处理两侧都多出且原文没有的狭窄情况）
+    if isinstance(original_text, str) and '『“' not in original_text and '”』' not in original_text:
+        processed_text = re.sub(r'『“([\s\S]*?)”』', r'『\1』', processed_text)
 
     # 规则 4: 恢复前导换行符
     original_leading_newlines = ""
@@ -302,6 +305,7 @@ def post_process_translation(text, original_text):
     
     num_original_lines = len(original_lines)
     num_processed_lines = len(processed_lines)
+    fullwidth_space = '\u3000'
 
     for i in range(num_processed_lines):
         current_p_line = processed_lines[i]
@@ -309,6 +313,13 @@ def post_process_translation(text, original_text):
         # 获取对应的原文行，如果存在的话
         o_line_exists = i < num_original_lines
         current_o_line = original_lines[i] if o_line_exists else "" # 如果原文行不存在，视为空串
+
+        # 0) 修复行首全角空格（对齐原文）
+        if o_line_exists and current_o_line.startswith(fullwidth_space):
+            o_fw = len(current_o_line) - len(current_o_line.lstrip(fullwidth_space))
+            p_fw = len(current_p_line) - len(current_p_line.lstrip(fullwidth_space))
+            if p_fw < o_fw:
+                current_p_line = (fullwidth_space * (o_fw - p_fw)) + current_p_line
 
         # a. 处理当前译文行行首的空格 (即上一行换行符之后的空格)
         # 只有当不是整个文本的第一行时，行首空格才是在换行符“之后”

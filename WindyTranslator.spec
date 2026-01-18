@@ -27,7 +27,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # Not used by this app; excluding avoids PyInstaller failing on
+        # incomplete Qt plugin installations in the global environment.
+        'PyQt5',
+    ],
     noarchive=False,
     optimize=0,
 )
