@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import zlib
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -102,6 +103,58 @@ def _import_rubymarshal():
     except Exception as e:  # pragma: no cover
         raise VXAceError("缺少依赖：rubymarshal。请先安装 requirements.txt 中的依赖。") from e
     return reader, writer, RubyObject, RubyString
+
+
+def _load_scripts_rvdata2(path: str) -> Any:
+    """
+    Scripts.rvdata2 contains compressed script blobs that are not valid UTF-8,
+    but Ruby may still label them as UTF-8 (E=true). Use a latin-1 reader to
+    preserve raw bytes (0..255) without decoding failures.
+    """
+    _, _, _, _ = _import_rubymarshal()
+    try:
+        from rubymarshal.reader import Reader as BaseReader
+    except Exception as e:  # pragma: no cover
+        raise VXAceError("缺少依赖：rubymarshal。请先安装 requirements.txt 中的依赖。") from e
+
+    class _Latin1Reader(BaseReader):
+        @staticmethod
+        def _get_encoding(_attrs):
+            return "latin-1"
+
+    with open(path, "rb") as f:
+        if f.read(1) != b"\x04" or f.read(1) != b"\x08":
+            raise VXAceError(f"Scripts.rvdata2 格式异常（Marshal Header 错误）: {path}")
+        loader = _Latin1Reader(f)
+        return loader.read()
+
+
+def _save_scripts_rvdata2(path: str, obj: Any) -> None:
+    """
+    Write Scripts.rvdata2 without re-encoding RubyString contents. All RubyString
+    text in objects loaded by _load_scripts_rvdata2 is latin-1 decoded and must be
+    written back as the original bytes.
+    """
+    _, _, _, _ = _import_rubymarshal()
+    try:
+        from rubymarshal.constants import TYPE_IVAR
+        from rubymarshal.writer import Writer as BaseWriter, write as marshal_write
+    except Exception as e:  # pragma: no cover
+        raise VXAceError("缺少依赖：rubymarshal。请先安装 requirements.txt 中的依赖。") from e
+
+    class _ScriptsWriter(BaseWriter):
+        def write_ruby_string(self, ruby_str):  # type: ignore[override]
+            if self.must_write(ruby_str):
+                raw = str(getattr(ruby_str, "text", ruby_str)).encode("latin-1", errors="strict")
+                attrs = dict(getattr(ruby_str, "attributes", {}) or {})
+                self.fd.write(TYPE_IVAR)
+                self.write_bytes(raw)
+                self.write_attributes(attrs)
+
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "wb") as f:
+        marshal_write(f, obj, cls=_ScriptsWriter)
+    os.replace(tmp_path, path)
 
 
 def _load_rvdata2(path: str) -> Any:
@@ -240,6 +293,210 @@ def _escape_inline_newlines(text: str) -> str:
 
 def _unescape_inline_newlines(text: str) -> str:
     return (text or "").replace("\\n", "\n")
+
+
+def _decode_script_source(data: bytes) -> Tuple[str, str]:
+    for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis", "latin-1"]:
+        try:
+            return data.decode(enc), enc
+        except Exception:
+            continue
+    return data.decode("utf-8", errors="replace"), "utf-8"
+
+
+def _ruby_unescape_string_literal(content: str, quote: str) -> str:
+    if quote == "'":
+        out: List[str] = []
+        i = 0
+        while i < len(content):
+            ch = content[i]
+            if ch == "\\" and i + 1 < len(content):
+                nxt = content[i + 1]
+                if nxt in ("\\", "'"):
+                    out.append(nxt)
+                else:
+                    out.append("\\")
+                    out.append(nxt)
+                i += 2
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+
+    out2: List[str] = []
+    i = 0
+    while i < len(content):
+        ch = content[i]
+        if ch != "\\":
+            out2.append(ch)
+            i += 1
+            continue
+
+        if i + 1 >= len(content):
+            out2.append("\\")
+            i += 1
+            continue
+
+        nxt = content[i + 1]
+        if nxt == "n":
+            out2.append("\n")
+            i += 2
+        elif nxt == "r":
+            out2.append("\r")
+            i += 2
+        elif nxt == "t":
+            out2.append("\t")
+            i += 2
+        elif nxt == "f":
+            out2.append("\f")
+            i += 2
+        elif nxt == "v":
+            out2.append("\v")
+            i += 2
+        elif nxt == "a":
+            out2.append("\a")
+            i += 2
+        elif nxt == "b":
+            out2.append("\b")
+            i += 2
+        elif nxt == "e":
+            out2.append("\x1b")
+            i += 2
+        elif nxt in ("\\", '"'):
+            out2.append(nxt)
+            i += 2
+        elif nxt == "x" and i + 3 < len(content):
+            hx = content[i + 2 : i + 4]
+            try:
+                out2.append(chr(int(hx, 16)))
+                i += 4
+            except Exception:
+                out2.append(nxt)
+                i += 2
+        elif nxt == "u":
+            if i + 5 < len(content) and re.match(r"^[0-9a-fA-F]{4}$", content[i + 2 : i + 6]):
+                try:
+                    out2.append(chr(int(content[i + 2 : i + 6], 16)))
+                    i += 6
+                except Exception:
+                    out2.append(nxt)
+                    i += 2
+            else:
+                out2.append(nxt)
+                i += 2
+        else:
+            out2.append(nxt)
+            i += 2
+    return "".join(out2)
+
+
+def _ruby_escape_double_quoted(text: str) -> str:
+    text = _normalize_newlines(text)
+    out: List[str] = []
+    for ch in text:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        else:
+            code = ord(ch)
+            if code < 0x20:
+                out.append(f"\\x{code:02x}")
+            else:
+                out.append(ch)
+    return "".join(out)
+
+
+_VOCAB_CONST_ASSIGN_RE = re.compile(r"^(\s*)([A-Z][A-Za-z0-9_]*)\s*=\s*")
+
+
+def _extract_vocab_constants_from_source(source: str) -> Dict[str, str]:
+    if "module Vocab" not in source:
+        return {}
+    constants: Dict[str, str] = {}
+    for line in source.splitlines():
+        m = _VOCAB_CONST_ASSIGN_RE.match(line)
+        if not m:
+            continue
+        name = m.group(2)
+        rest = line[m.end() :].lstrip()
+        if not rest:
+            continue
+        quote = rest[0]
+        if quote not in ('"', "'"):
+            continue
+
+        i = 1
+        buf: List[str] = []
+        while i < len(rest):
+            ch = rest[i]
+            if ch == "\\" and i + 1 < len(rest):
+                buf.append(ch)
+                buf.append(rest[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                raw = "".join(buf)
+                constants[name] = _ruby_unescape_string_literal(raw, quote)
+                break
+            buf.append(ch)
+            i += 1
+    return constants
+
+
+def _replace_vocab_constants_in_source(source: str, replacements: Dict[str, str]) -> Tuple[str, int]:
+    if not replacements:
+        return source, 0
+    lines = source.splitlines(keepends=True)
+    changed = 0
+    out_lines: List[str] = []
+    for line in lines:
+        m = _VOCAB_CONST_ASSIGN_RE.match(line)
+        if not m:
+            out_lines.append(line)
+            continue
+        name = m.group(2)
+        if name not in replacements:
+            out_lines.append(line)
+            continue
+        idx = m.end()
+        while idx < len(line) and line[idx].isspace():
+            idx += 1
+        if idx >= len(line) or line[idx] not in ('"', "'"):
+            out_lines.append(line)
+            continue
+        quote = line[idx]
+        start = idx + 1
+        i = start
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\" and i + 1 < len(line):
+                i += 2
+                continue
+            if ch == quote:
+                end = i
+                break
+            i += 1
+        else:
+            out_lines.append(line)
+            continue
+
+        replacement_runtime = _unescape_inline_newlines(replacements[name])
+        if quote == "'":
+            escaped = replacement_runtime.replace("\\", "\\\\").replace("'", "\\'")
+        else:
+            escaped = _ruby_escape_double_quoted(replacement_runtime)
+        new_line = line[:start] + escaped + line[end:]
+        if new_line != line:
+            changed += 1
+        out_lines.append(new_line)
+    return "".join(out_lines), changed
 
 
 def _write_text_file(path: str, lines: List[str]) -> None:
@@ -719,6 +976,44 @@ def _export_database(
                             continue
                         store_key = f"System.rvdata2:terms.{group_attr}:{idx}"
                         add_vocab_single(marker, store_key, term_str)
+
+            scripts_path = os.path.join(data_dir, "Scripts.rvdata2")
+            if os.path.isfile(scripts_path):
+                try:
+                    scripts_obj = _load_scripts_rvdata2(scripts_path)
+                except Exception as e:
+                    log.warning(f"读取 Scripts 失败: {scripts_path} - {e}")
+                    scripts_obj = None
+
+                constants: Dict[str, str] = {}
+                if isinstance(scripts_obj, list):
+                    vocab_entry: Optional[List[Any]] = None
+                    for entry in scripts_obj:
+                        if not isinstance(entry, list) or len(entry) < 3:
+                            continue
+                        name_obj = entry[1]
+                        name_text = str(getattr(name_obj, "text", name_obj))
+                        if "Vocab" in name_text:
+                            vocab_entry = entry
+                            break
+
+                    if vocab_entry is not None:
+                        code_obj = vocab_entry[2]
+                        if isinstance(code_obj, bytes):
+                            code_bytes = code_obj
+                        else:
+                            code_text = str(getattr(code_obj, "text", code_obj))
+                            code_bytes = code_text.encode("latin-1", errors="strict")
+                        try:
+                            dec_bytes = zlib.decompress(code_bytes)
+                            src_text, _src_enc = _decode_script_source(dec_bytes)
+                            constants = _extract_vocab_constants_from_source(src_text)
+                        except Exception as e:
+                            log.warning(f"解析 Vocab 脚本失败: {scripts_path} - {e}")
+
+                for const_name, const_val in constants.items():
+                    store_key = f"Scripts.rvdata2:Vocab:{const_name}"
+                    add_vocab_single(const_name, store_key, const_val)
 
             if any(l.startswith("#") for l in vocab_lines):
                 _write_text_file(os.path.join(out_root, "Vocab.txt"), vocab_lines)
@@ -1263,6 +1558,7 @@ def _import_database(db_dir: str, data_dir: str) -> int:
                     _set_attr(system_obj, "game_title", _str_like(_unescape_inline_newlines(entry["Name"]), old))
                     changed = True
 
+            vocab: Dict[str, Any] = {}
             vocab_path = os.path.join(db_dir, "Vocab.txt")
             if os.path.isfile(vocab_path):
                 vocab = _parse_db_file(vocab_path)
@@ -1296,5 +1592,68 @@ def _import_database(db_dir: str, data_dir: str) -> int:
             if changed:
                 _save_rvdata2(system_path, system_obj)
                 modified_files += 1
+
+            # Vocab module constants live in Scripts.rvdata2
+            if vocab:
+                scripts_path = os.path.join(data_dir, "Scripts.rvdata2")
+                if os.path.isfile(scripts_path):
+                    try:
+                        scripts_obj = _load_scripts_rvdata2(scripts_path)
+                    except Exception as e:
+                        log.warning(f"读取 Scripts 失败: {scripts_path} - {e}")
+                        scripts_obj = None
+
+                    if isinstance(scripts_obj, list):
+                        vocab_entry: Optional[List[Any]] = None
+                        for entry in scripts_obj:
+                            if not isinstance(entry, list) or len(entry) < 3:
+                                continue
+                            name_obj = entry[1]
+                            name_text = str(getattr(name_obj, "text", name_obj))
+                            if "Vocab" in name_text:
+                                vocab_entry = entry
+                                break
+
+                        if vocab_entry is not None:
+                            code_obj = vocab_entry[2]
+                            if isinstance(code_obj, bytes):
+                                code_bytes = code_obj
+                            else:
+                                code_text = str(getattr(code_obj, "text", code_obj))
+                                code_bytes = code_text.encode("latin-1", errors="strict")
+
+                            try:
+                                dec_bytes = zlib.decompress(code_bytes)
+                                src_text, src_enc = _decode_script_source(dec_bytes)
+                            except Exception as e:
+                                log.warning(f"解压 Vocab 脚本失败: {scripts_path} - {e}")
+                                src_text, src_enc = "", "utf-8"
+
+                            constants = _extract_vocab_constants_from_source(src_text) if src_text else {}
+                            if constants:
+                                replacements: Dict[str, str] = {}
+                                for const_name in constants.keys():
+                                    if const_name in vocab and isinstance(vocab[const_name], str):
+                                        replacements[const_name] = vocab[const_name]
+                                new_src, changed_count = _replace_vocab_constants_in_source(src_text, replacements)
+                                if changed_count > 0:
+                                    try:
+                                        new_src_bytes = new_src.encode(src_enc)
+                                    except Exception:
+                                        new_src_bytes = new_src.encode("utf-8")
+                                    new_comp = zlib.compress(new_src_bytes)
+
+                                    _, _, _, RubyString = _import_rubymarshal()
+                                    if isinstance(code_obj, bytes):
+                                        vocab_entry[2] = new_comp
+                                    else:
+                                        attrs = dict(getattr(code_obj, "attributes", {}) or {})
+                                        vocab_entry[2] = RubyString(new_comp.decode("latin-1"), attributes=attrs)
+
+                                    try:
+                                        _save_scripts_rvdata2(scripts_path, scripts_obj)
+                                        modified_files += 1
+                                    except Exception as e:
+                                        log.warning(f"写入 Scripts 失败: {scripts_path} - {e}")
 
     return modified_files
