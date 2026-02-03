@@ -90,27 +90,30 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
             elif original_marker_type == 'Choice': # 选项采用特殊的处理方式：逐行进行比对
                 choice_block_lines = []
                 while i < len(lines) and not lines[i].strip() == '##':
-                    choice_line = lines[i].strip()
-                    if choice_line in translations_for_this_file:
-                        translation_metadata_obj = translations_for_this_file[choice_line]
+                    original_line_with_newline = lines[i]
+                    original_line_no_nl = original_line_with_newline.rstrip('\r\n')
+                    choice_line_key = original_line_no_nl.strip()
+                    if choice_line_key in translations_for_this_file:
+                        translation_metadata_obj = translations_for_this_file[choice_line_key]
                         if isinstance(translation_metadata_obj, dict) and "text" in translation_metadata_obj:
                             translated_choice_text = translation_metadata_obj["text"]
                             if translated_choice_text is not None and translated_choice_text.strip() != "":
-                                # 保持原有的缩进
-                                leading_spaces = len(lines[i]) - len(lines[i].lstrip())
-                                new_lines.append(' ' * leading_spaces + translated_choice_text + '\n')
+                                original_leading_ws = re.match(r'^\s*', original_line_no_nl).group(0)
+                                original_trailing_ws = re.search(r'\s*$', original_line_no_nl).group(0)
+                                translated_core = translated_choice_text.strip()
+                                new_lines.append(f"{original_leading_ws}{translated_core}{original_trailing_ws}\n")
                                 applied_count += 1
-                                log.debug(f"应用翻译到 {file_basename} (选项原文: '{choice_line}'): '{translated_choice_text}'")
+                                log.debug(f"应用翻译到 {file_basename} (选项原文: '{choice_line_key}'): '{translated_choice_text}'")
                             else:
-                                new_lines.append(lines[i])
+                                new_lines.append(original_line_with_newline)
                                 skipped_count += 1
-                                log.warning(f"在文件 {file_basename} 找到选项 '{choice_line}' 的翻译，但译文为空，保留原文。")
+                                log.warning(f"在文件 {file_basename} 找到选项 '{choice_line_key}' 的翻译，但译文为空，保留原文。")
                         else:
-                            new_lines.append(lines[i])
+                            new_lines.append(original_line_with_newline)
                             skipped_count += 1
-                            log.warning(f"在文件 {file_basename} 找到选项 '{choice_line}'，但翻译元数据格式不正确 ({type(translation_metadata_obj)})，保留原文。")
+                            log.warning(f"在文件 {file_basename} 找到选项 '{choice_line_key}'，但翻译元数据格式不正确 ({type(translation_metadata_obj)})，保留原文。")
                     else:
-                        new_lines.append(lines[i])
+                        new_lines.append(original_line_with_newline)
                     i += 1
 
                 if i < len(lines) and lines[i].strip() == '##':
@@ -119,15 +122,19 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
 
             else: # 其他单行内容的标记
                 if i < len(lines):
-                    single_line_content_key = lines[i].strip() 
-                    original_line_with_newline = lines[i] 
+                    original_line_with_newline = lines[i]
+                    original_line_no_nl = original_line_with_newline.rstrip('\r\n')
+                    single_line_content_key = original_line_no_nl.strip()
 
                     if single_line_content_key in translations_for_this_file:
                         translation_metadata_obj = translations_for_this_file[single_line_content_key]
                         if isinstance(translation_metadata_obj, dict) and "text" in translation_metadata_obj:
                             translated_single_line_text = translation_metadata_obj["text"]
                             if translated_single_line_text is not None and translated_single_line_text.strip() != "":
-                                new_lines.append(translated_single_line_text.rstrip('\n') + '\n')
+                                original_leading_ws = re.match(r'^\s*', original_line_no_nl).group(0)
+                                original_trailing_ws = re.search(r'\s*$', original_line_no_nl).group(0)
+                                translated_core = translated_single_line_text.strip()
+                                new_lines.append(f"{original_leading_ws}{translated_core}{original_trailing_ws}\n")
                                 applied_count += 1
                                 log.debug(f"应用翻译到 {file_basename} (行原文: '{single_line_content_key[:30]}...'): '{translated_single_line_text[:30]}...'")
                             else:
