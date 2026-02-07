@@ -199,6 +199,7 @@ def import_text_command(lmt_path, encoding_code):
         tuple: (return_code, stdout, stderr)
     """
     # 原脚本使用了 -nolimit 1 参数
-    args = ["-import", "-writecode", str(encoding_code), "-nolimit", "1"]
+    
+    args = ["-import", "-readcode", str(encoding_code), "-filereadcode", str(encoding_code), "-miscreadcode", str(encoding_code), "-writecode", str(encoding_code), "-filewritecode", str(encoding_code), "-miscwritecode", str(encoding_code), "-nolimit", "1"]
     # 注意：这个命令不需要交互输入
     return run_rpgrewriter_command(lmt_path, args)
