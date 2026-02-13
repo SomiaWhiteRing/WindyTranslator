@@ -118,42 +118,38 @@ def validate_translation(original, translated, post_processed_translation):
 
 # --- 文本预处理/后处理 ---
 
+# PUA 占位符映射表（原始标记 -> PUA 字符）
+# 长模式排在前面，确保替换时不会被短模式截断（如 \!\n 必须在 \! 之前）
+_PUA_MAPPING = [
+    (r'\!\n', '\uE010'),
+    (r'\!',   '\uE002'),
+    (r'\.',   '\uE005'),
+    (r'\<',   '\uE006'),
+    (r'\>',   '\uE007'),
+    (r'\|',   '\uE008'),
+    (r'\^',   '\uE009'),
+    ('「',    '\uE000'),
+    ('」',    '\uE001'),
+    ('『',    '\uE003'),
+    ('』',    '\uE004'),
+]
+# 反向映射（PUA -> 原始标记），用于还原
+_PUA_REVERSE_MAPPING = [(pua, orig) for orig, pua in _PUA_MAPPING]
+
+
 def pre_process_text_for_llm(text):
     """在发送给 LLM 前替换特殊标记为 PUA 占位符"""
     if not isinstance(text, str): return text
-    # 优先替换更长的模式或可能包含其他模式的模式
-    processed_text = text.replace(r'\!\n', '\uE010') # \!\n
-    processed_text = processed_text.replace(r'\!', '\uE002') # \!
-    processed_text = processed_text.replace(r'\.', '\uE005') # \.
-    processed_text = processed_text.replace(r'\<', '\uE006') # \<
-    processed_text = processed_text.replace(r'\>', '\uE007') # \>
-    processed_text = processed_text.replace(r'\|', '\uE008') # \|
-    processed_text = processed_text.replace(r'\^', '\uE009') # \^
-    # 再替换单字符模式
-    processed_text = processed_text.replace('「', '\uE000') # 「
-    processed_text = processed_text.replace('」', '\uE001') # 」
-    processed_text = processed_text.replace('『', '\uE003') # 『
-    processed_text = processed_text.replace('』', '\uE004') # 』
-    # log.debug(f"Preprocessed: '{text[:50]}...' -> '{processed_text[:50]}...'")
-    return processed_text
+    for orig, pua in _PUA_MAPPING:
+        text = text.replace(orig, pua)
+    return text
 
 def restore_pua_placeholders(text):
     """将译文中的 PUA 占位符还原为原始标记"""
     if not isinstance(text, str): return text
-    # 按照与 pre_process 相反但逻辑对应的顺序还原
-    processed_text = text.replace('\uE000', '「')
-    processed_text = processed_text.replace('\uE001', '」')
-    processed_text = processed_text.replace('\uE002', r'\!')
-    processed_text = processed_text.replace('\uE003', '『')
-    processed_text = processed_text.replace('\uE004', '』')
-    processed_text = processed_text.replace('\uE005', r'\.')
-    processed_text = processed_text.replace('\uE006', r'\<')
-    processed_text = processed_text.replace('\uE007', r'\>') 
-    processed_text = processed_text.replace('\uE008', r'\|')
-    processed_text = processed_text.replace('\uE009', r'\^')
-    processed_text = processed_text.replace('\uE010', r'\!\n')
-    # log.debug(f"Restored PUA: '{text[:50]}...' -> '{processed_text[:50]}...'")
-    return processed_text
+    for pua, orig in _PUA_REVERSE_MAPPING:
+        text = text.replace(pua, orig)
+    return text
 
 
 def repair_translation_format(original_text: str, restored_translation: str) -> str:
