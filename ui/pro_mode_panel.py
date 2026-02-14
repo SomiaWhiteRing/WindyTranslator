@@ -1,221 +1,241 @@
 # ui/pro_mode_panel.py
-import tkinter as tk
-from tkinter import ttk
+"""专业模式面板 — 分步操作的完整翻译流程界面。"""
 
-class ProModePanel(ttk.Frame):
-    def __init__(self, parent, app_controller, config):
-        super().__init__(parent, padding="5")
-        self.app = app_controller
-        self.config = config
-        self.pack(fill=tk.BOTH, expand=True)
+from __future__ import annotations
 
-        # **** Grid 配置: 主面板只有一列，让行容器可以扩展 ****
-        self.columnconfigure(0, weight=1)
+from typing import TYPE_CHECKING
 
-        pro_settings = self.config.setdefault('pro_mode_settings', {})
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QComboBox,
+)
 
-        # --- 控件变量 (不变) ---
-        self.export_encoding_var = tk.StringVar(value=pro_settings.get('export_encoding', '932'))
-        self.import_encoding_var = tk.StringVar(value=pro_settings.get('import_encoding', '936'))
-        self.rtp_fix_check = tk.BooleanVar(value=pro_settings.get('rewrite_rtp_fix', True))
-        self.rtp_button_text = tk.StringVar()
+if TYPE_CHECKING:
+    from app import RPGTranslatorApp
 
-        # --- 编码选项列表 (不变) ---
-        self.encoding_options = [
-            ("日语 (Shift-JIS)", "932"), ("中文简体 (GBK)", "936"), ("中文繁体 (Big5)", "950"),
-            ("韩语 (EUC-KR)", "949"), ("泰语", "874"), ("拉丁语系 (西欧)", "1252"),
-            ("东欧", "1250"), ("西里尔字母", "1251")
-        ]
-        self.encoding_display_values = [f"{name} - {code}" for name, code in self.encoding_options]
 
-        # --- 创建控件 (行容器 + pack 布局) ---
-        all_controls_list = [] # 用于收集所有控件引用
-        row_idx = 0
-        pady_val = 3
-        padx_val = 5
-        button_width = 8
-        config_button_width = 6
-        config_control_width = 20
+# 编码选项：(显示名, 代码页)
+ENCODING_OPTIONS: list[tuple[str, str]] = [
+    ("日语 (Shift-JIS)", "932"),
+    ("中文简体 (GBK)", "936"),
+    ("中文繁体 (Big5)", "950"),
+    ("韩语 (EUC-KR)", "949"),
+    ("泰语", "874"),
+    ("拉丁语系 (西欧)", "1252"),
+    ("东欧", "1250"),
+    ("西里尔字母", "1251"),
+]
 
-        # --- Helper function to create a row ---
-        def create_row(parent_frame, description_title, description_text=None):
-            row_frame = ttk.Frame(parent_frame)
-            # **** 让行容器水平填充 ****
-            row_frame.grid(row=row_idx, column=0, sticky="ew", pady=pady_val)
 
-            title_label = ttk.Label(row_frame, text=description_title, width=16)
-            title_label.pack(side=tk.LEFT, padx=(padx_val, 0))
+def _encoding_display_values() -> list[str]:
+    return [f"{name} - {code}" for name, code in ENCODING_OPTIONS]
 
-            desc_label = ttk.Label(row_frame, text=description_text)
-            desc_label.pack(side=tk.LEFT, padx=(padx_val, 0))
 
-            # 返回行容器，用于向右侧添加按钮
-            return row_frame
+def _code_from_display(display: str) -> str:
+    """从 '日语 (Shift-JIS) - 932' 提取 '932'。"""
+    if " - " in display:
+        return display.rsplit(" - ", 1)[-1]
+    return "932"
+
+
+def _display_from_code(code: str) -> str:
+    """根据编码代码找到对应的显示文本。"""
+    for name, c in ENCODING_OPTIONS:
+        if c == code:
+            return f"{name} - {c}"
+    return _encoding_display_values()[0]
+
+
+class _StepRow(QWidget):
+    """单行步骤控件：标题 + 描述 + 右侧按钮/下拉框。"""
+
+    def __init__(self, title: str, description: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(5, 3, 5, 3)
+
+        title_label = QLabel(title)
+        title_label.setFixedWidth(110)
+        self._layout.addWidget(title_label)
+
+        desc_label = QLabel(description)
+        self._layout.addWidget(desc_label)
+
+        self._layout.addStretch()
+
+    def add_widget(self, widget: QWidget) -> None:
+        """在行右侧添加控件（按钮、下拉框等）。"""
+        self._layout.addWidget(widget)
+
+
+class ProModePanel(QWidget):
+    """专业模式面板：8 个分步操作行。"""
+
+    def __init__(self, app: RPGTranslatorApp, config: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._app = app
+        self._config = config
+        self._all_controls: list[QWidget] = []
+        self._init_ui()
+
+    def _init_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        pro_settings = self._config.get('pro_mode_settings', {})
 
         # --- 0. 初始化 ---
-        row_frame_0 = create_row(self, "0. 初始化", "复制EasyRPG/RTP并转换编码")
-        # **** 使用 pack 从右向左添加按钮 ****
-        self.init_button = ttk.Button(row_frame_0, text="执行", width=button_width,
-                                     command=lambda: self.app.start_task('initialize'))
-        self.init_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.rtp_button = ttk.Button(row_frame_0, textvariable=self.rtp_button_text, width=config_control_width,
-                                      command=lambda: self.app.start_task('select_rtp'))
-        self.rtp_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.update_rtp_button_text()
-        all_controls_list.extend([self.init_button, self.rtp_button])
-        row_idx += 1
+        row0 = _StepRow("0. 初始化", "复制EasyRPG/RTP并转换编码")
+        self.rtp_btn = QPushButton()
+        self.rtp_btn.setFixedWidth(160)
+        self.rtp_btn.clicked.connect(lambda: self._app.start_task('select_rtp'))
+        row0.add_widget(self.rtp_btn)
+        self.init_btn = QPushButton("执行")
+        self.init_btn.setFixedWidth(70)
+        self.init_btn.clicked.connect(lambda: self._app.start_task('initialize'))
+        row0.add_widget(self.init_btn)
+        layout.addWidget(row0)
+        self._all_controls.extend([self.init_btn, self.rtp_btn])
 
         # --- 1. 导出文本 ---
-        row_frame_1 = create_row(self, "1. 导出文本", "导出文本到 StringScripts")
-        self.export_button = ttk.Button(row_frame_1, text="执行", width=button_width,
-                                       command=lambda: self.app.start_task('export'))
-        self.export_button.pack(side=tk.RIGHT, padx=padx_val)
-        # 编码控件组合 (也使用 pack)
-        encoding_frame_export = ttk.Frame(row_frame_1)
-        encoding_frame_export.pack(side=tk.RIGHT, padx=padx_val)
-        self.export_encoding_combo = ttk.Combobox(encoding_frame_export, textvariable=self.export_encoding_var,
-                                             values=self.encoding_display_values, state="readonly", width=config_control_width - 2)
-        ttk.Label(encoding_frame_export, text="编码:").pack(side=tk.LEFT, padx=(0, 2))
-        self.export_encoding_combo.pack(side=tk.LEFT)
-        self.export_encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
-        self._set_combobox_value(self.export_encoding_combo, self.export_encoding_var.get())
-        all_controls_list.extend([self.export_button, self.export_encoding_combo])
-        row_idx += 1
+        row1 = _StepRow("1. 导出文本", "导出文本到 StringScripts")
+        enc_label_exp = QLabel("编码:")
+        row1.add_widget(enc_label_exp)
+        self.export_encoding_combo = QComboBox()
+        self.export_encoding_combo.addItems(_encoding_display_values())
+        self.export_encoding_combo.setCurrentText(
+            _display_from_code(pro_settings.get('export_encoding', '932'))
+        )
+        self.export_encoding_combo.setFixedWidth(180)
+        self.export_encoding_combo.currentTextChanged.connect(self._save_settings)
+        row1.add_widget(self.export_encoding_combo)
+        self.export_btn = QPushButton("执行")
+        self.export_btn.setFixedWidth(70)
+        self.export_btn.clicked.connect(lambda: self._app.start_task('export'))
+        row1.add_widget(self.export_btn)
+        layout.addWidget(row1)
+        self._all_controls.extend([self.export_btn, self.export_encoding_combo])
 
         # --- 2. 重写文件名 ---
-        row_frame_2 = create_row(self, "2. 重写文件名", "非ASCII文件名转Unicode")
-        self.rename_button = ttk.Button(row_frame_2, text="执行", width=button_width,
-                                       command=lambda: self.app.start_task('rename'))
-        self.rename_button.pack(side=tk.RIGHT, padx=padx_val)
-        # self.log_checkbutton = ttk.Checkbutton(row_frame_1, text="RTP修正", variable=self.rtp_fix_check,
-        #                                        command=self._save_settings)
-        # self.log_checkbutton.pack(side=tk.RIGHT, padx=padx_val)
-        # all_controls_list.extend([self.rename_button, self.log_checkbutton])
-        all_controls_list.extend([self.rename_button])
-        row_idx += 1
-
+        row2 = _StepRow("2. 重写文件名", "非ASCII文件名转Unicode")
+        self.rename_btn = QPushButton("执行")
+        self.rename_btn.setFixedWidth(70)
+        self.rename_btn.clicked.connect(lambda: self._app.start_task('rename'))
+        row2.add_widget(self.rename_btn)
+        layout.addWidget(row2)
+        self._all_controls.append(self.rename_btn)
 
         # --- 3. 制作JSON文件 ---
-        row_frame_3 = create_row(self, "3. 制作JSON文件", "StringScripts 文本压缩为 JSON")
-        self.create_json_button = ttk.Button(row_frame_3, text="执行", width=button_width,
-                                            command=lambda: self.app.start_task('create_json'))
-        self.create_json_button.pack(side=tk.RIGHT, padx=padx_val)
-        all_controls_list.append(self.create_json_button)
-        row_idx += 1
+        row3 = _StepRow("3. 制作JSON文件", "StringScripts 文本压缩为 JSON")
+        self.create_json_btn = QPushButton("执行")
+        self.create_json_btn.setFixedWidth(70)
+        self.create_json_btn.clicked.connect(lambda: self._app.start_task('create_json'))
+        row3.add_widget(self.create_json_btn)
+        layout.addWidget(row3)
+        self._all_controls.append(self.create_json_btn)
 
         # --- 4. 生成世界观字典 ---
-        row_frame_4 = create_row(self, "4. 生成世界观字典", "Gemini API 从 JSON 生成字典")
-        self.gen_dict_button = ttk.Button(row_frame_4, text="执行", width=button_width,
-                                         command=lambda: self.app.start_task('generate_dictionary'))
-        self.gen_dict_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.gemini_config_button = ttk.Button(row_frame_4, text="配置", width=config_button_width,
-                                            command=lambda: self.app.start_task('configure_gemini'))
-        self.gemini_config_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.edit_dict_button = ttk.Button(row_frame_4, text="编辑字典", width=button_width + 2,
-                                          command=lambda: self.app.start_task('edit_dictionary'))
-        self.edit_dict_button.pack(side=tk.RIGHT, padx=padx_val)
-        all_controls_list.extend([self.gen_dict_button, self.gemini_config_button, self.edit_dict_button])
-        row_idx += 1
+        row4 = _StepRow("4. 生成世界观字典", "Gemini API 从 JSON 生成字典")
+        self.edit_dict_btn = QPushButton("编辑字典")
+        self.edit_dict_btn.setFixedWidth(90)
+        self.edit_dict_btn.clicked.connect(lambda: self._app.start_task('edit_dictionary'))
+        row4.add_widget(self.edit_dict_btn)
+        self.gemini_config_btn = QPushButton("配置")
+        self.gemini_config_btn.setFixedWidth(60)
+        self.gemini_config_btn.clicked.connect(lambda: self._app.start_task('configure_gemini'))
+        row4.add_widget(self.gemini_config_btn)
+        self.gen_dict_btn = QPushButton("执行")
+        self.gen_dict_btn.setFixedWidth(70)
+        self.gen_dict_btn.clicked.connect(lambda: self._app.start_task('generate_dictionary'))
+        row4.add_widget(self.gen_dict_btn)
+        layout.addWidget(row4)
+        self._all_controls.extend([self.gen_dict_btn, self.gemini_config_btn, self.edit_dict_btn])
 
         # --- 5. 翻译JSON文件 ---
-        row_frame_5 = create_row(self, "5. 翻译JSON文件", "OpenAI兼容 API 翻译 JSON")
-        self.translate_button = ttk.Button(row_frame_5, text="执行", width=button_width,
-                                          command=lambda: self.app.start_task('translate'))
-        self.translate_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.deepseek_config_button = ttk.Button(row_frame_5, text="配置", width=config_button_width,
-                                              command=lambda: self.app.start_task('configure_deepseek'))
-        self.deepseek_config_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.fix_fallback_button = ttk.Button(row_frame_5, text="修正回退", width=button_width + 2,
-                                              command=lambda: self.app.start_task('fix_fallback'),
-                                              state=tk.DISABLED) # <--- 初始禁用
-        self.fix_fallback_button.pack(side=tk.RIGHT, padx=padx_val) # <--- 添加按钮到布局
-        all_controls_list.extend([self.translate_button, self.deepseek_config_button])
-        row_idx += 1
+        row5 = _StepRow("5. 翻译JSON文件", "OpenAI兼容 API 翻译 JSON")
+        self.fix_fallback_btn = QPushButton("修正回退")
+        self.fix_fallback_btn.setFixedWidth(90)
+        self.fix_fallback_btn.setEnabled(False)
+        self.fix_fallback_btn.clicked.connect(lambda: self._app.start_task('fix_fallback'))
+        row5.add_widget(self.fix_fallback_btn)
+        self.deepseek_config_btn = QPushButton("配置")
+        self.deepseek_config_btn.setFixedWidth(60)
+        self.deepseek_config_btn.clicked.connect(lambda: self._app.start_task('configure_deepseek'))
+        row5.add_widget(self.deepseek_config_btn)
+        self.translate_btn = QPushButton("执行")
+        self.translate_btn.setFixedWidth(70)
+        self.translate_btn.clicked.connect(lambda: self._app.start_task('translate'))
+        row5.add_widget(self.translate_btn)
+        layout.addWidget(row5)
+        self._all_controls.extend([self.translate_btn, self.deepseek_config_btn])
 
         # --- 6. 释放JSON文件 ---
-        row_frame_6 = create_row(self, "6. 释放JSON文件", "翻译后 JSON 释放到 StringScripts")
-        self.release_json_button = ttk.Button(row_frame_6, text="执行", width=button_width,
-                                             command=lambda: self.app.start_task('release_json'))
-        self.release_json_button.pack(side=tk.RIGHT, padx=padx_val)
-        all_controls_list.append(self.release_json_button)
-        row_idx += 1
+        row6 = _StepRow("6. 释放JSON文件", "翻译后 JSON 释放到 StringScripts")
+        self.release_json_btn = QPushButton("执行")
+        self.release_json_btn.setFixedWidth(70)
+        self.release_json_btn.clicked.connect(lambda: self._app.start_task('release_json'))
+        row6.add_widget(self.release_json_btn)
+        layout.addWidget(row6)
+        self._all_controls.append(self.release_json_btn)
 
         # --- 7. 导入文本 ---
-        row_frame_7 = create_row(self, "7. 导入文本", "StringScripts 文本导入游戏")
-        self.import_button = ttk.Button(row_frame_7, text="执行", width=button_width,
-                                       command=lambda: self.app.start_task('import'))
-        self.import_button.pack(side=tk.RIGHT, padx=padx_val)
-        # 编码控件组合
-        encoding_frame_import = ttk.Frame(row_frame_7)
-        encoding_frame_import.pack(side=tk.RIGHT, padx=padx_val)
-        self.import_encoding_combo = ttk.Combobox(encoding_frame_import, textvariable=self.import_encoding_var,
-                                             values=self.encoding_display_values, state="readonly", width=config_control_width - 2)
-        ttk.Label(encoding_frame_import, text="编码:").pack(side=tk.LEFT, padx=(0, 2))
-        self.import_encoding_combo.pack(side=tk.LEFT)
-        self.import_encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
-        self._set_combobox_value(self.import_encoding_combo, self.import_encoding_var.get())
-        all_controls_list.extend([self.import_button, self.import_encoding_combo])
-        row_idx += 1
+        row7 = _StepRow("7. 导入文本", "StringScripts 文本导入游戏")
+        enc_label_imp = QLabel("编码:")
+        row7.add_widget(enc_label_imp)
+        self.import_encoding_combo = QComboBox()
+        self.import_encoding_combo.addItems(_encoding_display_values())
+        self.import_encoding_combo.setCurrentText(
+            _display_from_code(pro_settings.get('import_encoding', '936'))
+        )
+        self.import_encoding_combo.setFixedWidth(180)
+        self.import_encoding_combo.currentTextChanged.connect(self._save_settings)
+        row7.add_widget(self.import_encoding_combo)
+        self.import_btn = QPushButton("执行")
+        self.import_btn.setFixedWidth(70)
+        self.import_btn.clicked.connect(lambda: self._app.start_task('import'))
+        row7.add_widget(self.import_btn)
+        layout.addWidget(row7)
+        self._all_controls.extend([self.import_btn, self.import_encoding_combo])
 
-        # --- 保存所有按钮引用 ---
-        self.all_controls = all_controls_list # 使用收集到的列表
+        layout.addStretch()
 
+        # 初始化 RTP 按钮文本
+        self.update_rtp_button_text()
 
-    def get_controls(self):
-        """返回此面板上的所有可交互控件列表。"""
-        return self.all_controls
+    # ------------------------------------------------------------------
+    # 公共接口
+    # ------------------------------------------------------------------
 
-    # --- 新增: 更新修正回退按钮状态的方法 ---
-    def update_fix_fallback_button_state(self, enabled):
-        """根据传入的状态更新 '修正回退' 按钮的可用性。"""
-        new_state = tk.NORMAL if enabled else tk.DISABLED
-        if hasattr(self, 'fix_fallback_button') and self.fix_fallback_button.winfo_exists():
-            try:
-                self.fix_fallback_button.config(state=new_state)
-            except tk.TclError:
-                # 忽略控件可能已销毁的错误
-                pass
+    def get_controls(self) -> list[QWidget]:
+        """返回需要在任务运行时禁用的控件列表。"""
+        return list(self._all_controls)
 
-    # ... (update_rtp_button_text, _set_combobox_value, _on_encoding_change, _save_settings 方法保持不变, 但注意 _save_settings 中获取 Combobox 值的方式可能需要调整，因为现在是通过 self 实例属性访问) ...
-    def update_rtp_button_text(self):
-        """根据当前配置更新 RTP 选择按钮的文本。由 App 层调用。"""
-        pro_settings = self.config.get('pro_mode_settings', {})
+    def update_rtp_button_text(self) -> None:
+        """根据当前配置更新 RTP 选择按钮的文本。"""
+        pro_settings = self._config.get('pro_mode_settings', {})
         rtp_opts = pro_settings.get('rtp_options', {})
-        selected_rtps = [name for name, selected in rtp_opts.items() if selected]
+        selected = [name for name, sel in rtp_opts.items() if sel]
 
-        if not selected_rtps:
-            self.rtp_button_text.set("RTP选择: 无")
-        elif len(selected_rtps) == 1:
-            name_map = {'2000': '2000', '2000en': '2000en', '2003': '2003', '2003steam': '2003steam'}
-            display_name = name_map.get(selected_rtps[0], selected_rtps[0])
-            self.rtp_button_text.set(f"RTP选择: {display_name}")
+        if not selected:
+            self.rtp_btn.setText("RTP选择: 无")
+        elif len(selected) == 1:
+            self.rtp_btn.setText(f"RTP选择: {selected[0]}")
         else:
-            self.rtp_button_text.set(f"RTP选择: {len(selected_rtps)}个")
+            self.rtp_btn.setText(f"RTP选择: {len(selected)}个")
 
-    def _set_combobox_value(self, combobox, code_value):
-        """根据编码代码设置 Combobox 的显示值。"""
-        for display_value in self.encoding_display_values:
-            if display_value.endswith(f" - {code_value}"):
-                combobox.set(display_value)
-                return
-        combobox.set(self.encoding_display_values[0]) # 默认选第一个
+    def update_fix_fallback_button_state(self, enabled: bool) -> None:
+        """更新修正回退按钮的可用性。"""
+        self.fix_fallback_btn.setEnabled(enabled)
 
-    def _on_encoding_change(self, event=None):
-        """当编码下拉框选择变化时保存设置。"""
-        self._save_settings()
+    # ------------------------------------------------------------------
+    # 内部方法
+    # ------------------------------------------------------------------
 
-    def _save_settings(self):
-        """将当前面板上的设置保存到 App 配置中。"""
-        # 现在可以直接通过实例属性访问 Combobox
-        export_display = self.export_encoding_var.get()
-        import_display = self.import_encoding_var.get()
-
-        export_code = export_display.split(' - ')[-1] if ' - ' in export_display else '932'
-        import_code = import_display.split(' - ')[-1] if ' - ' in import_display else '936'
-
-        settings_to_save = {
-            'export_encoding': export_code,
-            'import_encoding': import_code,
-            'rewrite_rtp_fix': self.rtp_fix_check.get(),
+    def _save_settings(self) -> None:
+        """将当前面板上的编码设置保存到 App 配置中。"""
+        settings = {
+            'export_encoding': _code_from_display(self.export_encoding_combo.currentText()),
+            'import_encoding': _code_from_display(self.import_encoding_combo.currentText()),
+            'rewrite_rtp_fix': self._config.get('pro_mode_settings', {}).get('rewrite_rtp_fix', True),
         }
-        self.app.save_pro_mode_settings(settings_to_save)
+        self._app.save_pro_mode_settings(settings)

@@ -1,10 +1,17 @@
 # core/tasks/json_release.py
+from __future__ import annotations
+
 import os
 import re
 import json
 import logging
-import shutil 
+import shutil
+from typing import TYPE_CHECKING
+
 from core.utils import file_system, text_processing
+
+if TYPE_CHECKING:
+    from core.message_broker import MessageBroker
 
 log = logging.getLogger(__name__)
 
@@ -164,98 +171,97 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
 
 
 # --- 主任务函数 ---
-def run_release_json(game_path, works_dir, selected_json_path, message_queue):
-    """
-    将翻译后的、按文件组织的 JSON 文件内容写回到 StringScripts 目录。
+def run_release_json(game_path: str, works_dir: str, selected_json_path: str, broker: MessageBroker) -> None:
+    """将翻译后的、按文件组织的 JSON 文件内容写回到 StringScripts 目录。
     在应用翻译前，会先从 StringScripts_Origin 恢复 StringScripts。
     """
     try:
-        message_queue.put(("status", "准备应用翻译 (按文件)..."))
-        message_queue.put(("log", ("normal", "步骤 6: 开始释放 JSON 文件到 StringScripts (按文件)...")))
+        broker.status("准备应用翻译 (按文件)...")
+        broker.log("步骤 6: 开始释放 JSON 文件到 StringScripts (按文件)...")
 
         string_scripts_path = os.path.join(game_path, "StringScripts")
         backup_path = os.path.join(game_path, "StringScripts_Origin")
 
         # --- 恢复 StringScripts_Origin (逻辑不变) ---
-        message_queue.put(("log", ("normal", "检查原始备份 StringScripts_Origin...")))
+        broker.log("检查原始备份 StringScripts_Origin...")
         if not os.path.isdir(backup_path):
-            message_queue.put(("error", f"错误：未找到原始脚本备份目录 StringScripts_Origin: {backup_path}"))
-            message_queue.put(("status", "释放 JSON 失败 (无备份)"))
-            message_queue.put(("done", None)); return
+            broker.error(f"错误：未找到原始脚本备份目录 StringScripts_Origin: {backup_path}")
+            broker.status("释放 JSON 失败 (无备份)")
+            broker.done(); return
         else:
-             message_queue.put(("log", ("normal", "找到备份目录 StringScripts_Origin，准备恢复...")))
+             broker.log("找到备份目录 StringScripts_Origin，准备恢复...")
         try:
             if os.path.exists(string_scripts_path):
                  if not file_system.safe_remove(string_scripts_path):
-                      message_queue.put(("error", f"错误：无法删除现有的 StringScripts 目录: {string_scripts_path}"))
-                      message_queue.put(("status", "释放 JSON 失败 (删除旧目录失败)")); message_queue.put(("done", None)); return
-                 else: message_queue.put(("log", ("normal", "现有的 StringScripts 目录已删除。")))
+                      broker.error(f"错误：无法删除现有的 StringScripts 目录: {string_scripts_path}")
+                      broker.status("释放 JSON 失败 (删除旧目录失败)"); broker.done(); return
+                 else: broker.log("现有的 StringScripts 目录已删除。")
             shutil.copytree(backup_path, string_scripts_path)
-            message_queue.put(("log", ("success", "成功从 StringScripts_Origin 恢复 StringScripts 目录。")))
+            broker.log("成功从 StringScripts_Origin 恢复 StringScripts 目录。", "success")
         except Exception as restore_err:
             log.exception(f"从 StringScripts_Origin 恢复 StringScripts 失败。")
-            message_queue.put(("error", f"错误：从 StringScripts_Origin 恢复时出错: {restore_err}"))
-            message_queue.put(("status", "释放 JSON 失败 (恢复备份失败)")); message_queue.put(("done", None)); return
-        
+            broker.error(f"错误：从 StringScripts_Origin 恢复时出错: {restore_err}")
+            broker.status("释放 JSON 失败 (恢复备份失败)"); broker.done(); return
+
         if not os.path.isdir(string_scripts_path):
-            message_queue.put(("error", f"严重错误：恢复 StringScripts 后目录仍不存在: {string_scripts_path}"))
-            message_queue.put(("status", "释放 JSON 失败 (恢复后目录丢失)")); message_queue.put(("done", None)); return
+            broker.error(f"严重错误：恢复 StringScripts 后目录仍不存在: {string_scripts_path}")
+            broker.status("释放 JSON 失败 (恢复后目录丢失)"); broker.done(); return
 
         # --- 加载按文件组织的翻译 JSON ---
         if not selected_json_path or not os.path.exists(selected_json_path):
-            message_queue.put(("error", f"指定的翻译 JSON 文件无效或不存在: {selected_json_path}"))
-            message_queue.put(("status", "释放 JSON 失败 (JSON文件无效)")); message_queue.put(("done", None)); return
+            broker.error(f"指定的翻译 JSON 文件无效或不存在: {selected_json_path}")
+            broker.status("释放 JSON 失败 (JSON文件无效)"); broker.done(); return
 
-        message_queue.put(("status", "正在加载翻译并按文件应用..."))
-        message_queue.put(("log", ("normal", f"使用翻译文件: {selected_json_path}")))
-        
+        broker.status("正在加载翻译并按文件应用...")
+        broker.log(f"使用翻译文件: {selected_json_path}")
+
         # all_translations_per_file 的结构是: { "文件名1.txt": {原文1: 元数据对象1,...}, "文件名2.txt": {...} }
-        all_translations_per_file = {} 
+        all_translations_per_file = {}
         try:
             with open(selected_json_path, 'r', encoding='utf-8') as f_json_in:
                 all_translations_per_file = json.load(f_json_in)
-            message_queue.put(("log", ("normal", f"已加载按文件组织的翻译数据，共涉及 {len(all_translations_per_file)} 个源文件。")))
+            broker.log(f"已加载按文件组织的翻译数据，共涉及 {len(all_translations_per_file)} 个源文件。")
         except Exception as load_json_err:
             log.exception(f"加载翻译 JSON 文件失败: {selected_json_path} - {load_json_err}")
-            message_queue.put(("error", f"加载翻译 JSON 文件失败: {load_json_err}"))
-            message_queue.put(("status", "释放 JSON 失败 (加载JSON出错)")); message_queue.put(("done", None)); return
+            broker.error(f"加载翻译 JSON 文件失败: {load_json_err}")
+            broker.status("释放 JSON 失败 (加载JSON出错)"); broker.done(); return
 
         # --- *** 按文件遍历并应用翻译 *** ---
         overall_applied_count = 0
         overall_skipped_count = 0
         processed_source_files_count = 0
-        
+
         log.info(f"开始按文件遍历 StringScripts 目录并应用翻译: {string_scripts_path}")
-        message_queue.put(("log", ("normal", "开始将翻译按文件写回 StringScripts...")))
+        broker.log("开始将翻译按文件写回 StringScripts...")
 
         # 遍历翻译JSON中的文件名，而不是os.walk，以确保只处理JSON中有的文件
         for source_file_name, translations_for_this_file in all_translations_per_file.items():
-            target_string_script_path = os.path.join(string_scripts_path, source_file_name) # 假设JSON中的文件名直接对应StringScripts下的文件名
+            target_string_script_path = os.path.join(string_scripts_path, source_file_name)
 
             if not os.path.exists(target_string_script_path):
                 log.warning(f"翻译JSON中包含文件 '{source_file_name}' 的数据，但在恢复的 StringScripts 目录中未找到该文件 ({target_string_script_path})。跳过此文件。")
-                continue # 跳过此文件
+                continue
 
             log.debug(f"正在将翻译释放到文件: {target_string_script_path}")
-            
+
             # translations_for_this_file 是 {原文: 元数据对象} 结构
             applied_in_file, skipped_in_file = _apply_translations_to_file(
-                target_string_script_path, 
-                translations_for_this_file 
+                target_string_script_path,
+                translations_for_this_file
             )
             overall_applied_count += applied_in_file
             overall_skipped_count += skipped_in_file
             processed_source_files_count += 1
-            if applied_in_file > 0 or skipped_in_file > 0: # 只记录有变化的
+            if applied_in_file > 0 or skipped_in_file > 0:
                 log.info(f"文件 '{source_file_name}' 处理完成: 应用 {applied_in_file} 条, 跳过 {skipped_in_file} 条。")
 
-        message_queue.put(("log", ("success", f"所有文件处理完毕。共处理 {processed_source_files_count} 个源文件，总计应用了 {overall_applied_count} 个翻译条目，跳过了 {overall_skipped_count} 个。")))
-        message_queue.put(("success", f"JSON 文件释放完成。总应用 {overall_applied_count} 翻译，总跳过 {overall_skipped_count}。"))
-        message_queue.put(("status", "释放 JSON 完成"))
-        message_queue.put(("done", None))
+        broker.log(f"所有文件处理完毕。共处理 {processed_source_files_count} 个源文件，总计应用了 {overall_applied_count} 个翻译条目，跳过了 {overall_skipped_count} 个。", "success")
+        broker.success(f"JSON 文件释放完成。总应用 {overall_applied_count} 翻译，总跳过 {overall_skipped_count}。")
+        broker.status("释放 JSON 完成")
+        broker.done()
 
     except Exception as main_release_err:
         log.exception("释放 JSON 文件任务执行期间发生意外错误。")
-        message_queue.put(("error", f"释放 JSON 文件过程中发生严重错误: {main_release_err}"))
-        message_queue.put(("status", "释放 JSON 失败"))
-        message_queue.put(("done", None))
+        broker.error(f"释放 JSON 文件过程中发生严重错误: {main_release_err}")
+        broker.status("释放 JSON 失败")
+        broker.done()

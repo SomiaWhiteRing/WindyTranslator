@@ -1,11 +1,18 @@
 # core/tasks/initialize.py
+from __future__ import annotations
+
 import os
 import re
 import shutil
 import logging
-from core.external import easyrpg, rtp # 导入外部交互模块
-from core.utils import file_system     # 导入文件系统工具
+from typing import TYPE_CHECKING
+
+from core.external import easyrpg, rtp
+from core.utils import file_system
 from core.utils.engine_detection import detect_game_engine
+
+if TYPE_CHECKING:
+    from core.message_broker import MessageBroker
 
 log = logging.getLogger(__name__)
 
@@ -190,52 +197,42 @@ def _update_rpg_rt_ini(ini_path, target_encoding_code='936'):
         return False # 表示未修改
 
 # --- 主任务函数 ---
-def run_initialize(game_path, rtp_options, message_queue):
-    """
-    执行游戏初始化流程：复制 EasyRPG，安装 RTP，转换编码，更新 ini。
-
-    Args:
-        game_path (str): 游戏根目录路径。
-        rtp_options (dict): 包含 RTP 选择状态的字典，例如:
-                           {'2000': True, '2000en': False, '2003': True, '2003steam': False}
-        message_queue (queue.Queue): 用于向主线程发送消息的队列。
-    """
+def run_initialize(game_path: str, rtp_options: dict, broker: MessageBroker) -> None:
+    """执行游戏初始化流程：复制 EasyRPG，安装 RTP，转换编码，更新 ini。"""
     try:
-        message_queue.put(("status", "正在初始化游戏环境..."))
-        message_queue.put(("log", ("normal", "步骤 0: 开始初始化...")))
+        broker.status("正在初始化游戏环境...")
+        broker.log("步骤 0: 开始初始化...")
 
         detected = detect_game_engine(game_path)
         if detected and detected.engine == "vxace":
-            message_queue.put(("log", ("success", "检测到 RPG Maker VX Ace：初始化步骤自动跳过（无需 EasyRPG/RTP/编码转换）。")))
-            message_queue.put(("success", "初始化完成（VX Ace：跳过）"))
-            message_queue.put(("status", "初始化完成（VX Ace：跳过）"))
-            message_queue.put(("done", None))
+            broker.log("检测到 RPG Maker VX Ace：初始化步骤自动跳过（无需 EasyRPG/RTP/编码转换）。", "success")
+            broker.success("初始化完成（VX Ace：跳过）")
+            broker.status("初始化完成（VX Ace：跳过）")
+            broker.done()
             return
 
         # 1. 复制 EasyRPG 文件
-        message_queue.put(("log", ("normal", "复制 EasyRPG 文件...")))
+        broker.log("复制 EasyRPG 文件...")
         success_easyrpg, copied_e, skipped_e = easyrpg.copy_easyrpg_files(game_path)
         if success_easyrpg:
-            message_queue.put(("log", ("success", f"EasyRPG 文件复制完成 (复制 {copied_e}, 跳过 {skipped_e})")))
+            broker.log(f"EasyRPG 文件复制完成 (复制 {copied_e}, 跳过 {skipped_e})", "success")
         else:
-            message_queue.put(("log", ("error", "EasyRPG 文件复制过程中出现错误。")))
-            # 根据策略决定是否继续，这里选择继续
+            broker.log("EasyRPG 文件复制过程中出现错误。", "error")
 
         # 2. 安装 RTP 文件
         selected_rtps = [name + ".zip" for name, selected in rtp_options.items() if selected]
         if selected_rtps:
-            message_queue.put(("log", ("normal", f"安装选定的 RTP 文件: {', '.join(selected_rtps)}")))
+            broker.log(f"安装选定的 RTP 文件: {', '.join(selected_rtps)}")
             success_rtp = rtp.install_rtp_files(game_path, selected_rtps)
             if success_rtp:
-                message_queue.put(("log", ("success", "RTP 文件安装完成。")))
+                broker.log("RTP 文件安装完成。", "success")
             else:
-                message_queue.put(("log", ("error", "RTP 文件安装过程中出现错误。")))
-                # 根据策略决定是否继续
+                broker.log("RTP 文件安装过程中出现错误。", "error")
         else:
-            message_queue.put(("log", ("warning", "未选择任何 RTP 文件进行安装。")))
+            broker.log("未选择任何 RTP 文件进行安装。", "warning")
 
         # 3. 转换文本文件编码 (日文 Shift-JIS/EUC-JP -> GBK)
-        message_queue.put(("log", ("normal", "检查并转换文本文件编码 (日文 -> GBK)...")))
+        broker.log("检查并转换文本文件编码 (日文 -> GBK)...")
         converted_count = 0
         checked_count = 0
         target_files = [item for item in os.listdir(game_path)
@@ -248,19 +245,19 @@ def run_initialize(game_path, rtp_options, message_queue):
             converted, _ = _detect_and_convert_encoding(file_path, target_encoding='gbk')
             if converted:
                 converted_count += 1
-        message_queue.put(("log", ("success", f"编码检查完成: 检查 {checked_count} 个文件，转换 {converted_count} 个。")))
+        broker.log(f"编码检查完成: 检查 {checked_count} 个文件，转换 {converted_count} 个。", "success")
 
         # 4. 检查并更新 RPG_RT.ini
         ini_path = os.path.join(game_path, "RPG_RT.ini")
-        message_queue.put(("log", ("normal", "检查并更新 RPG_RT.ini 配置...")))
-        _update_rpg_rt_ini(ini_path, target_encoding_code='936') # 936 代表 GBK
+        broker.log("检查并更新 RPG_RT.ini 配置...")
+        _update_rpg_rt_ini(ini_path, target_encoding_code='936')
 
-        message_queue.put(("success", "初始化完成"))
-        message_queue.put(("status", "初始化完成"))
-        message_queue.put(("done", None)) # 标记任务完成
+        broker.success("初始化完成")
+        broker.status("初始化完成")
+        broker.done()
 
     except Exception as e:
         log.exception("初始化任务执行期间发生意外错误。")
-        message_queue.put(("error", f"初始化过程中发生严重错误: {e}"))
-        message_queue.put(("status", "初始化失败"))
-        message_queue.put(("done", None)) # 标记任务完成（即使是失败）
+        broker.error(f"初始化过程中发生严重错误: {e}")
+        broker.status("初始化失败")
+        broker.done()

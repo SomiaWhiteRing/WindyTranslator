@@ -5,6 +5,8 @@ This module builds a StringScripts directory from `.rvdata2` files and imports
 translated StringScripts back into game data, without requiring the editor.
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import logging
@@ -13,9 +15,12 @@ import re
 import shutil
 import zlib
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from core.utils import file_system
+
+if TYPE_CHECKING:
+    from core.message_broker import MessageBroker
 
 log = logging.getLogger(__name__)
 
@@ -776,7 +781,7 @@ def _get_original_text(store: Dict[str, Any], key: str, current_value: str) -> T
     return current_value, True
 
 
-def export_to_string_scripts(game_path: str, message_queue) -> None:
+def export_to_string_scripts(game_path: str, broker: MessageBroker) -> None:
     data_dir = os.path.join(game_path, "Data")
     map_infos_path = os.path.join(data_dir, "MapInfos.rvdata2")
     if not os.path.isfile(map_infos_path):
@@ -792,7 +797,7 @@ def export_to_string_scripts(game_path: str, message_queue) -> None:
         file_system.safe_remove(backup_path)
     file_system.ensure_dir_exists(string_scripts_path)
 
-    message_queue.put(("log", ("normal", "读取 VX Ace 数据并生成 StringScripts...")))
+    broker.log("读取 VX Ace 数据并生成 StringScripts...")
 
     original_db_store_path = os.path.join(game_path, ORIGINAL_DB_STORE_FILENAME)
     original_db_store: Dict[str, Any] = _load_json_if_exists(original_db_store_path)
@@ -843,7 +848,7 @@ def export_to_string_scripts(game_path: str, message_queue) -> None:
         _write_text_file(out_file, out_lines)
         exported_map_files += 1
 
-    message_queue.put(("log", ("success", f"地图对话导出完成：{exported_map_files} 个文件。")))
+    broker.log(f"地图对话导出完成：{exported_map_files} 个文件。", "success")
 
     # --- Export common events dialogues ---
     common_path = os.path.join(data_dir, "CommonEvents.rvdata2")
@@ -867,7 +872,7 @@ def export_to_string_scripts(game_path: str, message_queue) -> None:
                     out_lines.extend(entry_lines)
             if any(line.startswith("#") for line in out_lines):
                 _write_text_file(os.path.join(string_scripts_path, "CommonEvents.txt"), out_lines)
-                message_queue.put(("log", ("success", "公共事件对话导出完成：CommonEvents.txt")))
+                broker.log("公共事件对话导出完成：CommonEvents.txt", "success")
 
     # --- Export database ---
     original_db_store_modified, db_files = _export_database(
@@ -876,14 +881,14 @@ def export_to_string_scripts(game_path: str, message_queue) -> None:
         out_root=os.path.join(string_scripts_path, "Database"),
         original_store=original_db_store,
     )
-    message_queue.put(("log", ("success", f"数据库导出完成：{db_files} 个文件。")))
+    broker.log(f"数据库导出完成：{db_files} 个文件。", "success")
 
     if original_db_store_modified:
         _save_json(original_db_store_path, original_db_store)
 
     # Backup StringScripts -> StringScripts_Origin (required by step 6)
     shutil.copytree(string_scripts_path, backup_path)
-    message_queue.put(("log", ("success", f"StringScripts 备份完成：{STRING_SCRIPTS_ORIGIN_DIRNAME}")))
+    broker.log(f"StringScripts 备份完成：{STRING_SCRIPTS_ORIGIN_DIRNAME}", "success")
 
 
 def _export_database(
@@ -1406,7 +1411,7 @@ def _update_event_command_list(cmd_list: Any, translation_map: Dict[str, str]) -
     return modified
 
 
-def import_from_string_scripts(game_path: str, message_queue) -> int:
+def import_from_string_scripts(game_path: str, broker: MessageBroker) -> int:
     data_dir = os.path.join(game_path, "Data")
     map_infos_path = os.path.join(data_dir, "MapInfos.rvdata2")
     if not os.path.isfile(map_infos_path):

@@ -1,10 +1,17 @@
 # core/tasks/rename.py
+from __future__ import annotations
+
 import os
 import logging
-from core.external import rpgrewriter # 导入 RPGRewriter 交互模块
+from typing import TYPE_CHECKING
+
+from core.external import rpgrewriter
 from core.utils import file_system
-from core.external import rtp # 导入外部交互模块
+from core.external import rtp
 from core.utils.engine_detection import detect_game_engine
+
+if TYPE_CHECKING:
+    from core.message_broker import MessageBroker
 
 log = logging.getLogger(__name__)
 
@@ -89,89 +96,76 @@ def _create_input_txt(lmt_path, program_dir, rtp_fix_check):
         return False, None, 0
 
 # --- 主任务函数 ---
-def run_rename(game_path, program_dir, rtp_fix, message_queue):
-    """
-    执行重写文件名流程。
-
-    Args:
-        game_path (str): 游戏根目录路径。
-        program_dir (str): 程序根目录路径。
-        rtp_fix (bool): 是否进行RTP修正。
-        message_queue (queue.Queue): 用于向主线程发送消息的队列。
-    """
+def run_rename(game_path: str, program_dir: str, rtp_fix: bool, broker: MessageBroker) -> None:
+    """执行重写文件名流程。"""
     try:
-        message_queue.put(("status", "正在重写文件名..."))
-        message_queue.put(("log", ("normal", "步骤 2: 开始重写文件名...")))
+        broker.status("正在重写文件名...")
+        broker.log("步骤 2: 开始重写文件名...")
 
         detected = detect_game_engine(game_path)
         if detected and detected.engine == "vxace":
-            message_queue.put(("log", ("success", "检测到 RPG Maker VX Ace：重写文件名步骤自动跳过（无需 RPGRewriter）。")))
-            message_queue.put(("success", "重写文件名完成（VX Ace：跳过）"))
-            message_queue.put(("status", "重写文件名完成（VX Ace：跳过）"))
-            message_queue.put(("done", None))
+            broker.log("检测到 RPG Maker VX Ace：重写文件名步骤自动跳过（无需 RPGRewriter）。", "success")
+            broker.success("重写文件名完成（VX Ace：跳过）")
+            broker.status("重写文件名完成（VX Ace：跳过）")
+            broker.done()
             return
 
         lmt_path = os.path.join(game_path, "RPG_RT.lmt")
         if not os.path.exists(lmt_path):
-            message_queue.put(("error", f"未找到 RPG_RT.lmt 文件: {lmt_path}"))
-            message_queue.put(("status", "重写文件名失败"))
-            message_queue.put(("done", None))
+            broker.error(f"未找到 RPG_RT.lmt 文件: {lmt_path}")
+            broker.status("重写文件名失败")
+            broker.done()
             return
 
         # 1. 生成 input.txt
         success_input, input_txt_path, converted_count = _create_input_txt(lmt_path, program_dir, rtp_fix)
         if not success_input:
-            message_queue.put(("error", "生成 input.txt 文件失败。"))
-            message_queue.put(("status", "重写文件名失败"))
-            message_queue.put(("done", None))
+            broker.error("生成 input.txt 文件失败。")
+            broker.status("重写文件名失败")
+            broker.done()
             return
 
         # 2. 验证文件名 (RPGRewriter -V)
-        message_queue.put(("log", ("normal", "步骤 2.3: 验证文件名 (RPGRewriter -V)...")))
+        broker.log("步骤 2.3: 验证文件名 (RPGRewriter -V)...")
         return_code_v, stdout_v, stderr_v = rpgrewriter.validate_rename_input(lmt_path)
         if return_code_v != 0:
-            message_queue.put(("error", f"文件名验证失败。退出码: {return_code_v}"))
-            if stderr_v: message_queue.put(("log", ("error", f"RPGRewriter 错误信息: {stderr_v}")))
-            message_queue.put(("status", "重写文件名失败"))
-            message_queue.put(("done", None))
-            # 清理 input.txt? 可选
-            # file_system.safe_remove(input_txt_path)
+            broker.error(f"文件名验证失败。退出码: {return_code_v}")
+            if stderr_v: broker.log(f"RPGRewriter 错误信息: {stderr_v}", "error")
+            broker.status("重写文件名失败")
+            broker.done()
             return
-        message_queue.put(("log", ("normal", "文件名验证通过。")))
+        broker.log("文件名验证通过。")
 
         # 3. 重写游戏数据 (RPGRewriter -rewrite)
-        message_queue.put(("log", ("normal", "步骤 2.4: 重写游戏数据 (RPGRewriter -rewrite)...")))
+        broker.log("步骤 2.4: 重写游戏数据 (RPGRewriter -rewrite)...")
         return_code_rw, stdout_rw, stderr_rw = rpgrewriter.rewrite_game_data(lmt_path, rewrite_all=True)
         if return_code_rw != 0:
-            message_queue.put(("error", f"重写游戏数据失败。退出码: {return_code_rw}"))
-            if stderr_rw: message_queue.put(("log", ("error", f"RPGRewriter 错误信息: {stderr_rw}")))
-            message_queue.put(("status", "重写文件名失败"))
-            message_queue.put(("done", None))
-            # 清理 input.txt? 可选
-            # file_system.safe_remove(input_txt_path)
+            broker.error(f"重写游戏数据失败。退出码: {return_code_rw}")
+            if stderr_rw: broker.log(f"RPGRewriter 错误信息: {stderr_rw}", "error")
+            broker.status("重写文件名失败")
+            broker.done()
             return
 
-        message_queue.put(("success", "文件名重写完成"))
-        message_queue.put(("log", ("success", f"成功转换 {converted_count} 个非 ASCII 文件名并重写游戏数据。")))
+        broker.success("文件名重写完成")
+        broker.log(f"成功转换 {converted_count} 个非 ASCII 文件名并重写游戏数据。", "success")
 
         # 进行RTP修正
         if rtp_fix:
-            message_queue.put(("log", ("normal", "步骤 2.5: 进行 RTP 修正...")))
+            broker.log("步骤 2.5: 进行 RTP 修正...")
             success_rtp = rtp.install_rtp_files(game_path, ["2000fix.zip"])
             if success_rtp:
-                message_queue.put(("log", ("success", "RTP 修正完成。")))
+                broker.log("RTP 修正完成。", "success")
             else:
-                message_queue.put(("log", ("error", "RTP 修正过程中出现错误。")))
-                # 根据策略决定是否继续
+                broker.log("RTP 修正过程中出现错误。", "error")
 
-        message_queue.put(("status", "文件名重写完成"))
-        message_queue.put(("done", None)) # 标记任务完成
+        broker.status("文件名重写完成")
+        broker.done()
 
         # 清理 input.txt
         file_system.safe_remove(input_txt_path)
 
     except Exception as e:
         log.exception("重写文件名任务执行期间发生意外错误。")
-        message_queue.put(("error", f"重写文件名过程中发生严重错误: {e}"))
-        message_queue.put(("status", "重写文件名失败"))
-        message_queue.put(("done", None))
+        broker.error(f"重写文件名过程中发生严重错误: {e}")
+        broker.status("重写文件名失败")
+        broker.done()

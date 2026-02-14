@@ -28,8 +28,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Not used by this app; excluding avoids PyInstaller failing on
-        # incomplete Qt plugin installations in the global environment.
+        'tkinter',
         'PyQt5',
     ],
     noarchive=False,

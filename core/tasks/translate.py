@@ -1,4 +1,6 @@
 # core/tasks/translate.py
+from __future__ import annotations
+
 import os
 import json
 import csv
@@ -6,14 +8,18 @@ import re
 import time
 import datetime
 import logging
-import queue # 虽然主进度通信可能不再直接依赖它，但保留以防未来需要
 import threading
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, as_completed # 使用 as_completed
+from typing import TYPE_CHECKING
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import OrderedDict
+
 from core.api_clients import deepseek
 from core.utils import file_system, text_processing, default_database
 from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
-from collections import OrderedDict
+
+if TYPE_CHECKING:
+    from core.message_broker import MessageBroker
 
 log = logging.getLogger(__name__)
 
@@ -570,7 +576,7 @@ def _translation_worker(
 
 
 # --- 主任务函数 ---
-def run_translate(game_path, works_dir, translate_config, world_dict_config, message_queue):
+def run_translate(game_path: str, works_dir: str, translate_config: dict, world_dict_config: dict, broker: MessageBroker) -> None:
     start_time = time.time()
     character_dictionary = [] 
     entity_dictionary = []   
@@ -578,8 +584,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
     all_files_translated_data = {} # *** 用于存储所有文件最终翻译结果的顶层字典 ***
 
     try:
-        message_queue.put(("status", "正在准备翻译任务 (全局预切分)..."))
-        message_queue.put(("log", ("normal", "步骤 5: 开始翻译 JSON 文件 (全局预切分, 按文件隔离上下文)...")))
+        broker.status("正在准备翻译任务 (全局预切分)...")
+        broker.log("步骤 5: 开始翻译 JSON 文件 (全局预切分, 按文件隔离上下文)...")
 
         # --- 路径和配置加载 ---
         game_folder_name = text_processing.sanitize_filename(os.path.basename(game_path))
@@ -599,12 +605,12 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         
         if not os.path.exists(untranslated_json_path):
             raise FileNotFoundError(f"未找到未翻译的 JSON 文件: {untranslated_json_path}")
-        message_queue.put(("log", ("normal", "加载按文件组织的未翻译 JSON 文件...")))
+        broker.log("加载按文件组织的未翻译 JSON 文件...")
         with open(untranslated_json_path, 'r', encoding='utf-8') as f_in:
             untranslated_data_per_file = json.load(f_in)
         
         if not untranslated_data_per_file:
-            message_queue.put(("warning", "未翻译的 JSON 文件为空或无效，无需翻译。")); message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("done", None)); return
+            broker.warning("未翻译的 JSON 文件为空或无效，无需翻译。"); broker.status("翻译跳过(无内容)"); broker.done(); return
         
         # --- 加载词典 (全局共享) ---
         char_dict_filename = world_dict_config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
@@ -615,14 +621,14 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             try:
                 with open(character_dict_path, 'r', newline='', encoding='utf-8-sig') as f_char:
                     character_dictionary = [row for row in csv.DictReader(f_char) if row.get('原文')]
-                message_queue.put(("log", ("success", f"加载人物词典: {len(character_dictionary)} 条。")))
-            except Exception as e_char: message_queue.put(("log", ("error", f"加载人物词典失败: {e_char}")))
+                broker.log(f"加载人物词典: {len(character_dictionary)} 条。", "success")
+            except Exception as e_char: broker.log(f"加载人物词典失败: {e_char}", "error")
         if os.path.exists(entity_dict_path):
             try:
                 with open(entity_dict_path, 'r', newline='', encoding='utf-8-sig') as f_ent:
                     entity_dictionary = [row for row in csv.DictReader(f_ent) if row.get('原文')]
-                message_queue.put(("log", ("success", f"加载事物词典: {len(entity_dictionary)} 条。")))
-            except Exception as e_ent: message_queue.put(("log", ("error", f"加载事物词典失败: {e_ent}")))
+                broker.log(f"加载事物词典: {len(entity_dictionary)} 条。", "success")
+            except Exception as e_ent: broker.log(f"加载事物词典失败: {e_ent}", "error")
 
         # --- 获取翻译配置 ---
         current_translate_config = translate_config.copy()
@@ -641,7 +647,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         try: api_client_instance = deepseek.DeepSeekClient(api_url, api_key)
         except Exception as client_err: raise ConnectionError(f"初始化 API 客户端失败: {client_err}")
-        message_queue.put(("log", ("normal", f"API客户端初始化成功。翻译配置: 模型={model_name}, 并发={concurrency_config}, 批大小={batch_size_config}, 上下文行数={context_lines_count}")))
+        broker.log(f"API客户端初始化成功。翻译配置: 模型={model_name}, 并发={concurrency_config}, 批大小={batch_size_config}, 上下文行数={context_lines_count}")
 
         # --- 默认数据库过滤与自动填充准备（固定启用，读取 modules/dict） ---
         default_db_mapping, default_db_originals = default_database.load_default_db_mapping()
@@ -652,7 +658,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         overall_default_db_prefilled_count = 0
         overall_no_content_prefilled_count = 0
 
-        message_queue.put(("log", ("normal", "开始预切分所有翻译任务...")))
+        broker.log("开始预切分所有翻译任务...")
         for file_name, data_for_this_file in untranslated_data_per_file.items():
             if not data_for_this_file:
                 log.info(f"文件 '{file_name}' 为空，跳过预切分。")
@@ -734,18 +740,18 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 })
         
         if not global_translation_tasks:
-            message_queue.put(("warning", "所有文件均为空，或未提取到任何可翻译条目。无需翻译。"))
-            message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("done", None)); return
+            broker.warning("所有文件均为空，或未提取到任何可翻译条目。无需翻译。")
+            broker.status("翻译跳过(无内容)"); broker.done(); return
 
         total_batches_to_process = len(global_translation_tasks)
         # overall_total_items_in_all_files 已经是过滤后需要API翻译的条目数（不包含预填充和无需翻译的）
         total_need_translate = overall_total_items_in_all_files
-        message_queue.put(("log", ("normal", f"任务预切分完成。共 {total_batches_to_process} 个批次（来自 {len(untranslated_data_per_file)} 个文件），总计 {total_need_translate} 个需翻译原文条目。")))
+        broker.log(f"任务预切分完成。共 {total_batches_to_process} 个批次（来自 {len(untranslated_data_per_file)} 个文件），总计 {total_need_translate} 个需翻译原文条目。")
         if overall_default_db_prefilled_count > 0:
-            message_queue.put(("log", ("normal", f"按默认数据库规则自动填充 {overall_default_db_prefilled_count} 条模板词条译文，避免重复请求 API。")))
+            broker.log(f"按默认数据库规则自动填充 {overall_default_db_prefilled_count} 条模板词条译文，避免重复请求 API。")
         if overall_no_content_prefilled_count > 0:
-            message_queue.put(("log", ("normal", f"按源语言(日语)规则保留原文 {overall_no_content_prefilled_count} 条，无需翻译。")))
-        message_queue.put(("status", f"开始翻译，总批次数: {total_batches_to_process}，并发数: {concurrency_config}..."))
+            broker.log(f"按源语言(日语)规则保留原文 {overall_no_content_prefilled_count} 条，无需翻译。")
+        broker.status(f"开始翻译，总批次数: {total_batches_to_process}，并发数: {concurrency_config}...")
 
         # --- 并发处理全局任务列表 ---
         error_log_lock_obj = threading.Lock() # 全局错误日志锁
@@ -828,15 +834,15 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                                          f"| 需译原文: {processed_items_count}/{total_need_translate} ({progress_percentage:.1f}%) "
                                          f"| 预填: {overall_default_db_prefilled_count} "
                                           f"- 预计剩余: {remaining_processing_time:.0f}s")
-                    message_queue.put(("status", status_update_msg))
-                    message_queue.put(("progress", progress_percentage))
+                    broker.status(status_update_msg)
+                    broker.progress(progress_percentage)
                     last_status_update_time = current_time
 
-        message_queue.put(("log", ("normal", f"所有 {total_batches_to_process} 个翻译批次已提交处理。等待完成...")))
+        broker.log(f"所有 {total_batches_to_process} 个翻译批次已提交处理。等待完成...")
         # （as_completed 循环结束后，所有任务都已完成或异常）
-        message_queue.put(("status", f"翻译处理完成: {completed_batches_count}/{total_batches_to_process} 批次。"))
-        message_queue.put(("progress", 100.0)) # 确保最终是100%
-        message_queue.put(("log", ("normal", "所有翻译工作线程已完成。")))
+        broker.status(f"翻译处理完成: {completed_batches_count}/{total_batches_to_process} 批次。")
+        broker.progress(100.0) # 确保最终是100%
+        broker.log("所有翻译工作线程已完成。")
 
 
         # --- 后续处理：错误日志检查、回退CSV生成、最终JSON保存 ---
@@ -847,7 +853,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 with open(error_log_path, 'r', encoding='utf-8') as elog_read:
                     errors_found_in_log_file = elog_read.read().count("-" * 20)
                 if errors_found_in_log_file > 0:
-                    message_queue.put(("log", ("warning", f"翻译共检测到 {errors_found_in_log_file} 次错误，详情见日志: {error_log_path}")))
+                    broker.log(f"翻译共检测到 {errors_found_in_log_file} 次错误，详情见日志: {error_log_path}", "warning")
             except Exception as e_read_log: log.error(f"读取错误日志失败: {e_read_log}")
 
         # --- 整理最终结果并生成回退CSV ---
@@ -870,9 +876,9 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     ))
         
         if overall_explicit_fallback_count_global > 0:
-            message_queue.put(("log", ("warning", f"翻译总计完成，有 {overall_explicit_fallback_count_global} 个条目使用了原文回退。")))
+            broker.log(f"翻译总计完成，有 {overall_explicit_fallback_count_global} 个条目使用了原文回退。", "warning")
 
-        message_queue.put(("log", ("normal", "检查并处理全局回退修正文件...")))
+        broker.log("检查并处理全局回退修正文件...")
         try:
             if all_fallback_items_for_csv_global:
                 log.info(f"检测到 {len(all_fallback_items_for_csv_global)} 个回退项，生成全局修正文件: {fallback_csv_path}")
@@ -883,28 +889,28 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 with open(fallback_csv_path, 'w', newline='', encoding='utf-8-sig') as f_csv_global:
                     writer_global = csv.writer(f_csv_global, quoting=csv.QUOTE_ALL)
                     writer_global.writerows(csv_data_fallback_global)
-                message_queue.put(("log", ("success", f"全局回退修正文件已生成: {fallback_csv_filename}")))
+                broker.log(f"全局回退修正文件已生成: {fallback_csv_filename}", "success")
             elif os.path.exists(fallback_csv_path):
                 file_system.safe_remove(fallback_csv_path)
-                message_queue.put(("log", ("normal", "无回退项，旧的全局修正文件已删除。")))
+                broker.log("无回退项，旧的全局修正文件已删除。")
         except Exception as csv_err_global:
             log.exception(f"处理全局回退 CSV 时出错: {csv_err_global}")
-            message_queue.put(("log", ("error", f"处理全局回退文件 ({fallback_csv_filename}) 时出错: {csv_err_global}")))
+            broker.log(f"处理全局回退文件 ({fallback_csv_filename}) 时出错: {csv_err_global}", "error")
 
         # --- 保存最终的按文件组织的翻译JSON ---
-        message_queue.put(("log", ("normal", f"正在保存按文件组织的翻译结果到: {translated_json_path}")))
+        broker.log(f"正在保存按文件组织的翻译结果到: {translated_json_path}")
         try:
             file_system.ensure_dir_exists(os.path.dirname(translated_json_path))
             
             # 在保存前重排序结果
-            message_queue.put(("log", ("normal", "正在重排序翻译结果以匹配原始文件顺序...")))
+            broker.log("正在重排序翻译结果以匹配原始文件顺序...")
             all_files_translated_data = _reorder_translation_results(untranslated_data_per_file, all_files_translated_data)
             
             with open(translated_json_path, 'w', encoding='utf-8') as f_json_final_out:
                 json.dump(all_files_translated_data, f_json_final_out, ensure_ascii=False, indent=4)
             
             total_elapsed_time_overall = time.time() - start_time
-            message_queue.put(("log", ("success", f"所有文件的翻译及保存完成。总耗时: {total_elapsed_time_overall:.2f} 秒。")))
+            broker.log(f"所有文件的翻译及保存完成。总耗时: {total_elapsed_time_overall:.2f} 秒。", "success")
 
             final_msg_overall = "所有文件翻译完成"
             final_status_overall = "翻译全部完成"
@@ -913,26 +919,26 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                  final_msg_overall += f" (共 {overall_explicit_fallback_count_global} 个回退，详见 '{fallback_csv_filename}')"
                  final_status_overall += f" (有回退)"
                  final_log_level_overall = "warning"
-            message_queue.put((final_log_level_overall, f"{final_msg_overall}"))
-            message_queue.put(("status", final_status_overall))
-            message_queue.put(("done", None))
+            broker.log(final_msg_overall, final_log_level_overall)
+            broker.status(final_status_overall)
+            broker.done()
 
         except Exception as final_save_json_err:
             log.exception(f"保存最终翻译 JSON 文件失败: {final_save_json_err}")
-            message_queue.put(("error", f"保存最终翻译结果失败: {final_save_json_err}"))
-            message_queue.put(("status", "翻译失败(最终保存错误)"))
-            message_queue.put(("done", None))
+            broker.error(f"保存最终翻译结果失败: {final_save_json_err}")
+            broker.status("翻译失败(最终保存错误)")
+            broker.done()
 
     except (ValueError, FileNotFoundError, OSError, ConnectionError) as task_prep_err:
         log.error(f"翻译任务准备或初始化失败: {task_prep_err}")
-        message_queue.put(("error", f"翻译任务失败: {task_prep_err}"))
-        message_queue.put(("status", "翻译失败"))
-        message_queue.put(("done", None))
+        broker.error(f"翻译任务失败: {task_prep_err}")
+        broker.status("翻译失败")
+        broker.done()
     except Exception as general_err:
         log.exception("翻译任务执行期间发生最顶层意外错误。")
-        message_queue.put(("error", f"翻译过程中发生严重错误: {general_err}"))
-        message_queue.put(("status", "翻译失败"))
-        message_queue.put(("done", None))
+        broker.error(f"翻译过程中发生严重错误: {general_err}")
+        broker.status("翻译失败")
+        broker.done()
 
 def _reorder_translation_results(untranslated_data, translated_data):
     """

@@ -1,16 +1,22 @@
 # core/tasks/dict_generation.py
+from __future__ import annotations
+
 import os
 import json
 import csv
-import io # 用于将字符串模拟成文件给 csv reader
+import io
 import logging
 import time
 import re
-from core.api_clients import gemini, deepseek # 导入 Gemini 或 OpenAI 兼容客户端模块
+from typing import TYPE_CHECKING
+
+from core.api_clients import gemini, deepseek
 from core.utils import file_system, text_processing, default_database
-# 导入默认配置以获取默认文件名
 from core.config import DEFAULT_WORLD_DICT_CONFIG
 from . import apply_base_dictionary
+
+if TYPE_CHECKING:
+    from core.message_broker import MessageBroker
 
 log = logging.getLogger(__name__)
 
@@ -18,23 +24,23 @@ PROVIDER_GEMINI = 'gemini'
 PROVIDER_OPENAI = 'openai'
 
 # --- CSV 解析辅助函数 ---
-def _parse_csv_response(csv_response_text, expected_columns, message_queue):
+def _parse_csv_response(csv_response_text: str, expected_columns: int, broker: MessageBroker) -> list[list[str]]:
     """
     解析字典模型返回的 CSV 文本。
 
     Args:
-        csv_response_text (str): 字典模型返回的原始文本。
-        expected_columns (int): 期望的列数。
-        message_queue (queue.Queue): 用于发送日志消息的队列。
+        csv_response_text: 字典模型返回的原始文本。
+        expected_columns: 期望的列数。
+        broker: 用于发送日志消息的消息代理。
 
     Returns:
-        list[list[str]]: 解析后的数据列表，每个子列表是一行。
-                         如果解析失败或无有效数据，返回空列表。
+        解析后的数据列表，每个子列表是一行。
+        如果解析失败或无有效数据，返回空列表。
     """
     parsed_data = []
     if not csv_response_text:
         log.warning("字典模型 API 未返回任何内容。")
-        message_queue.put(("log", ("warning", "字典模型 API 未返回任何内容。")))
+        broker.log("字典模型 API 未返回任何内容。", "warning")
         return parsed_data
 
     try:
@@ -42,7 +48,7 @@ def _parse_csv_response(csv_response_text, expected_columns, message_queue):
         clean_csv_response = csv_response_text.strip().strip('```csv').strip('```').strip()
         if not clean_csv_response:
             log.warning("清理后的字典模型 CSV 响应为空。")
-            message_queue.put(("log", ("warning", "字典模型 API 返回的 CSV 内容为空或仅包含标记。")))
+            broker.log("字典模型 API 返回的 CSV 内容为空或仅包含标记。", "warning")
             return parsed_data
 
         csv_file = io.StringIO(clean_csv_response)
@@ -58,17 +64,17 @@ def _parse_csv_response(csv_response_text, expected_columns, message_queue):
                 parsed_data.append(row)
             else:
                 log.warning(f"跳过格式错误的 CSV 行 #{i+1} (期望{expected_columns}列，得到{len(row)}列): {row}")
-                message_queue.put(("log", ("warning", f"跳过格式错误的 CSV 行 #{i+1} (期望{expected_columns}列): {row}")))
+                broker.log(f"跳过格式错误的 CSV 行 #{i+1} (期望{expected_columns}列): {row}", "warning")
 
     except csv.Error as csv_err: # 捕捉更具体的 CSV 解析错误
         log.error(f"解析字典模型返回的 CSV 数据时发生 CSV 错误: {csv_err}")
         log.error(f"原始 CSV 响应内容 (前500字符):\n{csv_response_text[:500]}") # 记录部分原始响应供调试
-        message_queue.put(("error", f"解析字典模型返回的 CSV 数据失败 (CSV格式问题): {csv_err}"))
+        broker.error(f"解析字典模型返回的 CSV 数据失败 (CSV格式问题): {csv_err}")
         # 解析出错时，返回已成功解析的部分（如果有）
     except Exception as parse_err:
         log.error(f"解析字典模型返回的 CSV 数据时发生意外错误: {parse_err}")
         log.error(f"原始 CSV 响应内容 (前500字符):\n{csv_response_text[:500]}") # 记录部分原始响应供调试
-        message_queue.put(("error", f"解析字典模型返回的 CSV 数据失败: {parse_err}"))
+        broker.error(f"解析字典模型返回的 CSV 数据失败: {parse_err}")
         # 解析出错时，返回已成功解析的部分（如果有）
 
     return parsed_data
@@ -98,7 +104,7 @@ def _extract_retry_delay_seconds(error_message):
             pass
     return None
 
-def _call_world_dict_model_with_retry(request_callable, stage_desc, message_queue):
+def _call_world_dict_model_with_retry(request_callable: object, stage_desc: str, broker: MessageBroker) -> tuple[bool, str | None, str | None]:
     last_error = None
     wait_seconds = DEFAULT_RETRY_WAIT
     for attempt in range(1, MAX_WORLD_DICT_RETRIES + 1):
@@ -113,7 +119,7 @@ def _call_world_dict_model_with_retry(request_callable, stage_desc, message_queu
             suggested = _extract_retry_delay_seconds(last_error)
             if suggested is not None:
                 wait_seconds = max(1, suggested)
-            message_queue.put(('log', ('warning', f"{stage_desc} 因配额限制暂停 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_WORLD_DICT_RETRIES})...")))
+            broker.log(f"{stage_desc} 因配额限制暂停 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_WORLD_DICT_RETRIES})...", "warning")
             log.warning(f"{stage_desc} 命中配额限制，等待 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_WORLD_DICT_RETRIES})。错误: {last_error}")
             time.sleep(wait_seconds)
             wait_seconds = min(wait_seconds * 2, MAX_RETRY_WAIT)
@@ -123,15 +129,15 @@ def _call_world_dict_model_with_retry(request_callable, stage_desc, message_queu
     return False, None, last_error
 
 # --- 主任务函数 ---
-def run_generate_dictionary(game_path, works_dir, world_dict_config, message_queue):
+def run_generate_dictionary(game_path: str, works_dir: str, world_dict_config: dict, broker: MessageBroker) -> None:
     """
     使用字典模型 API 从提取的文本生成人物词典和事物词典 (CSV 文件)。
 
     Args:
-        game_path (str): 游戏根目录路径。
-        works_dir (str): Works 工作目录的根路径。
-        world_dict_config (dict): 包含字典模型所需的 API 配置（Key、模型、Prompt模板、词典文件名等）。
-        message_queue (queue.Queue): 用于向主线程发送消息的队列。
+        game_path: 游戏根目录路径。
+        works_dir: Works 工作目录的根路径。
+        world_dict_config: 包含字典模型所需的 API 配置（Key、模型、Prompt模板、词典文件名等）。
+        broker: 用于向主线程发送消息的消息代理。
     """
     # 定义两个阶段的状态变量
     character_dict_success = False
@@ -141,7 +147,7 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
     temp_text_path = None # 初始化，确保 finally 中可用
 
     try:
-        message_queue.put(("status", "正在准备生成字典..."))
+        broker.status("正在准备生成字典...")
         # --- 获取配置 ---
         api_key = world_dict_config.get("api_key", "").strip()
         model_name = world_dict_config.get("model", "").strip()
@@ -193,7 +199,7 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         if not entity_dict_filename:
             raise ValueError("事物词典文件名未配置。")
 
-        message_queue.put(("log", ("normal", f"步骤 4: 开始生成世界观字典 (使用 {provider_display})...")))
+        broker.log(f"步骤 4: 开始生成世界观字典 (使用 {provider_display})...")
 
         # --- 确定文件路径 ---
         game_folder_name = text_processing.sanitize_filename(os.path.basename(game_path))
@@ -210,7 +216,7 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
             raise FileNotFoundError(f"未找到未翻译的 JSON 文件: {json_path}，请先执行步骤 3。")
 
         # --- 加载 JSON 并准备输入文本 ---
-        message_queue.put(("log", ("normal", "加载按文件组织的 JSON 文件并提取所有原文...")))
+        broker.log("加载按文件组织的 JSON 文件并提取所有原文...")
         # all_texts_with_metadata_prefix 用于存储所有文件中带有前缀的 text_to_translate
         all_texts_with_metadata_prefix = [] 
         default_db_filtered_count = 0
@@ -224,9 +230,9 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                 untranslated_data_per_file = json.load(f_json_in)
 
             if not untranslated_data_per_file:
-                message_queue.put(("warning", f"JSON 文件 '{json_path}' 为空或无效，无法提取原文。"))
-                message_queue.put(("status", "生成字典跳过(JSON无效)"))
-                message_queue.put(("done", None))
+                broker.warning(f"JSON 文件 '{json_path}' 为空或无效，无法提取原文。")
+                broker.status("生成字典跳过(JSON无效)")
+                broker.done()
                 return
 
             # 遍历每个文件的数据
@@ -272,18 +278,18 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                         log.warning(f"文件 '{file_name}', 原文key '{original_key}' 对应的元数据对象格式不正确或缺少 'text_to_translate'，已跳过。 对象: {metadata_object}")
             
             total_extracted_lines_with_prefix = len(all_texts_with_metadata_prefix)
-            message_queue.put(("log", ("normal", f"共从所有文件中提取并格式化 {total_extracted_lines_with_prefix} 行带元数据前缀的文本用于世界观字典分析。")))
+            broker.log(f"共从所有文件中提取并格式化 {total_extracted_lines_with_prefix} 行带元数据前缀的文本用于世界观字典分析。")
             if default_db_filtered_count > 0:
-                message_queue.put(("log", ("normal", f"已按默认数据库排除 {default_db_filtered_count} 条重复/模板条目 (精确匹配)。")))
+                broker.log(f"已按默认数据库排除 {default_db_filtered_count} 条重复/模板条目 (精确匹配)。")
             
             if not all_texts_with_metadata_prefix: 
-                 message_queue.put(("warning", "未从任何文件中提取到有效的原文内容用于分析。"))
-                 message_queue.put(("status", "生成字典跳过(无有效文本)"))
-                 message_queue.put(("done", None))
+                 broker.warning("未从任何文件中提取到有效的原文内容用于分析。")
+                 broker.status("生成字典跳过(无有效文本)")
+                 broker.done()
                  return
 
             # 将提取的所有带前缀的原文行写入临时文件
-            message_queue.put(("log", ("normal", "将所有带前缀的原文行写入临时文件...")))
+            broker.log("将所有带前缀的原文行写入临时文件...")
             with open(temp_text_path, 'w', encoding='utf-8') as f_temp_out:
                 # 每行是一个带前缀的原文（可能包含多行）
                 f_temp_out.write("\n".join(all_texts_with_metadata_prefix).replace('[LINEBREAK]', '\\n')) 
@@ -297,7 +303,7 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
             MAX_TEXT_SIZE_MB = 10 # 这个限制可能需要根据实际带前缀的文本长度调整
             if len(game_text_content.encode('utf-8')) / (1024*1024) > MAX_TEXT_SIZE_MB:
                  log.warning(f"聚合后的带前缀游戏文本大小 ({len(game_text_content.encode('utf-8')) / (1024*1024):.2f} MB) 较大，API 调用可能耗时较长或失败。")
-                 message_queue.put(("log",("warning", "游戏文本内容（含元数据前缀）较多，API处理可能需要较长时间。")))
+                 broker.log("游戏文本内容（含元数据前缀）较多，API处理可能需要较长时间。", "warning")
 
         except json.JSONDecodeError as json_err: 
             log.exception(f"加载或解析JSON文件 '{json_path}' 失败: {json_err}")
@@ -345,28 +351,28 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         # ==================================================
         # === 阶段一：生成人物词典 (Character Dictionary) ===
         # ==================================================
-        message_queue.put(("status", "正在生成人物词典..."))
-        message_queue.put(("log", ("normal", "阶段 1: 开始生成人物词典...")))
+        broker.status("正在生成人物词典...")
+        broker.log("阶段 1: 开始生成人物词典...")
         character_data = []
         try:
             char_final_prompt = char_prompt_template.format(game_text=game_text_content)
-            message_queue.put(("log", ("normal", f"调用 {provider_display} (人物提取)...")))
+            broker.log(f"调用 {provider_display} (人物提取)...")
             success, char_csv_response, error_message = _call_world_dict_model_with_retry(
-                lambda: request_model(char_final_prompt), '人物词典生成', message_queue
+                lambda: request_model(char_final_prompt), '人物词典生成', broker
             )
 
             if not success:
-                message_queue.put(("log", ("error", f"人物词典生成失败: {provider_display} 调用失败: {error_message}")))
+                broker.log(f"人物词典生成失败: {provider_display} 调用失败: {error_message}", "error")
                 # 不抛出异常，允许继续尝试生成事物词典，但记录失败状态
             else:
-                message_queue.put(("log", ("success", "人物提取 API 调用成功，正在解析...")))
+                broker.log("人物提取 API 调用成功，正在解析...", "success")
                 # 解析 CSV (期望 8 列)
-                character_data = _parse_csv_response(char_csv_response, 8, message_queue)
+                character_data = _parse_csv_response(char_csv_response, 8, broker)
                 character_entries_count = len(character_data)
-                message_queue.put(("log", ("normal", f"解析完成，获得 {character_entries_count} 条有效人物条目。")))
+                broker.log(f"解析完成，获得 {character_entries_count} 条有效人物条目。")
 
                 # 保存人物词典 CSV 文件
-                message_queue.put(("log", ("normal", f"正在保存人物词典到: {character_dict_path}")))
+                broker.log(f"正在保存人物词典到: {character_dict_path}")
                 try:
                     # 确保目录存在
                     file_system.ensure_dir_exists(os.path.dirname(character_dict_path))
@@ -377,21 +383,21 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                         if character_data:
                             writer.writerows(character_data)
                     character_dict_success = True
-                    message_queue.put(("log", ("success", f"人物词典保存成功: {character_dict_path}")))
+                    broker.log(f"人物词典保存成功: {character_dict_path}", "success")
                 except Exception as write_err:
                     log.exception(f"保存人物词典 CSV 文件失败: {character_dict_path} - {write_err}")
-                    message_queue.put(("log", ("error", f"保存人物词典失败: {write_err}")))
+                    broker.log(f"保存人物词典失败: {write_err}", "error")
                     # 保存失败也标记为失败
 
         except Exception as char_err:
             log.exception(f"生成人物词典阶段发生错误: {char_err}")
-            message_queue.put(("log", ("error", f"生成人物词典时出错: {char_err}")))
+            broker.log(f"生成人物词典时出错: {char_err}", "error")
             # 记录错误，但不中断流程
 
         # --- 准备人物词典参考内容 ---
         character_reference_csv_content = ""
         if character_dict_success and character_entries_count > 0:
-            message_queue.put(("log", ("normal", "准备人物词典参考内容...")))
+            broker.log("准备人物词典参考内容...")
             try:
                 with open(character_dict_path, 'r', encoding='utf-8-sig') as f_ref:
                     # 跳过表头读取剩余内容
@@ -408,42 +414,42 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                 log.info(f"成功准备了 {len(character_reference_csv_content.splitlines())} 行人物词典参考。")
             except Exception as ref_err:
                 log.exception(f"读取人物词典参考内容时出错: {ref_err}")
-                message_queue.put(("log", ("warning", f"无法读取人物词典参考: {ref_err}，事物词典将不包含参考。")))
+                broker.log(f"无法读取人物词典参考: {ref_err}，事物词典将不包含参考。", "warning")
                 character_reference_csv_content = "" # 出错则清空
         elif not character_dict_success:
-             message_queue.put(("log", ("warning", "人物词典生成失败，事物词典将不包含人物参考。")))
+             broker.log("人物词典生成失败，事物词典将不包含人物参考。", "warning")
         else: # 成功但无条目
-             message_queue.put(("log", ("normal", "人物词典为空，事物词典将不包含人物参考。")))
+             broker.log("人物词典为空，事物词典将不包含人物参考。")
 
 
         # ==================================================
         # === 阶段二：生成事物词典 (Entity Dictionary) =====
         # ==================================================
-        message_queue.put(("status", "正在生成事物词典..."))
-        message_queue.put(("log", ("normal", "阶段 2: 开始生成事物词典...")))
+        broker.status("正在生成事物词典...")
+        broker.log("阶段 2: 开始生成事物词典...")
         entity_data = []
         try:
             entity_final_prompt = entity_prompt_template.format(
                 game_text=game_text_content,
                 character_reference_csv_content=character_reference_csv_content
             )
-            message_queue.put(("log", ("normal", f"调用 {provider_display} (事物提取)...")))
+            broker.log(f"调用 {provider_display} (事物提取)...")
             success, entity_csv_response, error_message = _call_world_dict_model_with_retry(
-                lambda: request_model(entity_final_prompt), '事物词典生成', message_queue
+                lambda: request_model(entity_final_prompt), '事物词典生成', broker
             )
 
             if not success:
-                message_queue.put(("log", ("error", f"事物词典生成失败: {provider_display} 调用失败: {error_message}")))
+                broker.log(f"事物词典生成失败: {provider_display} 调用失败: {error_message}", "error")
                 # 记录失败状态
             else:
-                message_queue.put(("log", ("success", "事物提取 API 调用成功，正在解析...")))
+                broker.log("事物提取 API 调用成功，正在解析...", "success")
                 # 解析 CSV (期望 4 列)
-                entity_data = _parse_csv_response(entity_csv_response, 4, message_queue)
+                entity_data = _parse_csv_response(entity_csv_response, 4, broker)
                 entity_entries_count = len(entity_data)
-                message_queue.put(("log", ("normal", f"解析完成，获得 {entity_entries_count} 条有效事物条目。")))
+                broker.log(f"解析完成，获得 {entity_entries_count} 条有效事物条目。")
 
                 # 保存事物词典 CSV 文件
-                message_queue.put(("log", ("normal", f"正在保存事物词典到: {entity_dict_path}")))
+                broker.log(f"正在保存事物词典到: {entity_dict_path}")
                 try:
                     # 确保目录存在
                     file_system.ensure_dir_exists(os.path.dirname(entity_dict_path))
@@ -454,65 +460,65 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                         if entity_data:
                             writer.writerows(entity_data)
                     entity_dict_success = True
-                    message_queue.put(("log", ("success", f"事物词典保存成功: {entity_dict_path}")))
+                    broker.log(f"事物词典保存成功: {entity_dict_path}", "success")
                 except Exception as write_err:
                     log.exception(f"保存事物词典 CSV 文件失败: {entity_dict_path} - {write_err}")
-                    message_queue.put(("log", ("error", f"保存事物词典失败: {write_err}")))
+                    broker.log(f"保存事物词典失败: {write_err}", "error")
                     # 保存失败也标记为失败
 
         except Exception as entity_err:
             log.exception(f"生成事物词典阶段发生错误: {entity_err}")
-            message_queue.put(("log", ("error", f"生成事物词典时出错: {entity_err}")))
+            broker.log(f"生成事物词典时出错: {entity_err}", "error")
             # 记录错误
 
         # ==================================================
         # === 阶段三：应用基础字典 (Base Dictionary) ===
         # ==================================================
         if enable_base_dict:
-            message_queue.put(("log", ("normal", "阶段 4.3: 检查并应用基础字典...")))
+            broker.log("阶段 4.3: 检查并应用基础字典...")
             try:
                 apply_base_dictionary.run_apply_base_dictionary(
                     game_path,
                     works_dir,
                     world_dict_config, # 传递完整的 world_dict_config
-                    message_queue
+                    broker
                 )
 
             except Exception as apply_err:
                 log.exception(f"调用应用基础字典流程时发生错误: {apply_err}")
-                message_queue.put(("error", f"应用基础字典时出错: {apply_err}"))
-                message_queue.put(("status", "生成字典完成 (应用基础字典时出错)"))
-                message_queue.put(("done", None)) # 标记整个任务完成（即使子步骤失败）
+                broker.error(f"应用基础字典时出错: {apply_err}")
+                broker.status("生成字典完成 (应用基础字典时出错)")
+                broker.done() # 标记整个任务完成（即使子步骤失败）
                 return # 应用出错，直接返回，不再执行后续的原始 "done"
 
         # --- 最终总结 ---
         if character_dict_success and entity_dict_success:
-            message_queue.put(("success", f"字典生成成功: 人物({character_entries_count}条), 事物({entity_entries_count}条)。"))
-            message_queue.put(("status", "生成字典完成"))
+            broker.success(f"字典生成成功: 人物({character_entries_count}条), 事物({entity_entries_count}条)。")
+            broker.status("生成字典完成")
         elif character_dict_success:
-            message_queue.put(("warning", f"字典生成部分成功: 人物({character_entries_count}条)成功, 事物失败。"))
-            message_queue.put(("status", "生成字典部分完成 (事物失败)"))
+            broker.warning(f"字典生成部分成功: 人物({character_entries_count}条)成功, 事物失败。")
+            broker.status("生成字典部分完成 (事物失败)")
         elif entity_dict_success:
-            message_queue.put(("warning", f"字典生成部分成功: 人物失败, 事物({entity_entries_count}条)成功。"))
-            message_queue.put(("status", "生成字典部分完成 (人物失败)"))
+            broker.warning(f"字典生成部分成功: 人物失败, 事物({entity_entries_count}条)成功。")
+            broker.status("生成字典部分完成 (人物失败)")
         else:
-            message_queue.put(("error", "字典生成失败: 人物和事物词典均未成功生成。"))
-            message_queue.put(("status", "生成字典失败"))
+            broker.error("字典生成失败: 人物和事物词典均未成功生成。")
+            broker.status("生成字典失败")
 
-        message_queue.put(("done", None))
+        broker.done()
 
     except (ValueError, FileNotFoundError, RuntimeError, ConnectionError) as config_or_setup_err:
         # 捕捉配置、文件或初始化错误
         log.error(f"字典生成前置检查或初始化失败: {config_or_setup_err}")
-        message_queue.put(("error", f"字典生成准备失败: {config_or_setup_err}"))
-        message_queue.put(("status", "生成字典失败"))
-        message_queue.put(("done", None))
+        broker.error(f"字典生成准备失败: {config_or_setup_err}")
+        broker.status("生成字典失败")
+        broker.done()
     except Exception as e:
         # 捕捉其他意外顶级错误
         log.exception("生成字典任务执行期间发生意外错误。")
-        message_queue.put(("error", f"生成字典过程中发生严重错误: {e}"))
-        message_queue.put(("status", "生成字典失败"))
-        message_queue.put(("done", None))
+        broker.error(f"生成字典过程中发生严重错误: {e}")
+        broker.status("生成字典失败")
+        broker.done()
     finally:
         # 确保临时文件被删除
         if temp_text_path and os.path.exists(temp_text_path):

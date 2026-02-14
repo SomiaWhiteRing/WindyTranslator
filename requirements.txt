@@ -3,3 +3,6 @@ google-genai
 google-api-core
 openai
 rubymarshal==1.2.10
+pydantic>=2.0
+PyQt6>=6.5
+pytest>=7.0

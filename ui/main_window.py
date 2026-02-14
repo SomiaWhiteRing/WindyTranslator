@@ -1,278 +1,247 @@
 # ui/main_window.py
-import tkinter as tk
-from tkinter import ttk, scrolledtext
+"""主窗口。"""
+
+from __future__ import annotations
+
 import datetime
-import os
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-# 导入同目录下的其他 UI 面板类 (假设它们稍后会被定义)
-from . import easy_mode_panel
-from . import pro_mode_panel
-# 导入需要弹出的窗口 (用于类型提示或方法调用)
-from . import rtp_dialog # 需要调用更新按钮文本
-from . import config_dialogs # 可能需要引用
-from . import dict_editor # 可能需要引用
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QTextCharFormat
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLineEdit, QPushButton, QTabWidget, QTextEdit,
+    QLabel, QGroupBox, QInputDialog, QComboBox,
+)
 
-class MainWindow:
-    """应用程序的主窗口 UI 类。"""
+from ui.easy_mode_panel import EasyModePanel
+from ui.pro_mode_panel import ProModePanel
 
-    def __init__(self, root, app_controller, config):
-        """
-        初始化主窗口。
+if TYPE_CHECKING:
+    from app import RPGTranslatorApp
 
-        Args:
-            root (tk.Tk): Tkinter 根窗口。
-            app_controller (RPGTranslatorApp): 应用控制器实例，用于事件回调。
-            config (dict): 应用配置字典，用于初始化某些 UI 状态。
-        """
-        self.root = root
-        self.app = app_controller # 保留对 App 控制器的引用
-        self.config = config
-        self.root.title("WindyTranslator")
-        # 初始大小将在切换模式时设置
-        # self.root.geometry("600x750") # 初始大小由模式决定
+log = logging.getLogger(__name__)
 
-        # --- 创建主框架 ---
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        # **** Grid 配置: 让 main_frame 的列 0 和行 2 (日志区) 可以扩展 ****
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(2, weight=1) # 日志区所在行
+# 日志级别 → 颜色映射
+_LOG_COLORS: dict[str, QColor] = {
+    "normal": QColor("black"),
+    "success": QColor("blue"),
+    "error": QColor("red"),
+    "warning": QColor("orange"),
+    "debug": QColor("grey"),
+}
+
+# 过滤器选项：显示名称 → 包含的级别集合
+_FILTER_OPTIONS: dict[str, set[str] | None] = {
+    "全部": None,  # None 表示不过滤
+    "错误": {"error"},
+    "警告 + 错误": {"warning", "error"},
+    "成功": {"success"},
+    "调试": {"debug"},
+}
+
+
+@dataclass(slots=True)
+class LogEntry:
+    """单条日志记录。"""
+
+    timestamp: str
+    level: str
+    message: str
+
+
+class MainWindow(QMainWindow):
+    """应用程序主窗口。"""
+
+    # 日志条目上限，超过后丢弃最早的条目
+    _MAX_LOG_ENTRIES = 5000
+
+    def __init__(self, app: RPGTranslatorApp, config: dict) -> None:
+        super().__init__()
+        self._app = app
+        self._config = config
+        self._log_entries: list[LogEntry] = []
+
+        self.setWindowTitle("WindyTranslator")
+        self.resize(750, 700)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(10, 10, 10, 10)
 
         # --- 1. 游戏路径选择区域 ---
-        path_frame = ttk.LabelFrame(main_frame, text="游戏路径", padding="5")
-        # 让 path_frame 水平填充 (sticky="ew")
-        path_frame.grid(row=0, column=0, sticky="ew", padx=0, pady=5)
-        # **** Grid 配置: 让 path_frame 内的 Entry (列 0) 可以水平扩展 ****
-        path_frame.columnconfigure(0, weight=1)
+        path_group = QGroupBox("游戏路径")
+        path_layout = QHBoxLayout(path_group)
+        self.game_path_edit = QLineEdit()
+        self.game_path_edit.setReadOnly(True)
+        path_layout.addWidget(self.game_path_edit)
+        self.browse_btn = QPushButton("浏览...")
+        self.browse_btn.setFixedWidth(80)
+        self.browse_btn.clicked.connect(self._app.browse_game_path)
+        path_layout.addWidget(self.browse_btn)
+        main_layout.addWidget(path_group)
 
-        self.game_path_entry = ttk.Entry(path_frame, textvariable=self.app.game_path, width=70)
-        # 让 Entry 水平填充其单元格
-        self.game_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5), pady=5)
+        # --- 2. 功能区 TabWidget ---
+        self.tab_widget = QTabWidget()
 
-        self.browse_button = ttk.Button(path_frame, text="浏览...", command=self.app.browse_game_path)
-        self.browse_button.grid(row=0, column=1, padx=5, pady=5) # 按钮不需要扩展
+        self.easy_panel = EasyModePanel(self._app)
+        self.tab_widget.addTab(self.easy_panel, "轻松模式")
 
-        # --- 2. 功能区 Notebook ---
-        self.functions_notebook = ttk.Notebook(main_frame)
-        # 让 Notebook 水平填充
-        self.functions_notebook.grid(row=1, column=0, sticky="ew", padx=0, pady=5)
-        # Notebook 本身不需要 weight，因为它的大小由内容决定或固定
+        self.pro_panel = ProModePanel(self._app, self._config)
+        self.tab_widget.addTab(self.pro_panel, "专业模式")
 
-        # 创建模式面板实例 (将 App 控制器传递给它们)
-        # 轻松模式
-        self.easy_mode_frame_container = ttk.Frame(self.functions_notebook, padding="10")
-        self.easy_panel = easy_mode_panel.EasyModePanel(self.easy_mode_frame_container, self.app)
-        self.functions_notebook.add(self.easy_mode_frame_container, text="轻松模式")
-
-        # 专业模式
-        self.pro_mode_frame_container = ttk.Frame(self.functions_notebook, padding="5")
-        self.pro_panel = pro_mode_panel.ProModePanel(self.pro_mode_frame_container, self.app, self.config) # 专业模式需要配置来初始化
-        self.functions_notebook.add(self.pro_mode_frame_container, text="专业模式")
+        main_layout.addWidget(self.tab_widget)
 
         # --- 3. 日志区域 ---
-        log_frame = ttk.LabelFrame(main_frame, text="操作日志", padding="5")
-        # **** 让 log_frame 在主框架中双向填充 ****
-        log_frame.grid(row=2, column=0, sticky="nsew", padx=0, pady=5)
-        # **** Grid 配置: 让 log_frame 内部的 Text (行 0, 列 0) 可以双向扩展 ****
-        log_frame.rowconfigure(0, weight=1)
-        log_frame.columnconfigure(0, weight=1)
+        log_group = QGroupBox("操作日志")
+        log_layout = QVBoxLayout(log_group)
 
-        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, width=80, height=10, state=tk.DISABLED)
-        # **** 让 log_text 填充其在 log_frame 中的单元格 ****
-        self.log_text.grid(row=0, column=0, sticky="nsew")
+        # 过滤器行
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("日志过滤:"))
+        self.log_filter_combo = QComboBox()
+        self.log_filter_combo.addItems(list(_FILTER_OPTIONS.keys()))
+        self.log_filter_combo.setFixedWidth(140)
+        self.log_filter_combo.currentTextChanged.connect(self._on_filter_changed)
+        filter_layout.addWidget(self.log_filter_combo)
+        self.clear_log_btn = QPushButton("清空日志")
+        self.clear_log_btn.setFixedWidth(80)
+        self.clear_log_btn.clicked.connect(self._clear_log)
+        filter_layout.addWidget(self.clear_log_btn)
+        filter_layout.addStretch()
+        log_layout.addLayout(filter_layout)
 
-        # 定义日志级别颜色标签
-        self.log_text.tag_configure("normal", foreground="black")
-        self.log_text.tag_configure("success", foreground="blue")
-        self.log_text.tag_configure("error", foreground="red")
-        self.log_text.tag_configure("warning", foreground="orange") # 添加 warning 级别
-        self.log_text.tag_configure("debug", foreground="grey")   # 添加 debug 级别
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        log_layout.addWidget(self.log_text)
+        main_layout.addWidget(log_group, stretch=1)
 
         # --- 4. 状态栏 ---
-        status_frame = ttk.Frame(main_frame, padding=(5, 2))
-        # 让 status_frame 水平填充
-        status_frame.grid(row=3, column=0, sticky="ew", padx=0, pady=(5, 0))
-        # **** Grid 配置: 让 status_frame 内的 Label (列 0) 可以水平扩展 ****
-        status_frame.columnconfigure(0, weight=1)
+        self.status_label = QLabel("就绪")
+        main_layout.addWidget(self.status_label)
 
-        self.status_var = tk.StringVar(value="就绪")
-        status_label = ttk.Label(status_frame, textvariable=self.status_var, anchor=tk.W)
-        # 让 status_label 水平填充
-        status_label.grid(row=0, column=0, sticky="ew")
-
-        # --- 保存控件引用，方便启用/禁用 ---
-        self.all_controls = [
-            self.browse_button,
-            self.easy_panel.get_controls(), # EasyModePanel 需要提供获取其控件的方法
-            self.pro_panel.get_controls()   # ProModePanel 需要提供获取其控件的方法
+        # --- 收集所有需要禁用的控件 ---
+        self._flat_controls: list[QWidget] = [
+            self.browse_btn,
+            *self.easy_panel.get_controls(),
+            *self.pro_panel.get_controls(),
         ]
-        # 扁平化控件列表
-        self.flat_controls = self._flatten_controls(self.all_controls)
 
-    # --- 公共方法 (供 App 调用) ---
+    # ------------------------------------------------------------------
+    # 公共方法（供 AppController 调用）
+    # ------------------------------------------------------------------
 
-    def add_log(self, message, level="normal"):
-        """向日志区域添加带时间戳的消息。"""
-        if not self.log_text.winfo_exists(): return # 防止窗口关闭后调用
-        self.log_text.config(state=tk.NORMAL)
-        timestamp = datetime.datetime.now().strftime("[%H:%M:%S] ")
-        # 确保 level 是已定义的 tag
-        log_level_tag = level if level in self.log_text.tag_names() else "normal"
-        self.log_text.insert(tk.END, timestamp + message + "\n", log_level_tag)
-        self.log_text.see(tk.END) # 滚动到底部
-        self.log_text.config(state=tk.DISABLED)
-        self.root.update_idletasks() # 确保界面刷新
+    def set_game_path_text(self, path: str) -> None:
+        """更新路径输入框的显示文本。"""
+        self.game_path_edit.setText(path)
 
-    def update_status(self, message):
+    def add_log(self, message: str, level: str = "normal") -> None:
+        """向日志区域追加带时间戳和颜色的消息。
+
+        消息同时存储到内部列表，支持按级别过滤重新渲染。
+        """
+        timestamp = datetime.datetime.now().strftime("[%H:%M:%S]")
+        entry = LogEntry(timestamp=timestamp, level=level, message=message)
+        self._log_entries.append(entry)
+
+        # 超过上限时丢弃最早的条目
+        if len(self._log_entries) > self._MAX_LOG_ENTRIES:
+            self._log_entries = self._log_entries[-self._MAX_LOG_ENTRIES:]
+
+        # 如果当前过滤器允许此级别，直接追加到显示区域
+        if self._entry_matches_filter(entry):
+            self._append_entry_to_display(entry)
+
+    def update_status(self, message: str) -> None:
         """更新状态栏文本。"""
-        if not self.root.winfo_exists(): return
-        self.status_var.set(message)
-        self.root.update_idletasks()
+        self.status_label.setText(message)
 
-    def get_status(self):
+    def get_status(self) -> str:
         """获取当前状态栏文本。"""
-        return self.status_var.get()
+        return self.status_label.text()
 
-    def update_easy_status(self, message):
+    def update_easy_status(self, message: str) -> None:
         """更新轻松模式面板的状态标签。"""
-        if hasattr(self, 'easy_panel') and self.easy_panel.winfo_exists():
-            self.easy_panel.update_status(message)
-        self.root.update_idletasks()
+        self.easy_panel.update_status(message)
 
-
-    def update_easy_progress(self, value):
+    def update_easy_progress(self, value: float) -> None:
         """更新轻松模式面板的进度条。"""
-        if hasattr(self, 'easy_panel') and self.easy_panel.winfo_exists():
-            self.easy_panel.update_progress(value)
-        self.root.update_idletasks()
+        self.easy_panel.update_progress(value)
 
-    def set_controls_enabled(self, enabled):
+    def set_controls_enabled(self, enabled: bool) -> None:
         """启用或禁用窗口中的主要交互控件。"""
-        state = tk.NORMAL if enabled else tk.DISABLED
-        for control in self.flat_controls:
-             # 检查控件是否存在且有 state 属性
-            if control and hasattr(control, 'winfo_exists') and control.winfo_exists() and hasattr(control, 'configure'):
-                try:
-                    # 特殊处理 Notebook 标签页切换
-                    if isinstance(control, ttk.Notebook):
-                         for i in range(len(control.tabs())):
-                              tab_state = state if enabled else 'disabled' # Notebook tab 用 'disabled'
-                              try: # 防止切换过程中 tab ID 失效
-                                   control.tab(i, state=tab_state)
-                              except tk.TclError:
-                                   pass # 忽略无效 tab ID 错误
-                    else:
-                        control.configure(state=state)
-                except tk.TclError as e:
-                     # 忽略设置状态时可能发生的错误（例如控件已被销毁）
-                     print(f"设置控件状态时出错: {e} (控件: {control})")
-                     pass
+        for control in self._flat_controls:
+            control.setEnabled(enabled)
+        # 禁用/启用 Tab 切换
+        for i in range(self.tab_widget.count()):
+            self.tab_widget.setTabEnabled(i, enabled)
 
-    def get_current_mode(self):
-        """获取当前选中的 Notebook 标签页对应的模式 ('easy' 或 'pro')。"""
-        try:
-            selected_tab_index = self.functions_notebook.index(self.functions_notebook.select())
-            return 'easy' if selected_tab_index == 0 else 'pro'
-        except Exception:
-             # 如果 Notebook 还没完全加载好或发生错误
-            return self.config.get('selected_mode', 'easy') # 返回配置中的模式
+    def get_current_mode(self) -> str:
+        """获取当前选中的标签页对应的模式。"""
+        return 'easy' if self.tab_widget.currentIndex() == 0 else 'pro'
 
-    def switch_to_mode(self, mode):
+    def switch_to_mode(self, mode: str) -> None:
         """切换到指定的模式标签页。"""
-        target_frame = self.easy_mode_frame_container if mode == 'easy' else self.pro_mode_frame_container
-        try:
-            self.functions_notebook.select(target_frame)
-        except tk.TclError as e:
-             print(f"切换模式时出错 (可能控件尚未就绪): {e}")
-             # 可以尝试延迟执行
-             # self.root.after(50, lambda: self.switch_to_mode(mode))
+        self.tab_widget.setCurrentIndex(0 if mode == 'easy' else 1)
 
-
-    def update_rtp_button_text(self):
+    def update_rtp_button_text(self) -> None:
         """更新专业模式面板上的 RTP 选择按钮文本。"""
-        if hasattr(self, 'pro_panel') and self.pro_panel.winfo_exists():
-            self.pro_panel.update_rtp_button_text() # 调用 ProModePanel 的方法
+        self.pro_panel.update_rtp_button_text()
 
-    def show_file_selection_dialog(self, title, prompt, file_list):
-        """
-        弹出一个简单的列表选择对话框。
+    def update_fix_fallback_button_state(self, enabled: bool) -> None:
+        """更新专业模式面板上的修正回退按钮状态。"""
+        self.pro_panel.update_fix_fallback_button_state(enabled)
 
-        Args:
-            title (str): 对话框标题。
-            prompt (str): 提示信息。
-            file_list (list): 要显示的文件名列表。
+    def show_file_selection_dialog(
+        self, title: str, prompt: str, file_list: list[str]
+    ) -> str | None:
+        """弹出列表选择对话框，返回选中的文件名或 None。"""
+        item, ok = QInputDialog.getItem(
+            self, title, prompt, file_list, 0, False
+        )
+        return item if ok else None
 
-        Returns:
-            str: 用户选择的文件名，如果取消则返回 None。
-        """
-        dialog = tk.Toplevel(self.root)
-        dialog.title(title)
-        dialog.geometry("400x300")
-        dialog.transient(self.root) # 依附于主窗口
-        dialog.grab_set() # 模式对话框
+    # ------------------------------------------------------------------
+    # 内部方法：日志过滤
+    # ------------------------------------------------------------------
 
-        ttk.Label(dialog, text=prompt).pack(pady=10)
+    def _get_active_filter(self) -> set[str] | None:
+        """获取当前选中的过滤级别集合。None 表示显示全部。"""
+        filter_name = self.log_filter_combo.currentText()
+        return _FILTER_OPTIONS.get(filter_name)
 
-        listbox_frame = ttk.Frame(dialog)
-        listbox_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+    def _entry_matches_filter(self, entry: LogEntry) -> bool:
+        """检查日志条目是否匹配当前过滤器。"""
+        allowed = self._get_active_filter()
+        if allowed is None:
+            return True
+        return entry.level in allowed
 
-        scrollbar = ttk.Scrollbar(listbox_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    def _append_entry_to_display(self, entry: LogEntry) -> None:
+        """将单条日志条目追加到 QTextEdit 显示区域。"""
+        fmt = QTextCharFormat()
+        fmt.setForeground(_LOG_COLORS.get(entry.level, _LOG_COLORS["normal"]))
+        cursor = self.log_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(f"{entry.timestamp} {entry.message}\n", fmt)
+        self.log_text.setTextCursor(cursor)
+        self.log_text.ensureCursorVisible()
 
-        listbox = tk.Listbox(listbox_frame, yscrollcommand=scrollbar.set, width=50)
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        for item in file_list:
-            listbox.insert(tk.END, item)
+    def _rerender_log(self) -> None:
+        """根据当前过滤器重新渲染整个日志区域。"""
+        self.log_text.clear()
+        for entry in self._log_entries:
+            if self._entry_matches_filter(entry):
+                self._append_entry_to_display(entry)
 
-        scrollbar.config(command=listbox.yview)
+    def _on_filter_changed(self, _text: str) -> None:
+        """过滤器下拉框变更时重新渲染日志。"""
+        self._rerender_log()
 
-        selected_value = tk.StringVar()
-
-        def on_select():
-            if listbox.curselection():
-                selected_value.set(listbox.get(listbox.curselection()))
-            dialog.destroy()
-
-        def on_cancel():
-            selected_value.set("") # 表示取消
-            dialog.destroy()
-
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="选择", command=on_select).pack(side=tk.LEFT, padx=10)
-        ttk.Button(button_frame, text="取消", command=on_cancel).pack(side=tk.LEFT, padx=10)
-
-        dialog.protocol("WM_DELETE_WINDOW", on_cancel) # 处理关闭按钮
-
-        # 等待对话框关闭
-        self.root.wait_window(dialog)
-
-        result = selected_value.get()
-        return result if result else None
-
-    
-    # --- 新增: 更新 Pro 面板修正按钮状态的中继方法 ---
-    def update_fix_fallback_button_state(self, enabled):
-        """
-        更新专业模式面板上的 '修正回退' 按钮的状态。
-        此方法由 App 控制器调用。
-        """
-        # 检查 ProModePanel 实例是否存在且控件仍然有效
-        if hasattr(self, 'pro_panel') and self.pro_panel.winfo_exists():
-            # 调用 ProModePanel 实例上的方法来实际更新按钮状态
-            self.pro_panel.update_fix_fallback_button_state(enabled)
-        else:
-            # 如果 ProModePanel 不可用（例如窗口正在关闭），则记录日志或忽略
-            print("尝试更新修正回退按钮状态，但 ProModePanel 不可用。")
-
-    # --- 内部辅助方法 ---
-
-    def _flatten_controls(self, controls_list):
-        """递归地将嵌套的控件列表/元组展平成单个列表。"""
-        flat_list = []
-        for item in controls_list:
-            if isinstance(item, (list, tuple)):
-                flat_list.extend(self._flatten_controls(item))
-            elif item is not None:
-                flat_list.append(item)
-        return flat_list
+    def _clear_log(self) -> None:
+        """清空所有日志条目和显示区域。"""
+        self._log_entries.clear()
+        self.log_text.clear()

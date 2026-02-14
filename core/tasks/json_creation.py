@@ -1,9 +1,16 @@
 # core/tasks/json_creation.py
+from __future__ import annotations
+
 import os
 import re
 import json
 import logging
+from typing import TYPE_CHECKING
+
 from core.utils import file_system, text_processing # 需要文件名清理
+
+if TYPE_CHECKING:
+    from core.message_broker import MessageBroker
 
 log = logging.getLogger(__name__)
 
@@ -230,19 +237,17 @@ def _extract_strings_from_file(file_path):
 
 
 # --- 主任务函数 ---
-def run_create_json(game_path, works_dir, message_queue):
-    """
-    遍历 StringScripts 目录，提取文本及其元数据，并按文件名组织创建未翻译的 JSON 文件。
-    """
+def run_create_json(game_path: str, works_dir: str, broker: MessageBroker) -> None:
+    """遍历 StringScripts 目录，提取文本及其元数据，并按文件名组织创建未翻译的 JSON 文件。"""
     try:
-        message_queue.put(("status", "正在提取文本并创建 JSON (按文件组织)...")) # 状态消息更新
-        message_queue.put(("log", ("normal", "步骤 3: 开始创建未翻译的 JSON 文件 (按文件组织)..."))) # 日志消息更新
+        broker.status("正在提取文本并创建 JSON (按文件组织)...")
+        broker.log("步骤 3: 开始创建未翻译的 JSON 文件 (按文件组织)...")
 
         string_scripts_path = os.path.join(game_path, "StringScripts")
         if not os.path.isdir(string_scripts_path):
-            message_queue.put(("error", f"未找到 StringScripts 目录: {string_scripts_path}，请先导出文本。"))
-            message_queue.put(("status", "创建 JSON 失败"))
-            message_queue.put(("done", None))
+            broker.error(f"未找到 StringScripts 目录: {string_scripts_path}，请先导出文本。")
+            broker.status("创建 JSON 失败")
+            broker.done()
             return
 
         game_folder_name = text_processing.sanitize_filename(os.path.basename(game_path))
@@ -255,10 +260,10 @@ def run_create_json(game_path, works_dir, message_queue):
         if not file_system.ensure_dir_exists(untranslated_dir): 
             raise OSError(f"无法创建或访问 untranslated 目录: {untranslated_dir}")
         
-        message_queue.put(("log", ("normal", f"将在以下目录创建 JSON: {untranslated_dir}")))
+        broker.log(f"将在以下目录创建 JSON: {untranslated_dir}")
 
         # *** 主要改动点：创建按文件名组织的顶层字典 ***
-        file_organized_data = {} 
+        file_organized_data = {}
         processed_file_count = 0
         total_extracted_entries_across_all_files = 0 # 用于统计总条目数
 
@@ -269,11 +274,11 @@ def run_create_json(game_path, works_dir, message_queue):
                     file_path = os.path.join(root_dir, file_name)
                     file_key_in_json = os.path.relpath(file_path, string_scripts_path)
 
-                    message_queue.put(("log", ("debug", f"正在解析文件: {file_key_in_json}"))) 
-                    
+                    broker.log(f"正在解析文件: {file_key_in_json}", "debug")
+
                     # 调用 _extract_strings_from_file 获取该文件的所有文本和元数据
                     data_from_single_file = _extract_strings_from_file(file_path)
-                    
+
                     if data_from_single_file: # 只有当文件中有数据时才添加
                         file_organized_data[file_key_in_json] = data_from_single_file
                         total_extracted_entries_across_all_files += len(data_from_single_file)
@@ -281,35 +286,35 @@ def run_create_json(game_path, works_dir, message_queue):
                     else:
                         log.debug(f"文件 '{file_key_in_json}' 未提取到任何可翻译条目。")
                     processed_file_count += 1
-        
-        message_queue.put(("log", ("normal", f"已处理 {processed_file_count} 个文件。总共提取到 {total_extracted_entries_across_all_files} 个原文条目。")))
+
+        broker.log(f"已处理 {processed_file_count} 个文件。总共提取到 {total_extracted_entries_across_all_files} 个原文条目。")
 
         if not file_organized_data: # 如果没有任何文件包含可翻译内容
-            message_queue.put(("log", ("warning", "未从任何文件中提取到文本条目。生成的 JSON 文件将为空对象。")))
-        
+            broker.log("未从任何文件中提取到文本条目。生成的 JSON 文件将为空对象。", "warning")
+
         json_filename = "translation.json" # 输出文件名保持不变
         json_path = os.path.join(untranslated_dir, json_filename)
-        message_queue.put(("log", ("normal", f"正在将按文件组织的文本及元数据写入 JSON 文件: {json_path}")))
+        broker.log(f"正在将按文件组织的文本及元数据写入 JSON 文件: {json_path}")
 
         try:
             with open(json_path, 'w', encoding='utf-8') as json_file:
                 json.dump(file_organized_data, json_file, ensure_ascii=False, indent=4) # 写入新的组织结构
-            message_queue.put(("success", f"按文件组织的未翻译 JSON 文件创建成功: {json_path}"))
-            message_queue.put(("status", "创建 JSON 文件完成"))
-            message_queue.put(("done", None))
+            broker.success(f"按文件组织的未翻译 JSON 文件创建成功: {json_path}")
+            broker.status("创建 JSON 文件完成")
+            broker.done()
         except Exception as write_err:
             log.exception(f"写入 JSON 文件失败: {json_path} - {write_err}")
-            message_queue.put(("error", f"写入 JSON 文件失败: {write_err}"))
-            message_queue.put(("status", "创建 JSON 失败"))
-            message_queue.put(("done", None))
+            broker.error(f"写入 JSON 文件失败: {write_err}")
+            broker.status("创建 JSON 失败")
+            broker.done()
 
     except OSError as os_err:
         log.exception(f"文件系统操作失败，无法继续创建JSON: {os_err}")
-        message_queue.put(("error", f"文件系统错误: {os_err}"))
-        message_queue.put(("status", "创建 JSON 失败 (文件系统问题)"))
-        message_queue.put(("done", None))
+        broker.error(f"文件系统错误: {os_err}")
+        broker.status("创建 JSON 失败 (文件系统问题)")
+        broker.done()
     except Exception as e:
         log.exception("创建 JSON 文件任务执行期间发生意外错误。")
-        message_queue.put(("error", f"创建 JSON 文件过程中发生严重错误: {e}"))
-        message_queue.put(("status", "创建 JSON 失败"))
-        message_queue.put(("done", None))
+        broker.error(f"创建 JSON 文件过程中发生严重错误: {e}")
+        broker.status("创建 JSON 失败")
+        broker.done()
