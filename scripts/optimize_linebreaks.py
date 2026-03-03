@@ -61,6 +61,7 @@ def calc_display_width(text: str) -> int:
             or 0x3000 <= cp <= 0x303F    # CJK symbols and punctuation
             or 0x3040 <= cp <= 0x309F    # hiragana
             or 0x30A0 <= cp <= 0x30FF    # katakana
+            or 0x2010 <= cp <= 0x203B    # general punctuation (…―""''※)
         ):
             width += 2
         else:
