@@ -245,6 +245,9 @@ def post_process_translation(text, original_text):
     processed_text = processed_text.replace('♪', '～') # 音符 -> 波浪号
     processed_text = processed_text.replace('~', '～') # 半角波浪号 -> 波浪号
     processed_text = processed_text.replace('⋯', '…') # 日文间隔号 -> 中文省略号
+    processed_text = processed_text.replace('≫', '》') # 日语右尖括号 -> 全角右尖括号
+    processed_text = processed_text.replace('≪', '《') # 日语左尖括号 -> 全角左尖括号
+    processed_text = processed_text.replace('⇒', '→') # 日语右箭头 -> 全角右箭头
 
     # 规则 2: 移除不必要的引号 (如果原文没有，译文却有)
     # 这个逻辑比较微妙，需要基于还原 PUA 后的引号
