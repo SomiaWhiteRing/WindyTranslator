@@ -18,13 +18,16 @@ _EOCD_SIGNATURE = b"PK\x05\x06"
 _CENTRAL_DIR_SIGNATURE = b"PK\x01\x02"
 _EOCD_MIN_SIZE = 22
 _MAX_ZIP_COMMENT = 65535
-_CANDIDATE_ENCODINGS = ("utf-8", "cp932", "gbk", "cp437")
+_CANDIDATE_ENCODINGS = ("utf-8", "gbk", "cp932", "cp437")
 _ZIP_NAME_ENCODING_OVERRIDES = {
     "2000fix.zip": "gbk",
 }
 _KANA_RE = re.compile(r"[\u3040-\u30ff]")
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
-_SUSPICIOUS_CHAR_RE = re.compile(r"[\u00c0-\u024f\u0370-\u03ff\u2500-\u259f]")
+# RTP 包里的合法文件名以 ASCII、CJK 和日文假名为主。
+# 一些双字节 GBK 路径恰好也能被误解为 UTF-8/CP932，
+# 会落到 IPA、修饰字母、西里尔、希伯来等区段，需强力降权。
+_SUSPICIOUS_CHAR_RE = re.compile(r"[\u00c0-\u024f\u0250-\u02ff\u0370-\u03ff\u0400-\u06ff\u2500-\u259f]")
 
 
 def _read_raw_zip_filenames(zip_path):
@@ -261,7 +264,7 @@ def install_rtp_files(target_game_dir, selected_rtp_zips):
 
             if encoding_stats:
                 stats_text = ", ".join(f"{encoding}={count}" for encoding, count in sorted(encoding_stats.items()))
-                log.debug(f"{rtp_zip_name} 文件名解码统计: {stats_text}; 修复条目 {repaired_entries} 个。")
+                log.info(f"{rtp_zip_name} 文件名解码统计: {stats_text}; 修复条目 {repaired_entries} 个。")
 
             log.info(f"{rtp_zip_name} 处理完成: 复制 {rtp_copied} 个新文件，跳过 {rtp_skipped} 个已存在文件。")
 
