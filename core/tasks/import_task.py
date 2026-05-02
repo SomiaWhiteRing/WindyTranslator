@@ -35,6 +35,23 @@ def run_import(game_path, import_encoding, message_queue):
                 message_queue.put(("done", None))
             return
 
+        if detected and detected.engine == "mvmz":
+            message_queue.put(("status", "正在导入文本 (MV/MZ)..."))
+            message_queue.put(("log", ("normal", "步骤 7(MV/MZ): 从 StringScripts 写回 JSON...")))
+            try:
+                from core.engines import mvmz
+
+                modified_files = mvmz.import_from_string_scripts(game_path, message_queue)
+                message_queue.put(("success", f"MV/MZ 导入完成：更新了 {modified_files} 个文件。"))
+                message_queue.put(("status", "文本导入完成(MV/MZ)"))
+            except Exception as e:
+                log.exception("MV/MZ 导入失败。")
+                message_queue.put(("error", f"MV/MZ 导入失败: {e}"))
+                message_queue.put(("status", "导入文本失败"))
+            finally:
+                message_queue.put(("done", None))
+            return
+
         message_queue.put(("status", f"正在导入文本 (编码: {import_encoding})..."))
         message_queue.put(("log", ("normal", f"步骤 7: 开始导入文本 (写入编码: {import_encoding})...")))
 

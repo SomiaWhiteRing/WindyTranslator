@@ -211,6 +211,12 @@ def run_initialize(game_path, rtp_options, message_queue):
             message_queue.put(("status", "初始化完成（VX Ace：跳过）"))
             message_queue.put(("done", None))
             return
+        if detected and detected.engine == "mvmz":
+            message_queue.put(("log", ("success", "检测到 RPG Maker MV/MZ：初始化步骤自动跳过（无需 EasyRPG/RTP/编码转换）。")))
+            message_queue.put(("success", "初始化完成（MV/MZ：跳过）"))
+            message_queue.put(("status", "初始化完成（MV/MZ：跳过）"))
+            message_queue.put(("done", None))
+            return
 
         # 1. 复制 EasyRPG 文件
         message_queue.put(("log", ("normal", "复制 EasyRPG 文件...")))

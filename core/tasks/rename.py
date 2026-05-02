@@ -110,6 +110,12 @@ def run_rename(game_path, program_dir, rtp_fix, message_queue):
             message_queue.put(("status", "重写文件名完成（VX Ace：跳过）"))
             message_queue.put(("done", None))
             return
+        if detected and detected.engine == "mvmz":
+            message_queue.put(("log", ("success", "检测到 RPG Maker MV/MZ：重写文件名步骤自动跳过（无需 RPGRewriter）。")))
+            message_queue.put(("success", "重写文件名完成（MV/MZ：跳过）"))
+            message_queue.put(("status", "重写文件名完成（MV/MZ：跳过）"))
+            message_queue.put(("done", None))
+            return
 
         lmt_path = os.path.join(game_path, "RPG_RT.lmt")
         if not os.path.exists(lmt_path):

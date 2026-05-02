@@ -94,7 +94,7 @@ class RPGTranslatorApp:
             else:
                 messagebox.showerror(
                     "路径无效",
-                    "选择的目录不是有效的 RPG Maker 2000/2003 或 RPG Maker VX Ace 游戏目录（未找到 RPG_RT.lmt 或 Data/MapInfos.rvdata2）。",
+                    "选择的目录不是有效的 RPG Maker 2000/2003、VX Ace 或 MV/MZ 游戏目录（未找到 RPG_RT.lmt、Data/MapInfos.rvdata2 或 data/MapInfos.json）。",
                     parent=self.root,
                 )
                 self.log_message("选择了无效的游戏目录。", "error")
@@ -560,7 +560,7 @@ class RPGTranslatorApp:
 
         player_exe = os.path.join(current_game_path, "Player.exe") # EasyRPG Player
         rpg_rt_exe = os.path.join(current_game_path, "RPG_RT.exe") # 原版
-        vxace_exe = os.path.join(current_game_path, "Game.exe") # VX Ace
+        vxace_exe = os.path.join(current_game_path, "Game.exe") # VX Ace / MV / MZ
 
         exe_to_run = None
         if os.path.exists(player_exe):
