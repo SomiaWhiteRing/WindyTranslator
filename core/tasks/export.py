@@ -41,6 +41,23 @@ def run_export(game_path, export_encoding, message_queue):
                 message_queue.put(("done", None))
             return
 
+        if detected and detected.engine == "mvmz":
+            message_queue.put(("status", "正在导出文本 (MV/MZ)..."))
+            message_queue.put(("log", ("normal", "步骤 1(MV/MZ): 导出文本到 StringScripts...")))
+            try:
+                from core.engines import mvmz
+
+                mvmz.export_to_string_scripts(game_path, message_queue)
+                message_queue.put(("success", "MV/MZ 文本导出完成。"))
+                message_queue.put(("status", "文本导出完成(MV/MZ)"))
+            except Exception as e:
+                log.exception("MV/MZ 导出失败。")
+                message_queue.put(("error", f"MV/MZ 导出失败: {e}"))
+                message_queue.put(("status", "导出文本失败"))
+            finally:
+                message_queue.put(("done", None))
+            return
+
         message_queue.put(("status", f"正在导出文本 (编码: {export_encoding})..."))
         message_queue.put(("log", ("normal", f"步骤 1: 开始导出文本 (读取编码: {export_encoding})...")))
 
