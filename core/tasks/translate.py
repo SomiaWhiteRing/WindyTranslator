@@ -12,6 +12,7 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed # 使用 as_completed
 from core.api_clients import deepseek
 from core.utils import file_system, text_processing, default_database
+from core.utils.engine_detection import detect_game_engine
 from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
 from collections import OrderedDict
 
@@ -37,6 +38,7 @@ def _translate_batch_with_retry(
     target_language = config.get("target_language", "简体中文")
     max_retries = config.get("max_retries", 3)
     context_lines_config = config.get("context_lines", 10) 
+    apply_gbk_compatibility = config.get("_apply_gbk_compatibility_postprocess", True)
     min_batch_size = 1
     
     batch_original_texts_for_logging = [item["text_to_translate"] for item in batch_metadata_items]
@@ -227,7 +229,9 @@ def _translate_batch_with_retry(
                     original_text_for_validation, restored_text_for_validation
                 )
                 post_processed_text_for_validation = text_processing.post_process_translation(
-                    repaired_text_for_validation, original_text_for_validation
+                    repaired_text_for_validation,
+                    original_text_for_validation,
+                    apply_gbk_compatibility=apply_gbk_compatibility
                 )
                 # 方案A：StringPicture 强制行数一致校验（包含空行）
                 marker_for_item = original_item_data.get("original_marker")
@@ -471,7 +475,11 @@ def _translate_stringpicture_by_lines(
             raw_tran = numbered_translations[idx]
             restored = text_processing.restore_pua_placeholders(raw_tran)
             repaired = text_processing.repair_translation_format(orig_line, restored)
-            postp = text_processing.post_process_translation(repaired, orig_line)
+            postp = text_processing.post_process_translation(
+                repaired,
+                orig_line,
+                apply_gbk_compatibility=config.get("_apply_gbk_compatibility_postprocess", True)
+            )
             is_valid, reason = text_processing.validate_translation(orig_line, repaired, postp)
             if not is_valid:
                 _log_batch_error(error_log_path, error_log_lock, "按行回退(单行验证失败)", non_empty_lines, reason, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, failed_item_index=idx-1, raw_item_translation=raw_tran, file_name_for_log=current_processing_file_name)
@@ -626,6 +634,13 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         # --- 获取翻译配置 ---
         current_translate_config = translate_config.copy()
+        detected_game = detect_game_engine(game_path)
+        apply_gbk_compatibility = not detected_game or detected_game.engine == "rm200x"
+        current_translate_config["_apply_gbk_compatibility_postprocess"] = apply_gbk_compatibility
+        if detected_game and not apply_gbk_compatibility:
+            message_queue.put(("log", ("normal", f"检测到 {detected_game.engine}：跳过 RM2000/2003 的 GBK 字符兼容化后处理。")))
+        else:
+            message_queue.put(("log", ("normal", "启用 RM2000/2003 的 GBK 字符兼容化后处理。")))
         api_url = current_translate_config.get("api_url", "").strip()
         api_key = current_translate_config.get("api_key", "").strip()
         model_name = current_translate_config.get("model", "").strip()
