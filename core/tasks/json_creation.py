@@ -11,6 +11,7 @@ log = logging.getLogger(__name__)
 DEFAULT_SPEAKER_ID = "NARRATION" # 用于旁白或Page开始时无明确脸图的情况
 SYSTEM_TEXT_SPEAKER_ID = "SYSTEM"  # 用于系统词条、非对话文本
 ERASE_COMMAND_ID = "_ERASE_FACE_" # 用于内部标记Erase指令
+MULTILINE_BLOCK_MARKERS = {"Message", "StringPicture", "ScrollText"}
 
 # 正则表达式预编译
 RE_MARKER_LINE = re.compile(r'#(.+)#')
@@ -19,6 +20,10 @@ RE_IS_FACE_GRAPHIC_LINE = re.compile(r"^\s*\{{2,}.*?Select Face Graphic:.*?\}{2,
 RE_EXTRACT_FACE_GRAPHIC_CONTENT = re.compile(r"Select Face Graphic:(.*)", re.IGNORECASE) # 提取 "Select Face Graphic:" 之后的内容
 
 RE_PAGE_SEPARATOR = re.compile(r"^(?:-{5,}Page\d+-{5,}|={5,}Page\d+={5,}|\*{5,}Entry\d+\*{5,})$", re.IGNORECASE)
+
+
+def _is_multiline_block_marker(marker):
+    return marker in MULTILINE_BLOCK_MARKERS or marker.startswith("PluginCommand_")
 
 
 def _parse_face_graphic_command_details(command_details_str):
@@ -139,12 +144,12 @@ def _extract_strings_from_file(file_path):
             marker_match = RE_MARKER_LINE.match(line_content_stripped)
             if marker_match:
                 original_marker = marker_match.group(1)
-                # 对话类与图文说明类（StringPicture）按多行块处理；其他标记按单行处理
-                speaker_id_for_this_entry = current_speaker_id if original_marker in ['Message'] else SYSTEM_TEXT_SPEAKER_ID # Choice 文本也可能需要发言人ID，但RPG Maker 2000/2003的Choice通常不直接关联脸图，所以默认为SYSTEM
+                # 对话、图文、滚动文本与插件指令参数按完整块处理；其他标记按单行处理。
+                speaker_id_for_this_entry = current_speaker_id if original_marker == 'Message' else SYSTEM_TEXT_SPEAKER_ID # Choice 文本也可能需要发言人ID，但RPG Maker 2000/2003的Choice通常不直接关联脸图，所以默认为SYSTEM
                 log.debug(f"  [L{current_line_number_for_log}, {current_page_for_log}] 处理标记 '#{original_marker}#'. 使用 Speaker ID: '{speaker_id_for_this_entry}' (基于 current_speaker_id='{current_speaker_id}').")
                 i += 1 
                 
-                if original_marker in ['Message', 'StringPicture']: # Message 与 StringPicture 都按多行块处理
+                if _is_multiline_block_marker(original_marker):
                     message_block_lines = []
                     while i < len(lines) and not lines[i].strip() == '##':
                         message_block_lines.append(lines[i])

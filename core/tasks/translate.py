@@ -602,6 +602,55 @@ def _translation_worker(
     return source_file_name_for_worker, batch_processing_result
 
 
+def _load_existing_translated_data(translated_json_path):
+    """加载已有翻译结果，用于中断后续跑。"""
+    if not os.path.exists(translated_json_path):
+        return {}
+    try:
+        with open(translated_json_path, 'r', encoding='utf-8') as f_existing:
+            existing_data = json.load(f_existing)
+        if isinstance(existing_data, dict):
+            return existing_data
+        log.warning(f"已有翻译文件不是预期的字典结构，将忽略: {translated_json_path}")
+    except json.JSONDecodeError as decode_err:
+        log.warning(f"已有翻译文件无法解析，将忽略并重新生成: {translated_json_path} - {decode_err}")
+    except OSError as os_err:
+        log.warning(f"读取已有翻译文件失败，将忽略并重新生成: {translated_json_path} - {os_err}")
+    return {}
+
+
+def _is_reusable_translation_result(result_obj):
+    """仅复用已成功的译文；fallback 会在本轮重新尝试。"""
+    return (
+        isinstance(result_obj, dict)
+        and result_obj.get("status") == "success"
+        and isinstance(result_obj.get("text"), str)
+        and result_obj.get("text").strip() != ""
+    )
+
+
+def _reuse_translation_result(result_obj, metadata_obj):
+    reused = dict(result_obj)
+    reused["status"] = "success"
+    reused["failure_context"] = None
+    reused["original_marker"] = metadata_obj.get("original_marker", reused.get("original_marker", "UnknownMarker"))
+    reused["speaker_id"] = metadata_obj.get("speaker_id", reused.get("speaker_id"))
+    return reused
+
+
+def _save_translation_results_atomic(translated_json_path, untranslated_data, translated_data):
+    """按原始顺序原子写入翻译结果，避免中途退出留下半截 JSON。"""
+    file_system.ensure_dir_exists(os.path.dirname(translated_json_path))
+    reordered_results = _reorder_translation_results(untranslated_data, translated_data)
+    tmp_path = f"{translated_json_path}.tmp"
+    with open(tmp_path, 'w', encoding='utf-8') as f_json_out:
+        json.dump(reordered_results, f_json_out, ensure_ascii=False, indent=4)
+        f_json_out.flush()
+        os.fsync(f_json_out.fileno())
+    os.replace(tmp_path, translated_json_path)
+    return reordered_results
+
+
 # --- 主任务函数 ---
 def run_translate(game_path, works_dir, translate_config, world_dict_config, message_queue):
     start_time = time.time()
@@ -638,6 +687,22 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         
         if not untranslated_data_per_file:
             message_queue.put(("warning", "未翻译的 JSON 文件为空或无效，无需翻译。")); message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("done", None)); return
+
+        existing_translated_data = _load_existing_translated_data(translated_json_path)
+        existing_success_count = 0
+        if existing_translated_data:
+            for file_name, data_for_this_file in untranslated_data_per_file.items():
+                existing_file_data = existing_translated_data.get(file_name, {})
+                if not isinstance(existing_file_data, dict) or not isinstance(data_for_this_file, dict):
+                    continue
+                existing_success_count += sum(
+                    1 for original_json_key in data_for_this_file.keys()
+                    if _is_reusable_translation_result(existing_file_data.get(original_json_key))
+                )
+            if existing_success_count > 0:
+                message_queue.put(("log", ("normal", f"检测到已有翻译结果，可续跑复用 {existing_success_count} 条成功译文。")))
+            else:
+                message_queue.put(("log", ("normal", "检测到已有翻译文件，但没有可复用的成功译文。")))
         
         # --- 加载词典 (全局共享) ---
         char_dict_filename = world_dict_config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
@@ -694,6 +759,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         overall_total_items_in_all_files = 0
         overall_default_db_prefilled_count = 0
         overall_no_content_prefilled_count = 0
+        overall_resumed_success_count = 0
 
         message_queue.put(("log", ("normal", "开始预切分所有翻译任务...")))
         for file_name, data_for_this_file in untranslated_data_per_file.items():
@@ -705,6 +771,10 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             items_with_original_key_for_this_file = []
             prefilled_count_for_this_file = 0
             no_content_prefilled_for_this_file = 0
+            resumed_count_for_this_file = 0
+            existing_file_translations = existing_translated_data.get(file_name, {})
+            if not isinstance(existing_file_translations, dict):
+                existing_file_translations = {}
             for original_json_key, metadata_obj in data_for_this_file.items():
                 # 确保元数据对象中有一个字段存储这个原始的JSON键
                 metadata_obj['original_json_key'] = original_json_key 
@@ -748,6 +818,16 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                         no_content_prefilled_for_this_file += 1
                         continue
 
+                existing_result_obj = existing_file_translations.get(original_json_key)
+                if _is_reusable_translation_result(existing_result_obj):
+                    all_files_translated_data.setdefault(file_name, {})
+                    all_files_translated_data[file_name][original_json_key] = _reuse_translation_result(
+                        existing_result_obj,
+                        metadata_obj
+                    )
+                    resumed_count_for_this_file += 1
+                    continue
+
                 items_with_original_key_for_this_file.append(metadata_obj)
 
             all_metadata_items_for_this_file = items_with_original_key_for_this_file
@@ -756,6 +836,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             overall_default_db_prefilled_count += prefilled_count_for_this_file
             # 同步累计“无需翻译”预填数量，排除在需译计数之外
             overall_no_content_prefilled_count += no_content_prefilled_for_this_file
+            overall_resumed_success_count += resumed_count_for_this_file
             
             # 预先为这个文件在最终结果字典中创建条目
             all_files_translated_data.setdefault(file_name, {})
@@ -777,13 +858,30 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 })
         
         if not global_translation_tasks:
+            try:
+                all_files_translated_data = _save_translation_results_atomic(
+                    translated_json_path,
+                    untranslated_data_per_file,
+                    all_files_translated_data
+                )
+            except Exception as checkpoint_err:
+                log.exception(f"保存续跑结果失败: {checkpoint_err}")
+                message_queue.put(("error", f"保存续跑结果失败: {checkpoint_err}"))
+                message_queue.put(("status", "翻译失败(保存错误)")); message_queue.put(("done", None)); return
+
+            if overall_resumed_success_count > 0:
+                message_queue.put(("success", f"所有条目已有成功译文，已复用 {overall_resumed_success_count} 条并完成续跑。"))
+                message_queue.put(("status", "翻译全部完成(续跑复用)")); message_queue.put(("progress", 100.0)); message_queue.put(("done", None)); return
+
             message_queue.put(("warning", "所有文件均为空，或未提取到任何可翻译条目。无需翻译。"))
-            message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("done", None)); return
+            message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("progress", 100.0)); message_queue.put(("done", None)); return
 
         total_batches_to_process = len(global_translation_tasks)
         # overall_total_items_in_all_files 已经是过滤后需要API翻译的条目数（不包含预填充和无需翻译的）
         total_need_translate = overall_total_items_in_all_files
         message_queue.put(("log", ("normal", f"任务预切分完成。共 {total_batches_to_process} 个批次（来自 {len(untranslated_data_per_file)} 个文件），总计 {total_need_translate} 个需翻译原文条目。")))
+        if overall_resumed_success_count > 0:
+            message_queue.put(("log", ("normal", f"续跑已跳过 {overall_resumed_success_count} 条已有成功译文。")))
         if overall_default_db_prefilled_count > 0:
             message_queue.put(("log", ("normal", f"按默认数据库规则自动填充 {overall_default_db_prefilled_count} 条模板词条译文，避免重复请求 API。")))
         if overall_no_content_prefilled_count > 0:
@@ -855,6 +953,16 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                             "original_marker": item_data_in_failed_batch["original_marker"], 
                             "speaker_id": item_data_in_failed_batch["speaker_id"]
                         }
+
+                try:
+                    all_files_translated_data = _save_translation_results_atomic(
+                        translated_json_path,
+                        untranslated_data_per_file,
+                        all_files_translated_data
+                    )
+                except Exception as checkpoint_save_err:
+                    log.exception(f"保存翻译续跑检查点失败: {checkpoint_save_err}")
+                    message_queue.put(("warning", f"保存翻译续跑检查点失败，本轮会继续但下次可能需要重翻最近批次: {checkpoint_save_err}"))
                 
                 completed_batches_count += 1
                 processed_items_count += num_items_in_this_batch
@@ -937,14 +1045,13 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         # --- 保存最终的按文件组织的翻译JSON ---
         message_queue.put(("log", ("normal", f"正在保存按文件组织的翻译结果到: {translated_json_path}")))
         try:
-            file_system.ensure_dir_exists(os.path.dirname(translated_json_path))
-            
             # 在保存前重排序结果
             message_queue.put(("log", ("normal", "正在重排序翻译结果以匹配原始文件顺序...")))
-            all_files_translated_data = _reorder_translation_results(untranslated_data_per_file, all_files_translated_data)
-            
-            with open(translated_json_path, 'w', encoding='utf-8') as f_json_final_out:
-                json.dump(all_files_translated_data, f_json_final_out, ensure_ascii=False, indent=4)
+            all_files_translated_data = _save_translation_results_atomic(
+                translated_json_path,
+                untranslated_data_per_file,
+                all_files_translated_data
+            )
             
             total_elapsed_time_overall = time.time() - start_time
             message_queue.put(("log", ("success", f"所有文件的翻译及保存完成。总耗时: {total_elapsed_time_overall:.2f} 秒。")))
