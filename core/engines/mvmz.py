@@ -15,7 +15,7 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from core.utils import file_system
 
@@ -28,6 +28,10 @@ ORIGINAL_DB_STORE_FILENAME = "RTA_MVMZ_ORIGINAL_DB.json"
 
 MESSAGE_MARKER_PREFIX = "<RTA_MVMZ_ORIGINAL_MESSAGE:"
 CHOICE_MARKER_PREFIX = "<RTA_MVMZ_ORIGINAL_CHOICE:"
+SCROLL_MARKER_PREFIX = "<RTA_MVMZ_ORIGINAL_SCROLL:"
+PLUGIN_COMMAND_MARKER_PREFIX = "<RTA_MVMZ_ORIGINAL_PLUGIN_COMMAND:"
+PLUGIN_COMMAND_TEXT_MARKER_PREFIX = "<RTA_MVMZ_PLUGIN_COMMAND_TEXT:"
+PLUGIN_PARAM_TEXT_MARKER_PREFIX = "<RTA_MVMZ_PLUGIN_PARAM_TEXT:"
 MARKER_SUFFIX = ">"
 
 JAPANESE_TEXT_RE = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f\u4e00-\u9fff]")
@@ -41,6 +45,132 @@ class MVMZError(RuntimeError):
 class _ParsedEntry:
     marker: str
     content: Any
+
+
+@dataclass(frozen=True)
+class _PluginCommandArgSpec:
+    path: Tuple[str, ...]
+    codec: str = "text"
+
+
+@dataclass(frozen=True)
+class _NoteTagSpec:
+    marker: str
+    tags: Tuple[str, ...]
+    plugins: Tuple[str, ...]
+
+
+_PLUGIN_COMMAND_TEXT_SPECS: Dict[str, Dict[str, Tuple[_PluginCommandArgSpec, ...]]] = {
+    "BookReader": {
+        "showBook": (_PluginCommandArgSpec(("textData",), "mz_note"),),
+    },
+    "LL_InfoPopupWIndow": {
+        "showMessage": (_PluginCommandArgSpec(("messageText",), "text"),),
+    },
+    "Mano_CurrencyUnit": {
+        "setWalletItem": (_PluginCommandArgSpec(("unit",), "text"),),
+        "setWalletVariable": (_PluginCommandArgSpec(("unit",), "text"),),
+    },
+    "QuestSystem": {
+        "ChangeDetail": (
+            _PluginCommandArgSpec(("DetailNote",), "mz_note"),
+            _PluginCommandArgSpec(("Detail",), "text"),
+        ),
+    },
+}
+
+_NOTE_TAG_SPECS_BY_JSON: Dict[str, Tuple[_NoteTagSpec, ...]] = {
+    "Skills.json": (_NoteTagSpec("Note_ExtendDescription", ("拡張説明", "ExtendDesc"), ("DescriptionExtend",)),),
+    "Items.json": (_NoteTagSpec("Note_ExtendDescription", ("拡張説明", "ExtendDesc"), ("DescriptionExtend",)),),
+    "Weapons.json": (_NoteTagSpec("Note_ExtendDescription", ("拡張説明", "ExtendDesc"), ("DescriptionExtend",)),),
+    "Armors.json": (_NoteTagSpec("Note_ExtendDescription", ("拡張説明", "ExtendDesc"), ("DescriptionExtend",)),),
+    "States.json": (_NoteTagSpec("Note_StateDescription", ("説明",), ("Mano_StateWindowOnBattle",)),),
+}
+
+_PLUGIN_PARAM_PLUGIN_KEYS: Dict[str, Set[str]] = {
+    "QuestSystem": {
+        "title",
+        "requester",
+        "difficulty",
+        "place",
+        "timelimit",
+        "detailnote",
+        "hiddendetail",
+        "text",
+        "nothingquesttext",
+        "requestertext",
+        "rewardtext",
+        "difficultytext",
+        "placetext",
+        "timelimittext",
+        "orderingcounttext",
+        "questordertext",
+        "questcanceltext",
+        "questreporttext",
+        "getrewardtext",
+        "reachedlimittext",
+    },
+    "TA_AdventureNoteMZ": {
+        "advnotemenucommandname",
+        "maineventheadertext",
+        "maineventtitle",
+        "maineventnote",
+        "subeventtitle",
+        "subeventstartnote",
+        "subeventclearnote",
+        "subeventprogressnote",
+        "lockedsubeventtext",
+        "subeventcleartext",
+    },
+    "SceneSoundTest": {
+        "commandname",
+        "name",
+        "description",
+    },
+}
+
+_RESOURCE_KEY_FRAGMENTS = (
+    "audio",
+    "background",
+    "battler",
+    "bgm",
+    "bgs",
+    "character",
+    "color",
+    "cursor",
+    "face",
+    "file",
+    "filename",
+    "font",
+    "foreground",
+    "icon",
+    "image",
+    "jacket",
+    "motion",
+    "movie",
+    "picture",
+    "se",
+    "skin",
+    "sound",
+)
+
+_NON_TEXT_KEY_FRAGMENTS = (
+    "height",
+    "id",
+    "opacity",
+    "origin",
+    "pan",
+    "pitch",
+    "priority",
+    "rate",
+    "scale",
+    "switch",
+    "variable",
+    "volume",
+    "width",
+    "x",
+    "y",
+)
 
 
 def find_data_dir(game_path: str) -> Optional[str]:
@@ -84,6 +214,39 @@ def _escape_inline_newlines(text: str) -> str:
 
 def _unescape_inline_newlines(text: str) -> str:
     return (text or "").replace("\\n", "\n")
+
+
+def _decode_mz_note_value(value: str) -> str:
+    value = _normalize_newlines(value)
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == '"' and stripped[-1] == '"':
+        try:
+            decoded = json.loads(stripped)
+            if isinstance(decoded, str):
+                return _normalize_newlines(decoded)
+        except Exception:
+            pass
+    return value
+
+
+def _encode_mz_note_value(value: str, original_value: str) -> str:
+    value = _normalize_newlines(value)
+    original_stripped = (original_value or "").strip()
+    if len(original_stripped) >= 2 and original_stripped[0] == '"' and original_stripped[-1] == '"':
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def _decode_text_codec(value: str, codec: str) -> str:
+    if codec == "mz_note":
+        return _decode_mz_note_value(value)
+    return _normalize_newlines(value)
+
+
+def _encode_text_codec(value: str, original_value: str, codec: str) -> str:
+    if codec == "mz_note":
+        return _encode_mz_note_value(value, original_value)
+    return _normalize_newlines(value)
 
 
 def _load_json_if_exists(path: str) -> Dict[str, Any]:
@@ -198,6 +361,58 @@ def _decode_choice_marker(comment: str) -> Optional[List[str]]:
     return None
 
 
+def _encode_scroll_marker(original_text: str) -> str:
+    return _encode_marker(SCROLL_MARKER_PREFIX, _normalize_newlines(original_text))
+
+
+def _decode_scroll_marker(comment: str) -> Optional[str]:
+    decoded = _decode_marker(comment, SCROLL_MARKER_PREFIX)
+    return decoded if isinstance(decoded, str) else None
+
+
+def _encode_plugin_command_marker(original_values: Dict[str, str], codecs: Optional[Dict[str, str]] = None) -> str:
+    return _encode_marker(
+        PLUGIN_COMMAND_MARKER_PREFIX,
+        {
+            "values": {str(k): _normalize_newlines(v) for k, v in original_values.items() if isinstance(v, str)},
+            "codecs": {str(k): str(v) for k, v in (codecs or {}).items() if isinstance(v, str)},
+        },
+    )
+
+
+def _decode_plugin_command_marker(comment: str) -> Optional[Dict[str, Any]]:
+    decoded = _decode_marker(comment, PLUGIN_COMMAND_MARKER_PREFIX)
+    if isinstance(decoded, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in decoded.items()):
+        return {"values": decoded, "codecs": {}}
+    if isinstance(decoded, dict) and isinstance(decoded.get("values"), dict):
+        values = decoded.get("values")
+        codecs = decoded.get("codecs", {})
+        if (
+            isinstance(values, dict)
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in values.items())
+            and isinstance(codecs, dict)
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in codecs.items())
+        ):
+            return {"values": values, "codecs": codecs}
+    return None
+
+
+def _encode_plugin_command_text_marker(payload: Any) -> str:
+    return _encode_marker(PLUGIN_COMMAND_TEXT_MARKER_PREFIX, payload)
+
+
+def _decode_plugin_command_text_marker(marker: str) -> Optional[Any]:
+    return _decode_marker(marker, PLUGIN_COMMAND_TEXT_MARKER_PREFIX)
+
+
+def _encode_plugin_param_text_marker(payload: Any) -> str:
+    return _encode_marker(PLUGIN_PARAM_TEXT_MARKER_PREFIX, payload)
+
+
+def _decode_plugin_param_text_marker(marker: str) -> Optional[Any]:
+    return _decode_marker(marker, PLUGIN_PARAM_TEXT_MARKER_PREFIX)
+
+
 def _get_speaker_name(params: List[Any]) -> str:
     if len(params) > 4 and isinstance(params[4], str):
         return _normalize_newlines(params[4])
@@ -216,6 +431,16 @@ def _message_lines_from_commands(cmds: List[Any]) -> List[str]:
     for cmd in cmds:
         code, _indent, params = _event_command_fields(cmd)
         if code != 401:
+            continue
+        lines.append(_normalize_newlines(str(params[0])) if params else "")
+    return lines
+
+
+def _scroll_lines_from_commands(cmds: List[Any]) -> List[str]:
+    lines: List[str] = []
+    for cmd in cmds:
+        code, _indent, params = _event_command_fields(cmd)
+        if code != 405:
             continue
         lines.append(_normalize_newlines(str(params[0])) if params else "")
     return lines
@@ -240,13 +465,29 @@ def _emit_message_lines(
         out_lines.append("##\n")
 
 
-def _export_command_list_to_lines(cmd_list: Any) -> List[str]:
+def _emit_multiline_entry(out_lines: List[str], marker: str, text: str) -> None:
+    text = _normalize_newlines(text)
+    if not text:
+        return
+    out_lines.append(f"#{marker}#\n")
+    for line in text.split("\n"):
+        out_lines.append(f"{line}\n")
+    out_lines.append("##\n")
+
+
+def _emit_plugin_command_lines(out_lines: List[str], marker: str, text: str) -> None:
+    _emit_multiline_entry(out_lines, marker, text)
+
+
+def _export_command_list_to_lines(cmd_list: Any, active_plugins: Optional[Set[str]] = None) -> List[str]:
     if not isinstance(cmd_list, list):
         return []
 
     lines: List[str] = []
     pending_message_marker: Optional[Dict[str, str]] = None
     pending_choice_marker: Optional[List[str]] = None
+    pending_scroll_marker: Optional[str] = None
+    pending_plugin_command_marker: Optional[Dict[str, str]] = None
     i = 0
     while i < len(cmd_list):
         cmd = cmd_list[i]
@@ -262,6 +503,16 @@ def _export_command_list_to_lines(cmd_list: Any) -> List[str]:
             decoded_choices = _decode_choice_marker(comment)
             if decoded_choices is not None:
                 pending_choice_marker = decoded_choices
+                i += 1
+                continue
+            decoded_scroll = _decode_scroll_marker(comment)
+            if decoded_scroll is not None:
+                pending_scroll_marker = decoded_scroll
+                i += 1
+                continue
+            decoded_plugin_command = _decode_plugin_command_marker(comment)
+            if decoded_plugin_command is not None:
+                pending_plugin_command_marker = decoded_plugin_command
                 i += 1
                 continue
 
@@ -332,6 +583,49 @@ def _export_command_list_to_lines(cmd_list: Any) -> List[str]:
             i += 1
             continue
 
+        if code == 105:
+            j = i + 1
+            text_cmds: List[Any] = []
+            while j < len(cmd_list):
+                next_code, _next_indent, _next_params = _event_command_fields(cmd_list[j])
+                if next_code != 405:
+                    break
+                text_cmds.append(cmd_list[j])
+                j += 1
+            scroll_text = "\n".join(_scroll_lines_from_commands(text_cmds))
+            if pending_scroll_marker is not None:
+                scroll_text = pending_scroll_marker
+                pending_scroll_marker = None
+            _emit_multiline_entry(lines, "ScrollText", scroll_text)
+            i = j
+            continue
+
+        if code == 357:
+            plugin_values = _plugin_command_translatable_values(params, active_plugins)
+            if pending_plugin_command_marker is not None:
+                pending_values = pending_plugin_command_marker.get("values", {})
+                pending_codecs = pending_plugin_command_marker.get("codecs", {})
+                if not isinstance(pending_values, dict):
+                    pending_values = {}
+                if not isinstance(pending_codecs, dict):
+                    pending_codecs = {}
+                for key, original in pending_values.items():
+                    if not isinstance(key, str) or not isinstance(original, str):
+                        continue
+                    if key in plugin_values:
+                        codec = plugin_values[key][1]
+                    else:
+                        codec = pending_codecs.get(key, "text") if isinstance(pending_codecs.get(key), str) else "text"
+                    marker = _plugin_command_marker_name(params, key)
+                    _emit_plugin_command_lines(lines, marker, _decode_text_codec(original, codec))
+                pending_plugin_command_marker = None
+            else:
+                for key, (value, codec) in plugin_values.items():
+                    marker = _plugin_command_marker_name(params, key)
+                    _emit_plugin_command_lines(lines, marker, _decode_text_codec(value, codec))
+            i += 1
+            continue
+
         i += 1
 
     return lines
@@ -359,6 +653,7 @@ def export_to_string_scripts(game_path: str, message_queue) -> None:
 
     map_infos_path = os.path.join(data_dir, "MapInfos.json")
     map_infos = _load_json(map_infos_path)
+    active_plugins = _active_plugin_names(game_path)
 
     exported_map_files = 0
     for map_id in _iter_map_ids(data_dir, map_infos):
@@ -389,7 +684,7 @@ def export_to_string_scripts(game_path: str, message_queue) -> None:
                 if not isinstance(page, dict):
                     continue
                 cmd_list = page.get("list", [])
-                page_lines = _export_command_list_to_lines(cmd_list)
+                page_lines = _export_command_list_to_lines(cmd_list, active_plugins)
                 if page_lines:
                     entry_lines.append(f"-----Page{page_idx + 1}-----\n")
                     entry_lines.extend(page_lines)
@@ -406,10 +701,18 @@ def export_to_string_scripts(game_path: str, message_queue) -> None:
     common_path = os.path.join(data_dir, "CommonEvents.json")
     if os.path.isfile(common_path):
         common_events = _load_json(common_path)
-        common_lines = _export_common_events(common_events)
+        common_lines = _export_common_events(common_events, active_plugins)
         if common_lines:
             _write_text_file(os.path.join(string_scripts_path, "CommonEvents.txt"), common_lines)
             message_queue.put(("log", ("success", "公共事件对话导出完成：CommonEvents.txt")))
+
+    troops_path = os.path.join(data_dir, "Troops.json")
+    if os.path.isfile(troops_path):
+        troops = _load_json(troops_path)
+        troop_lines = _export_troops(troops, active_plugins)
+        if troop_lines:
+            _write_text_file(os.path.join(string_scripts_path, "Troops.txt"), troop_lines)
+            message_queue.put(("log", ("success", "战斗事件对话导出完成：Troops.txt")))
 
     db_modified, db_files = _export_database(
         game_path=game_path,
@@ -417,6 +720,7 @@ def export_to_string_scripts(game_path: str, message_queue) -> None:
         map_infos=map_infos,
         out_root=os.path.join(string_scripts_path, "Database"),
         original_store=original_store,
+        active_plugins=active_plugins,
     )
     original_store_modified = original_store_modified or db_modified
     message_queue.put(("log", ("success", f"数据库/系统导出完成：{db_files} 个文件。")))
@@ -450,7 +754,7 @@ def _iter_map_ids(data_dir: str, map_infos: Any) -> List[int]:
     return sorted(x for x in ids if x > 0)
 
 
-def _export_common_events(common_events: Any) -> List[str]:
+def _export_common_events(common_events: Any, active_plugins: Optional[Set[str]] = None) -> List[str]:
     if not isinstance(common_events, list):
         return []
     out_lines: List[str] = []
@@ -459,11 +763,35 @@ def _export_common_events(common_events: Any) -> List[str]:
             continue
         ce_id = common_event.get("id")
         cmd_list = common_event.get("list", [])
-        page_lines = _export_command_list_to_lines(cmd_list)
+        page_lines = _export_command_list_to_lines(cmd_list, active_plugins)
         if page_lines and isinstance(ce_id, int):
             out_lines.append(f"*****Entry{ce_id}*****\n")
             out_lines.append("-----Page1-----\n")
             out_lines.extend(page_lines)
+    return out_lines
+
+
+def _export_troops(troops: Any, active_plugins: Optional[Set[str]] = None) -> List[str]:
+    if not isinstance(troops, list):
+        return []
+    out_lines: List[str] = []
+    for troop in troops:
+        if not isinstance(troop, dict):
+            continue
+        troop_id = troop.get("id")
+        pages = troop.get("pages")
+        if not isinstance(troop_id, int) or not isinstance(pages, list):
+            continue
+        entry_lines: List[str] = [f"*****Entry{troop_id}*****\n"]
+        for page_idx, page in enumerate(pages):
+            if not isinstance(page, dict):
+                continue
+            page_lines = _export_command_list_to_lines(page.get("list", []), active_plugins)
+            if page_lines:
+                entry_lines.append(f"-----Page{page_idx + 1}-----\n")
+                entry_lines.extend(page_lines)
+        if any(line.startswith("#") for line in entry_lines):
+            out_lines.extend(entry_lines)
     return out_lines
 
 
@@ -474,6 +802,7 @@ def _export_database(
     map_infos: Any,
     out_root: str,
     original_store: Dict[str, Any],
+    active_plugins: Set[str],
 ) -> Tuple[bool, int]:
     file_system.ensure_dir_exists(out_root)
     original_store_modified = False
@@ -508,6 +837,16 @@ def _export_database(
                 if not isinstance(val, str):
                     continue
                 add_entry_line(entry_lines, marker, f"{json_name}:{idx}:{attr_name}", val, multiline_inline)
+            note = obj.get("note")
+            if isinstance(note, str):
+                for marker, text in _extract_note_texts(json_name, note, active_plugins):
+                    add_entry_line(
+                        entry_lines,
+                        marker,
+                        f"{json_name}:{idx}:note:{marker}",
+                        text,
+                        True,
+                    )
             if any(line.startswith("#") for line in entry_lines):
                 out_lines.extend(entry_lines)
                 out_lines.append("\n")
@@ -709,6 +1048,289 @@ def _safe_marker_name(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]+", "_", text).strip("_") or "Value"
 
 
+def _try_parse_json_string(value: str) -> Optional[Any]:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{\"":
+        return None
+    try:
+        return json.loads(stripped)
+    except Exception:
+        return None
+
+
+def _plugin_param_allowed_leaf(plugin_name: str, path: Sequence[str]) -> bool:
+    if not path:
+        return False
+    leaf = path[-1].lower()
+    full = ".".join(path).lower()
+    allowed = _PLUGIN_PARAM_PLUGIN_KEYS.get(plugin_name, set())
+    if leaf in allowed or full in allowed:
+        return True
+    if leaf.endswith(("text", "message", "description", "desc", "title", "name", "note", "help")):
+        if any(fragment in leaf for fragment in _RESOURCE_KEY_FRAGMENTS):
+            return False
+        return True
+    return False
+
+
+def _plugin_param_excluded_leaf(path: Sequence[str]) -> bool:
+    if not path:
+        return True
+    leaf = path[-1].lower()
+    if any(fragment in leaf for fragment in _RESOURCE_KEY_FRAGMENTS):
+        return True
+    if any(fragment == leaf or leaf.endswith(fragment) for fragment in _NON_TEXT_KEY_FRAGMENTS):
+        return True
+    return False
+
+
+def _extract_plugin_param_texts(plugin_name: str, value: str) -> List[Tuple[Tuple[Any, ...], str, str]]:
+    result: List[Tuple[Tuple[Any, ...], str, str]] = []
+    seen: Set[Tuple[Any, ...]] = set()
+
+    def add(path: Tuple[Any, ...], text: str, codec: str = "text") -> None:
+        if path in seen:
+            return
+        text = _decode_text_codec(text, codec)
+        if text and JAPANESE_TEXT_RE.search(text):
+            seen.add(path)
+            result.append((path, text, codec))
+
+    def walk(obj: Any, path: Tuple[Any, ...], key_path: Tuple[str, ...]) -> None:
+        if isinstance(obj, dict):
+            for key, child in obj.items():
+                key_text = str(key)
+                walk(child, path + (key_text,), key_path + (key_text,))
+            return
+        if isinstance(obj, list):
+            for idx, child in enumerate(obj):
+                walk(child, path + (idx,), key_path)
+            return
+        if not isinstance(obj, str):
+            return
+
+        nested = _try_parse_json_string(obj)
+        if isinstance(nested, (dict, list)):
+            walk(nested, path + ("{}",), key_path)
+            return
+
+        if not _is_translatable_plugin_value(obj):
+            return
+        if _plugin_param_excluded_leaf(key_path):
+            return
+        if _plugin_param_allowed_leaf(plugin_name, key_path):
+            codec = "mz_note" if key_path and key_path[-1].lower().endswith("note") else "text"
+            add(path, obj, codec)
+
+    parsed = _try_parse_json_string(value)
+    if isinstance(parsed, (dict, list)):
+        walk(parsed, tuple(), tuple())
+    elif _is_translatable_plugin_value(value):
+        add(tuple(), value)
+    return result
+
+
+def _decode_plugin_param_value(value: str, path: Sequence[Any]) -> Optional[str]:
+    def walk(current: Any, remaining: Sequence[Any]) -> Optional[str]:
+        if not remaining:
+            return current if isinstance(current, str) else None
+        step = remaining[0]
+        rest = remaining[1:]
+        if step == "{}":
+            if not isinstance(current, str):
+                return None
+            parsed = _try_parse_json_string(current)
+            if parsed is None:
+                return None
+            return walk(parsed, rest)
+        if isinstance(step, int):
+            if isinstance(current, list) and 0 <= step < len(current):
+                return walk(current[step], rest)
+            return None
+        if isinstance(current, dict):
+            return walk(current.get(str(step)), rest)
+        return None
+
+    if not path:
+        return value
+    parsed_root = _try_parse_json_string(value)
+    if parsed_root is None:
+        return None
+    return walk(parsed_root, path)
+
+
+def _replace_plugin_param_value(value: str, path: Sequence[Any], new_text: str) -> Optional[str]:
+    if not path:
+        return new_text
+
+    def walk(current: Any, remaining: Sequence[Any]) -> Tuple[Any, bool]:
+        if not remaining:
+            if isinstance(current, str) and current != new_text:
+                return new_text, True
+            return current, False
+        step = remaining[0]
+        rest = remaining[1:]
+        if step == "{}":
+            if not isinstance(current, str):
+                return current, False
+            parsed = _try_parse_json_string(current)
+            if parsed is None:
+                return current, False
+            updated, changed = walk(parsed, rest)
+            if not changed:
+                return current, False
+            return json.dumps(updated, ensure_ascii=False, separators=(",", ":")), True
+        if isinstance(step, int):
+            if not isinstance(current, list) or step < 0 or step >= len(current):
+                return current, False
+            updated_child, changed = walk(current[step], rest)
+            if not changed:
+                return current, False
+            new_list = list(current)
+            new_list[step] = updated_child
+            return new_list, True
+        if not isinstance(current, dict) or str(step) not in current:
+            return current, False
+        updated_child, changed = walk(current[str(step)], rest)
+        if not changed:
+            return current, False
+        new_dict = dict(current)
+        new_dict[str(step)] = updated_child
+        return new_dict, True
+
+    parsed_root = _try_parse_json_string(value)
+    if parsed_root is None:
+        return None
+    updated_root, changed = walk(parsed_root, path)
+    if not changed:
+        return value
+    return json.dumps(updated_root, ensure_ascii=False, separators=(",", ":"))
+
+
+def _replace_plugin_param_translation(value: str, path: Sequence[Any], translated_text: str, codec: str) -> Optional[str]:
+    original_raw = _decode_plugin_param_value(value, path)
+    if original_raw is None:
+        return None
+    encoded = _encode_text_codec(translated_text, original_raw, codec)
+    return _replace_plugin_param_value(value, path, encoded)
+
+
+def _active_plugin_names(game_path: str) -> Set[str]:
+    plugins_path = os.path.join(game_path, "js", "plugins.js")
+    if not os.path.isfile(plugins_path):
+        return set()
+    try:
+        _prefix, _suffix, plugins = _load_plugins_js(plugins_path)
+    except Exception:
+        return set()
+    names: Set[str] = set()
+    for plugin in plugins:
+        if not isinstance(plugin, dict) or plugin.get("status") is False:
+            continue
+        name = plugin.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
+def _get_nested_value(obj: Any, path: Sequence[str]) -> Optional[str]:
+    current = obj
+    for part in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current if isinstance(current, str) else None
+
+
+def _set_nested_value(obj: Any, path: Sequence[str], value: str) -> bool:
+    current = obj
+    for part in path[:-1]:
+        if not isinstance(current, dict):
+            return False
+        current = current.get(part)
+    if not isinstance(current, dict) or not path:
+        return False
+    key = path[-1]
+    if current.get(key) == value:
+        return False
+    current[key] = value
+    return True
+
+
+def _plugin_command_specs(plugin_name: str, command_name: str, active_plugins: Optional[Set[str]] = None) -> Tuple[_PluginCommandArgSpec, ...]:
+    if active_plugins is not None and plugin_name not in active_plugins:
+        return ()
+    by_command = _PLUGIN_COMMAND_TEXT_SPECS.get(plugin_name)
+    if not by_command:
+        return ()
+    return by_command.get(command_name, ())
+
+
+def _plugin_command_translatable_values(params: List[Any], active_plugins: Optional[Set[str]] = None) -> Dict[str, Tuple[str, str]]:
+    plugin_name = str(params[0]) if len(params) > 0 and isinstance(params[0], str) else ""
+    command_name = str(params[1]) if len(params) > 1 and isinstance(params[1], str) else ""
+    args = params[3] if len(params) > 3 and isinstance(params[3], dict) else {}
+    if not plugin_name or not command_name or not isinstance(args, dict):
+        return {}
+    result: Dict[str, Tuple[str, str]] = {}
+    for spec in _plugin_command_specs(plugin_name, command_name, active_plugins):
+        raw = _get_nested_value(args, spec.path)
+        if not isinstance(raw, str) or raw == "":
+            continue
+        text = _decode_text_codec(raw, spec.codec)
+        if JAPANESE_TEXT_RE.search(text):
+            key = ".".join(spec.path)
+            result[key] = (raw, spec.codec)
+    return result
+
+
+def _plugin_command_marker_name(params: List[Any], arg_key: str) -> str:
+    plugin_name = str(params[0]) if len(params) > 0 and isinstance(params[0], str) else "Plugin"
+    command_name = str(params[1]) if len(params) > 1 and isinstance(params[1], str) else "Command"
+    return f"PluginCommand_{_safe_marker_name(plugin_name)}_{_safe_marker_name(command_name)}_{_safe_marker_name(arg_key)}"
+
+
+def _note_tag_specs(json_name: str, active_plugins: Set[str]) -> Tuple[_NoteTagSpec, ...]:
+    specs = _NOTE_TAG_SPECS_BY_JSON.get(json_name, ())
+    return tuple(spec for spec in specs if all(plugin in active_plugins for plugin in spec.plugins))
+
+
+def _extract_note_texts(json_name: str, note: str, active_plugins: Set[str]) -> List[Tuple[str, str]]:
+    note = _normalize_newlines(note)
+    result: List[Tuple[str, str]] = []
+    for spec in _note_tag_specs(json_name, active_plugins):
+        for tag in spec.tags:
+            value = _find_note_tag_value(note, tag)
+            if isinstance(value, str) and value and JAPANESE_TEXT_RE.search(value):
+                result.append((spec.marker, value))
+                break
+    return result
+
+
+def _find_note_tag_value(note: str, tag: str) -> Optional[str]:
+    pattern = re.compile(rf"<{re.escape(tag)}(?::(?P<value>.*?))?>", re.DOTALL)
+    m = pattern.search(note)
+    if not m:
+        return None
+    value = m.group("value")
+    return _normalize_newlines(value.strip()) if isinstance(value, str) else None
+
+
+def _replace_note_tag_value(note: str, tags: Sequence[str], new_value: str) -> Tuple[str, bool]:
+    note = _normalize_newlines(note)
+    for tag in tags:
+        pattern = re.compile(rf"<{re.escape(tag)}(?::(?P<value>.*?))?>", re.DOTALL)
+        m = pattern.search(note)
+        if not m or m.group("value") is None:
+            continue
+        replacement = f"<{tag}:{_normalize_newlines(new_value)}>"
+        new_note = note[: m.start()] + replacement + note[m.end() :]
+        return new_note, new_note != note
+    return note, False
+
+
 def _export_plugins(game_path: str, out_root: str, original_store: Dict[str, Any]) -> Tuple[bool, int]:
     plugins_path = os.path.join(game_path, "js", "plugins.js")
     if not os.path.isfile(plugins_path):
@@ -729,12 +1351,19 @@ def _export_plugins(game_path: str, out_root: str, original_store: Dict[str, Any
             continue
         entry_lines: List[str] = [f"*****Entry{idx}*****\n"]
         for param_name, value in params.items():
-            if not _is_translatable_plugin_value(value):
+            if not isinstance(value, str):
                 continue
-            marker = f"Param_{_safe_marker_name(str(param_name))}"
-            original, created = _get_original_text(original_store, f"plugins.js:{idx}:parameters.{param_name}", value)
-            modified = modified or created
-            _append_single_entry(entry_lines, marker, original, multiline_inline=True)
+            for value_path, text, codec in _extract_plugin_param_texts(str(plugin.get("name") or ""), value):
+                payload = {"param": str(param_name), "path": list(value_path), "codec": codec}
+                marker = _encode_plugin_param_text_marker(payload)
+                store_path = ".".join(str(x) for x in value_path) if value_path else "$"
+                original, created = _get_original_text(
+                    original_store,
+                    f"plugins.js:{idx}:parameters.{param_name}:{store_path}",
+                    text,
+                )
+                modified = modified or created
+                _append_single_entry(entry_lines, marker, original, multiline_inline=True)
         if any(line.startswith("#") for line in entry_lines):
             out_lines.extend(entry_lines)
             out_lines.append("\n")
@@ -796,7 +1425,7 @@ def _parse_string_scripts_text(text: str) -> List[_ParsedEntry]:
         marker = m.group(1)
         i += 1
 
-        if marker in ("Message", "StringPicture"):
+        if marker in ("Message", "StringPicture", "ScrollText") or marker.startswith("PluginCommand_"):
             buf: List[str] = []
             while i < len(lines) and lines[i].strip() != "##":
                 buf.append(lines[i].rstrip("\n"))
@@ -837,9 +1466,15 @@ def _build_translation_maps(origin_text: str, translated_text: str) -> Dict[str,
         if o.marker == "Choice":
             if isinstance(o.content, list) and isinstance(t.content, list):
                 for j in range(min(len(o.content), len(t.content))):
-                    marker_map[o.content[j]] = t.content[j]
+                    original_choice = o.content[j]
+                    translated_choice = t.content[j]
+                    existing = marker_map.get(original_choice)
+                    if existing is None or existing == original_choice:
+                        marker_map[original_choice] = translated_choice
         elif isinstance(o.content, str) and isinstance(t.content, str):
-            marker_map[o.content] = t.content
+            existing = marker_map.get(o.content)
+            if existing is None or existing == o.content:
+                marker_map[o.content] = t.content
     return maps
 
 
@@ -861,6 +1496,12 @@ def _is_our_marker_command(cmd: Any) -> Tuple[Optional[str], Any]:
     decoded_choices = _decode_choice_marker(comment)
     if decoded_choices is not None:
         return "choice", decoded_choices
+    decoded_scroll = _decode_scroll_marker(comment)
+    if decoded_scroll is not None:
+        return "scroll", decoded_scroll
+    decoded_plugin_command = _decode_plugin_command_marker(comment)
+    if decoded_plugin_command is not None:
+        return "plugin_command", decoded_plugin_command
     return None, None
 
 
@@ -1004,6 +1645,107 @@ def _update_event_command_list(cmd_list: Any, translation_maps: Dict[str, Dict[s
             i += 1
             continue
 
+        if code == 105:
+            j = i + 1
+            text_cmds: List[Any] = []
+            while j < len(cmd_list):
+                next_code, _next_indent, _next_params = _event_command_fields(cmd_list[j])
+                if next_code != 405:
+                    break
+                text_cmds.append(cmd_list[j])
+                j += 1
+            original_text = "\n".join(_scroll_lines_from_commands(text_cmds))
+            had_marker = pending_kind == "scroll" and isinstance(pending_payload, str)
+            if had_marker:
+                original_text = _normalize_newlines(pending_payload)
+            new_text = _translation_for(translation_maps, "ScrollText", original_text)
+            if new_text is not None:
+                new_list.append(_new_event_command(108, indent, [_encode_scroll_marker(original_text)]))
+                new_list.append(cmd)
+                for line in new_text.split("\n"):
+                    new_list.append(_new_event_command(405, indent, [line]))
+                modified = True
+            elif had_marker:
+                new_list.append(cmd)
+                for line in original_text.split("\n"):
+                    new_list.append(_new_event_command(405, indent, [line]))
+                modified = True
+            else:
+                if marker_cmd is not None:
+                    new_list.append(marker_cmd)
+                new_list.append(cmd)
+                new_list.extend(text_cmds)
+            i = j
+            continue
+
+        if code == 357:
+            current_values = _plugin_command_translatable_values(params)
+            had_marker = pending_kind == "plugin_command" and isinstance(pending_payload, dict)
+            original_values: Dict[str, str] = {}
+            original_codecs: Dict[str, str] = {}
+            for key, (value, _codec) in current_values.items():
+                original_values[key] = value
+                original_codecs[key] = _codec
+            if had_marker:
+                marker_values = pending_payload.get("values", {})
+                marker_codecs = pending_payload.get("codecs", {})
+                if not isinstance(marker_values, dict):
+                    marker_values = {}
+                if not isinstance(marker_codecs, dict):
+                    marker_codecs = {}
+                for key, value in marker_values.items():
+                    if isinstance(key, str) and isinstance(value, str) and key in current_values:
+                        original_values[key] = value
+                        if isinstance(marker_codecs.get(key), str):
+                            original_codecs[key] = marker_codecs[key]
+
+            new_cmd = copy.deepcopy(cmd)
+            new_params = list(params)
+            args = copy.deepcopy(new_params[3]) if len(new_params) > 3 and isinstance(new_params[3], dict) else None
+            changed_values = False
+            if isinstance(args, dict):
+                for key, original_raw in original_values.items():
+                    if key in current_values:
+                        _current_raw, codec = current_values[key]
+                    else:
+                        codec = original_codecs.get(key, "text")
+                    original_text = _decode_text_codec(original_raw, codec)
+                    marker = _plugin_command_marker_name(params, key)
+                    translated = _translation_for(translation_maps, marker, original_text)
+                    if translated is None:
+                        continue
+                    encoded = _encode_text_codec(translated, original_raw, codec)
+                    if _set_nested_value(args, key.split("."), encoded):
+                        changed_values = True
+                if changed_values:
+                    new_params[3] = args
+                    new_cmd["parameters"] = new_params
+
+            if changed_values:
+                new_list.append(_new_event_command(108, indent, [_encode_plugin_command_marker(original_values, original_codecs)]))
+                new_list.append(new_cmd)
+                modified = True
+            elif had_marker:
+                restored_cmd = copy.deepcopy(cmd)
+                restored_params = list(params)
+                restored_args = copy.deepcopy(restored_params[3]) if len(restored_params) > 3 and isinstance(restored_params[3], dict) else None
+                restored_changed = False
+                if isinstance(restored_args, dict):
+                    for key, original_raw in original_values.items():
+                        if _set_nested_value(restored_args, key.split("."), original_raw):
+                            restored_changed = True
+                    if restored_changed:
+                        restored_params[3] = restored_args
+                        restored_cmd["parameters"] = restored_params
+                new_list.append(restored_cmd)
+                modified = True
+            else:
+                if marker_cmd is not None:
+                    new_list.append(marker_cmd)
+                new_list.append(cmd)
+            i += 1
+            continue
+
         if marker_cmd is not None:
             # Drop stale adapter markers that are not attached to a supported command.
             modified = True
@@ -1077,6 +1819,29 @@ def import_from_string_scripts(game_path: str, message_queue) -> int:
                             touched = True
                 if touched:
                     _save_json(common_path, common_events)
+                    modified_files += 1
+
+    troops_origin = os.path.join(backup_path, "Troops.txt")
+    troops_translated = os.path.join(string_scripts_path, "Troops.txt")
+    if os.path.isfile(troops_origin) and os.path.isfile(troops_translated):
+        maps = _load_translation_maps_for_pair(troops_origin, troops_translated)
+        if maps:
+            troops_path = os.path.join(data_dir, "Troops.json")
+            if os.path.isfile(troops_path):
+                troops = _load_json(troops_path)
+                touched = False
+                if isinstance(troops, list):
+                    for troop in troops:
+                        if not isinstance(troop, dict):
+                            continue
+                        pages = troop.get("pages")
+                        if not isinstance(pages, list):
+                            continue
+                        for page in pages:
+                            if isinstance(page, dict) and _update_event_command_list(page.get("list", []), maps):
+                                touched = True
+                if touched:
+                    _save_json(troops_path, troops)
                     modified_files += 1
 
     db_dir = os.path.join(string_scripts_path, "Database")
@@ -1173,6 +1938,20 @@ def _import_database(game_path: str, data_dir: str, db_dir: str) -> int:
                     new_value = _unescape_inline_newlines(value) if multiline_inline else value
                     if data[idx].get(attr) != new_value:
                         data[idx][attr] = new_value
+                        touched = True
+            note = data[idx].get("note")
+            if isinstance(note, str):
+                for spec in _NOTE_TAG_SPECS_BY_JSON.get(json_name, ()):
+                    value = entry.get(spec.marker)
+                    if not isinstance(value, str):
+                        continue
+                    new_value = _unescape_inline_newlines(value)
+                    if any(_find_note_tag_value(note, tag) == new_value for tag in spec.tags):
+                        continue
+                    new_note, changed = _replace_note_tag_value(note, spec.tags, new_value)
+                    if changed:
+                        note = new_note
+                        data[idx]["note"] = new_note
                         touched = True
         if touched:
             _save_json(json_path, data)
@@ -1330,14 +2109,33 @@ def _import_plugins(game_path: str, db_dir: str) -> int:
         params = plugins[idx].get("parameters")
         if not isinstance(params, dict):
             continue
-        for param_name in list(params.keys()):
-            marker = f"Param_{_safe_marker_name(str(param_name))}"
-            value = entry.get(marker)
-            if isinstance(value, str):
-                new_value = _unescape_inline_newlines(value)
-                if params.get(param_name) != new_value:
-                    params[param_name] = new_value
-                    touched = True
+        for marker, value in entry.items():
+            if not isinstance(value, str):
+                continue
+            payload = _decode_plugin_param_text_marker(marker)
+            if not isinstance(payload, dict):
+                continue
+            param_name = payload.get("param")
+            value_path = payload.get("path", [])
+            codec = payload.get("codec", "text")
+            if not isinstance(param_name, str) or param_name not in params:
+                continue
+            if not isinstance(value_path, list):
+                value_path = []
+            if not isinstance(codec, str):
+                codec = "text"
+            current_value = params.get(param_name)
+            if not isinstance(current_value, str):
+                continue
+            new_param_value = _replace_plugin_param_translation(
+                current_value,
+                value_path,
+                _unescape_inline_newlines(value),
+                codec,
+            )
+            if isinstance(new_param_value, str) and new_param_value != current_value:
+                params[param_name] = new_param_value
+                touched = True
     if touched:
         _save_plugins_js(plugins_path, prefix, suffix, plugins)
         return 1

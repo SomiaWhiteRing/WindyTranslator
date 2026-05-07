@@ -11,7 +11,7 @@ import threading
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed # 使用 as_completed
 from core.api_clients import deepseek
-from core.utils import file_system, text_processing, default_database
+from core.utils import file_system, text_processing, default_database, control_tokens
 from core.utils.engine_detection import detect_game_engine
 from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
 from collections import OrderedDict
@@ -19,6 +19,14 @@ from collections import OrderedDict
 log = logging.getLogger(__name__)
 
 TRANSLATION_METADATA_PREFIX_RE = re.compile(r'^(?:\s*\[(?:MARKER|FACE):[^\]]+\]\s*)+')
+
+CONTROL_PLACEHOLDER_INSTRUCTION = """
+
+### 控制码占位符保护
+输入文本中的 PUA 字符（例如 \uE100、\uE101 以及同一区间的相似字符）代表游戏控制码。
+这些占位符不是文字内容，必须逐字保留，不能删除、复制、换序、替换、解释或翻译；占位符所在行也必须保持不变。
+普通日文引号（「」『』）不是控制码，可以按目标语言需要自然保留或调整。
+"""
 
 # --- 批量翻译工作单元 (与上一版几乎一致，增加了 current_processing_file_name 的使用) ---
 def _translate_batch_with_retry(
@@ -39,6 +47,7 @@ def _translate_batch_with_retry(
     max_retries = config.get("max_retries", 3)
     context_lines_config = config.get("context_lines", 10) 
     apply_gbk_compatibility = config.get("_apply_gbk_compatibility_postprocess", True)
+    control_profile = config.get("_control_code_profile") or control_tokens.default_profile()
     min_batch_size = 1
     
     batch_original_texts_for_logging = [item["text_to_translate"] for item in batch_metadata_items]
@@ -54,9 +63,10 @@ def _translate_batch_with_retry(
     # 在批次范围内去重人物词典不一致的噪声告警（按 昵称-对应原名 配对）
     warned_missing_main_names = set()
 
-    processed_original_texts_for_glossary_matching = [
-        text_processing.pre_process_text_for_llm(item["text_to_translate"]) for item in batch_metadata_items
+    protected_batch_texts = [
+        control_tokens.protect_text(item["text_to_translate"], control_profile) for item in batch_metadata_items
     ]
+    processed_original_texts_for_glossary_matching = [protected.text for protected in protected_batch_texts]
     combined_processed_lower_for_glossary = "\n".join(processed_original_texts_for_glossary_matching).lower()
 
     for attempt in range(max_retries + 1):
@@ -117,7 +127,7 @@ def _translate_batch_with_retry(
             original_text_content = item_data["text_to_translate"]
             marker_type = item_data["original_marker"]
             speaker_id = item_data["speaker_id"] 
-            pua_processed_text = text_processing.pre_process_text_for_llm(original_text_content)
+            pua_processed_text = protected_batch_texts[i].text
             marker_tag_for_prompt = f"[MARKER: {marker_type}]"
             face_tag_for_prompt = ""
             if speaker_id: 
@@ -131,7 +141,7 @@ def _translate_batch_with_retry(
             source_language=source_language, target_language=target_language,
             character_glossary_section=character_glossary_section, entity_glossary_section=entity_glossary_section,
             context_section=context_section, batch_text=batch_text_for_prompt_payload
-        ) + timestamp_suffix
+        ) + CONTROL_PLACEHOLDER_INSTRUCTION + timestamp_suffix
 
         log.debug(f"调用 API 翻译批次 (文件: {current_processing_file_name or 'N/A'}, 大小: {current_batch_size}, 尝试 {attempt+1}/{max_retries+1})")
         current_api_messages_payload = [{"role": "user", "content": current_final_prompt_payload}]
@@ -223,19 +233,29 @@ def _translate_batch_with_retry(
                 result_key = original_item_data["original_json_key"] 
                 original_text_for_validation = original_item_data["text_to_translate"] # 这个仍然是用于翻译和验证的文本
                 raw_translation_for_this_item = final_translated_lines_from_api[i] 
-                restored_text_for_validation = text_processing.restore_pua_placeholders(raw_translation_for_this_item)
-                # 在验证前进行最小化修复，避免因模型引入/丢失控制码导致的频繁失败
-                repaired_text_for_validation = text_processing.repair_translation_format(
-                    original_text_for_validation, restored_text_for_validation
+                protected_text_for_item = protected_batch_texts[i]
+                restore_ok, restored_text_for_validation, restore_reason = control_tokens.restore_protected_text(
+                    raw_translation_for_this_item, protected_text_for_item
                 )
-                post_processed_text_for_validation = text_processing.post_process_translation(
-                    repaired_text_for_validation,
-                    original_text_for_validation,
-                    apply_gbk_compatibility=apply_gbk_compatibility
-                )
+                if restore_ok:
+                    # 在验证前进行最小化修复；控制码相关内容由 control_tokens 精确校验，不做猜测式修复。
+                    repaired_text_for_validation = text_processing.repair_translation_format(
+                        original_text_for_validation, restored_text_for_validation
+                    )
+                    post_processed_text_for_validation = text_processing.post_process_translation(
+                        repaired_text_for_validation,
+                        original_text_for_validation,
+                        apply_gbk_compatibility=apply_gbk_compatibility
+                    )
+                else:
+                    repaired_text_for_validation = restored_text_for_validation
+                    post_processed_text_for_validation = restored_text_for_validation
                 # 方案A：StringPicture 强制行数一致校验（包含空行）
                 marker_for_item = original_item_data.get("original_marker")
-                if marker_for_item == 'StringPicture':
+                if not restore_ok:
+                    is_line_valid = False
+                    line_validation_reason = f"控制码占位符还原失败: {restore_reason}"
+                elif marker_for_item == 'StringPicture':
                     orig_lines = original_text_for_validation.splitlines()
                     tran_lines = post_processed_text_for_validation.splitlines()
                     if len(orig_lines) != len(tran_lines):
@@ -398,15 +418,17 @@ def _translate_stringpicture_by_lines(
     error_log_lock,
 ):
     try:
+        control_profile = config.get("_control_code_profile") or control_tokens.default_profile()
         orig_lines = original_block_text.splitlines()
         # 仅对“有实质内容”的行送翻译：排除纯空白（含全角空格）
         non_empty_lines = [line for line in orig_lines if line.strip() != ""]
         if len(non_empty_lines) == 0:
             return True, original_block_text, original_block_text, ""
 
+        protected_lines = [control_tokens.protect_text(line, control_profile) for line in non_empty_lines]
         numbered_lines_for_prompt = []
         for idx, line in enumerate(non_empty_lines):
-            pua_processed = text_processing.pre_process_text_for_llm(line)
+            pua_processed = protected_lines[idx].text
             marker_tag = f"[MARKER: {marker_type}]"
             face_tag = f"[FACE: {speaker_id}]" if speaker_id else ""
             numbered_lines_for_prompt.append(f"{marker_tag} {face_tag} {idx+1}.{pua_processed}".strip())
@@ -419,7 +441,7 @@ def _translate_stringpicture_by_lines(
             entity_glossary_section=entity_glossary_section or "",
             context_section=context_section or "",
             batch_text=batch_text_for_prompt_payload
-        )
+        ) + CONTROL_PLACEHOLDER_INSTRUCTION
 
         api_messages = [{"role": "user", "content": final_prompt}]
         api_kwargs = {}
@@ -473,7 +495,10 @@ def _translate_stringpicture_by_lines(
         repaired_lines = []; post_processed_lines = []
         for idx, orig_line in enumerate(non_empty_lines, start=1):
             raw_tran = numbered_translations[idx]
-            restored = text_processing.restore_pua_placeholders(raw_tran)
+            restore_ok, restored, restore_reason = control_tokens.restore_protected_text(raw_tran, protected_lines[idx - 1])
+            if not restore_ok:
+                _log_batch_error(error_log_path, error_log_lock, "按行回退(控制码还原失败)", non_empty_lines, restore_reason, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, failed_item_index=idx-1, raw_item_translation=raw_tran, file_name_for_log=current_processing_file_name)
+                return False, None, None, f"控制码还原失败: {restore_reason}"
             repaired = text_processing.repair_translation_format(orig_line, restored)
             postp = text_processing.post_process_translation(
                 repaired,
@@ -637,10 +662,13 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         detected_game = detect_game_engine(game_path)
         apply_gbk_compatibility = not detected_game or detected_game.engine == "rm200x"
         current_translate_config["_apply_gbk_compatibility_postprocess"] = apply_gbk_compatibility
+        control_profile = control_tokens.profile_from_game(game_path)
+        current_translate_config["_control_code_profile"] = control_profile
         if detected_game and not apply_gbk_compatibility:
             message_queue.put(("log", ("normal", f"检测到 {detected_game.engine}：跳过 RM2000/2003 的 GBK 字符兼容化后处理。")))
         else:
             message_queue.put(("log", ("normal", "启用 RM2000/2003 的 GBK 字符兼容化后处理。")))
+        message_queue.put(("log", ("normal", f"控制码保护配置: {control_profile.summary}")))
         api_url = current_translate_config.get("api_url", "").strip()
         api_key = current_translate_config.get("api_key", "").strip()
         model_name = current_translate_config.get("model", "").strip()
