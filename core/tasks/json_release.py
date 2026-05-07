@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger(__name__)
 
-MESSAGE_BLOCK_MARKERS = {"Message", "StringPicture"}
+MULTILINE_BLOCK_MARKERS = {"Message", "StringPicture", "ScrollText"}
 DEFAULT_RELEASE_WORKERS = min(4, max(1, os.cpu_count() or 1))
 
 
@@ -19,6 +19,10 @@ def _extract_marker_type(line):
         if end_index > 1:
             return stripped[1:end_index]
     return None
+
+
+def _is_multiline_block_marker(marker):
+    return marker in MULTILINE_BLOCK_MARKERS or marker.startswith("PluginCommand_")
 
 
 def _format_translated_line(original_line_no_nl, translated_text):
@@ -109,7 +113,7 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
         new_lines.append(line)
         i += 1
 
-        if original_marker_type in MESSAGE_BLOCK_MARKERS:
+        if _is_multiline_block_marker(original_marker_type):
             temp_block_lines = []
             while i < len(lines) and lines[i].strip() != "##":
                 temp_block_lines.append(lines[i])
