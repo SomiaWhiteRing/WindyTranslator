@@ -6,6 +6,7 @@ import io # 用于将字符串模拟成文件给 csv reader
 import logging
 import time
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.api_clients import gemini, deepseek # 导入 Gemini 或 OpenAI 兼容客户端模块
 from core.utils import file_system, text_processing, default_database
 # 导入默认配置以获取默认文件名
@@ -16,6 +17,29 @@ log = logging.getLogger(__name__)
 
 PROVIDER_GEMINI = 'gemini'
 PROVIDER_OPENAI = 'openai'
+
+DEFAULT_DICT_MAX_PROMPT_CHARS = 500_000
+DEFAULT_DICT_CHUNK_OVERLAP_LINES = 10
+DEFAULT_DICT_MIN_TERM_FREQUENCY = 2
+DEFAULT_DICT_MAX_REFERENCE_CHARS = 120_000
+DEFAULT_DICT_CHUNK_CONCURRENCY = 3
+DEFAULT_DICT_MAX_RETRIES_PER_CHUNK = 3
+DEFAULT_DICT_FAILED_CHUNK_RETRY_ROUNDS = 1
+DEFAULT_DICT_ALLOW_PARTIAL_RESULTS = True
+
+
+def _strip_code_fence(text):
+    """移除模型常见的 Markdown 代码块包裹，保留内部 CSV 内容。"""
+    clean_text = (text or "").strip()
+    if not clean_text.startswith("```"):
+        return clean_text
+
+    lines = clean_text.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
 # --- CSV 解析辅助函数 ---
 def _parse_csv_response(csv_response_text, expected_columns, message_queue):
@@ -38,8 +62,8 @@ def _parse_csv_response(csv_response_text, expected_columns, message_queue):
         return parsed_data
 
     try:
-        # 移除响应前后可能存在的空白或```csv标记
-        clean_csv_response = csv_response_text.strip().strip('```csv').strip('```').strip()
+        # 移除响应前后可能存在的空白或 ```csv 标记
+        clean_csv_response = _strip_code_fence(csv_response_text)
         if not clean_csv_response:
             log.warning("清理后的字典模型 CSV 响应为空。")
             message_queue.put(("log", ("warning", "字典模型 API 返回的 CSV 内容为空或仅包含标记。")))
@@ -77,9 +101,39 @@ def _parse_csv_response(csv_response_text, expected_columns, message_queue):
 RE_RETRY_DELAY = re.compile(r"retry(?: in)?\s*(?P<seconds>\d+(?:\.\d+)?)s", re.IGNORECASE)
 RE_RETRYINFO_DELAY = re.compile(r"'retryDelay':\s*'(?P<seconds>\d+)s'", re.IGNORECASE)
 DEFAULT_RETRY_WAIT = 20
+DEFAULT_TRANSIENT_RETRY_WAIT = 5
 MAX_RETRY_WAIT = 60
 MAX_WORLD_DICT_RETRIES = 3
 RATE_LIMIT_KEYWORDS = ("resource_exhausted", "429", "quota", "rate limit", "频率超限", "超限")
+TRANSIENT_ERROR_KEYWORDS = (
+    "500",
+    "502",
+    "503",
+    "504",
+    "internal server error",
+    "bad gateway",
+    "gateway timeout",
+    "connection error",
+    "api connection",
+    "timeout",
+    "timed out",
+    "upstream error",
+    "do_request_failed",
+    "bad_response_status_code",
+    "temporarily unavailable",
+    "服务暂时不可用",
+    "连接",
+)
+CONTEXT_LIMIT_KEYWORDS = (
+    "input token count exceeds",
+    "maximum number of tokens",
+    "context length",
+    "too many tokens",
+    "prompt is too long",
+    "tokens allowed",
+    "请求过长",
+    "上下文",
+)
 
 def _extract_retry_delay_seconds(error_message):
     if not error_message:
@@ -99,9 +153,19 @@ def _extract_retry_delay_seconds(error_message):
     return None
 
 def _call_world_dict_model_with_retry(request_callable, stage_desc, message_queue):
+    return _call_world_dict_model_with_retry_limit(
+        request_callable,
+        stage_desc,
+        message_queue,
+        MAX_WORLD_DICT_RETRIES,
+    )
+
+
+def _call_world_dict_model_with_retry_limit(request_callable, stage_desc, message_queue, max_retries):
     last_error = None
     wait_seconds = DEFAULT_RETRY_WAIT
-    for attempt in range(1, MAX_WORLD_DICT_RETRIES + 1):
+    max_retries = max(1, _coerce_int(max_retries, MAX_WORLD_DICT_RETRIES, minimum=1))
+    for attempt in range(1, max_retries + 1):
         success, response_text, error_message = request_callable()
         if success:
             if attempt > 1:
@@ -109,18 +173,491 @@ def _call_world_dict_model_with_retry(request_callable, stage_desc, message_queu
             return True, response_text, None
         last_error = error_message or '模型调用未返回错误信息'
         lower_err = last_error.lower() if isinstance(last_error, str) else ''
-        if any(keyword in lower_err for keyword in RATE_LIMIT_KEYWORDS):
+        is_rate_limited = any(keyword in lower_err for keyword in RATE_LIMIT_KEYWORDS)
+        is_transient_error = any(keyword in lower_err for keyword in TRANSIENT_ERROR_KEYWORDS)
+        if (is_rate_limited or is_transient_error) and attempt < max_retries:
+            if is_transient_error and not is_rate_limited and wait_seconds == DEFAULT_RETRY_WAIT:
+                wait_seconds = DEFAULT_TRANSIENT_RETRY_WAIT
             suggested = _extract_retry_delay_seconds(last_error)
             if suggested is not None:
                 wait_seconds = max(1, suggested)
-            message_queue.put(('log', ('warning', f"{stage_desc} 因配额限制暂停 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_WORLD_DICT_RETRIES})...")))
-            log.warning(f"{stage_desc} 命中配额限制，等待 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{MAX_WORLD_DICT_RETRIES})。错误: {last_error}")
+            reason_label = "配额限制" if is_rate_limited else "临时 API 错误"
+            message_queue.put(('log', ('warning', f"{stage_desc} 因{reason_label}暂停 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{max_retries})...")))
+            log.warning(f"{stage_desc} 命中{reason_label}，等待 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{max_retries})。错误: {last_error}")
             time.sleep(wait_seconds)
             wait_seconds = min(wait_seconds * 2, MAX_RETRY_WAIT)
             continue
-        else:
-            break
+        break
     return False, None, last_error
+
+
+def _coerce_int(value, default, minimum=None):
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return default
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None:
+        coerced = max(minimum, coerced)
+    return coerced
+
+
+def _coerce_bool(value, default):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "y", "on", "是", "启用"):
+            return True
+        if normalized in ("0", "false", "no", "n", "off", "否", "禁用"):
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _get_pipeline_config(world_dict_config):
+    raw_config = world_dict_config.get("dict_pipeline", {})
+    if not isinstance(raw_config, dict):
+        raw_config = {}
+    max_prompt_chars = _coerce_int(
+        raw_config.get("max_prompt_chars"),
+        DEFAULT_DICT_MAX_PROMPT_CHARS,
+        minimum=50_000,
+    )
+    max_reference_chars = _coerce_int(
+        raw_config.get("max_reference_chars"),
+        DEFAULT_DICT_MAX_REFERENCE_CHARS,
+        minimum=10_000,
+    )
+    max_reference_chars = min(max_reference_chars, max(max_prompt_chars // 3, 10_000))
+    return {
+        "max_prompt_chars": max_prompt_chars,
+        "chunk_overlap_lines": _coerce_int(
+            raw_config.get("chunk_overlap_lines"),
+            DEFAULT_DICT_CHUNK_OVERLAP_LINES,
+            minimum=0,
+        ),
+        "min_term_frequency": _coerce_int(
+            raw_config.get("min_term_frequency"),
+            DEFAULT_DICT_MIN_TERM_FREQUENCY,
+            minimum=1,
+        ),
+        "max_reference_chars": max_reference_chars,
+        "chunk_concurrency": _coerce_int(
+            raw_config.get("chunk_concurrency"),
+            DEFAULT_DICT_CHUNK_CONCURRENCY,
+            minimum=1,
+        ),
+        "max_retries_per_chunk": _coerce_int(
+            raw_config.get("max_retries_per_chunk"),
+            DEFAULT_DICT_MAX_RETRIES_PER_CHUNK,
+            minimum=1,
+        ),
+        "failed_chunk_retry_rounds": _coerce_int(
+            raw_config.get("failed_chunk_retry_rounds"),
+            DEFAULT_DICT_FAILED_CHUNK_RETRY_ROUNDS,
+            minimum=0,
+        ),
+        "allow_partial_results": _coerce_bool(
+            raw_config.get("allow_partial_results"),
+            DEFAULT_DICT_ALLOW_PARTIAL_RESULTS,
+        ),
+    }
+
+
+def _format_dictionary_prompt(template, game_text, character_reference_csv_content=""):
+    return template.format(
+        game_text=game_text,
+        character_reference_csv_content=character_reference_csv_content,
+    )
+
+
+def _prompt_exceeds_limit(template, game_text, character_reference_csv_content, max_prompt_chars):
+    try:
+        return len(_format_dictionary_prompt(template, game_text, character_reference_csv_content)) > max_prompt_chars
+    except Exception:
+        # 保持原有行为：真正格式化时再抛出可诊断错误。
+        return False
+
+
+def _limit_csv_reference_content(csv_content, max_chars, message_queue):
+    if not csv_content or len(csv_content) <= max_chars:
+        return csv_content or ""
+
+    selected_lines = []
+    current_chars = 0
+    for line in csv_content.splitlines():
+        line_chars = len(line) + 1
+        if selected_lines and current_chars + line_chars > max_chars:
+            break
+        selected_lines.append(line)
+        current_chars += line_chars
+
+    limited_content = "\n".join(selected_lines)
+    message_queue.put((
+        "log",
+        (
+            "warning",
+            f"人物词典参考较大，已从 {len(csv_content)} 字符截断为 {len(limited_content)} 字符用于事物词典 Prompt。",
+        ),
+    ))
+    return limited_content
+
+
+def _is_context_limit_error(error_message):
+    lower_err = (error_message or "").lower()
+    return any(keyword in lower_err for keyword in CONTEXT_LIMIT_KEYWORDS)
+
+
+def _split_long_line(line, max_line_chars):
+    if len(line) <= max_line_chars:
+        return [line]
+    chunks = []
+    start = 0
+    while start < len(line):
+        chunks.append(line[start:start + max_line_chars])
+        start += max_line_chars
+    return chunks
+
+
+def _split_text_for_dictionary_chunks(game_text_content, template, character_reference_csv_content, max_prompt_chars, overlap_lines):
+    lines = game_text_content.splitlines()
+    try:
+        fixed_prompt_size = len(_format_dictionary_prompt(template, "", character_reference_csv_content))
+    except Exception:
+        fixed_prompt_size = len(template) + len(character_reference_csv_content or "")
+
+    target_text_chars = max_prompt_chars - fixed_prompt_size - 2_000
+    target_text_chars = max(1_000, target_text_chars)
+
+    prepared_lines = []
+    for line in lines:
+        prepared_lines.extend(_split_long_line(line, target_text_chars))
+
+    if not prepared_lines:
+        return []
+
+    chunks = []
+    start = 0
+    line_count = len(prepared_lines)
+    while start < line_count:
+        current_lines = []
+        current_chars = 0
+        end = start
+
+        while end < line_count:
+            line = prepared_lines[end]
+            line_chars = len(line) + 1
+            if current_lines and current_chars + line_chars > target_text_chars:
+                break
+            current_lines.append(line)
+            current_chars += line_chars
+            end += 1
+
+        if not current_lines:
+            current_lines.append(prepared_lines[start])
+            end = start + 1
+
+        chunks.append("\n".join(current_lines))
+        if end >= line_count:
+            break
+
+        next_start = end - overlap_lines if overlap_lines > 0 else end
+        start = max(start + 1, next_start)
+
+    return chunks
+
+
+def _append_chunk_instruction(prompt, chunk_index, chunk_count, min_term_frequency):
+    return (
+        f"{prompt}\n\n"
+        "补充要求：以上文本只是大型游戏的一个片段。请仍然只输出严格 CSV，不要输出表头、说明或 Markdown。\n"
+        f"这是第 {chunk_index}/{chunk_count} 个片段；如果片段中出现明显专名或实体候选，即使当前片段内不足 {min_term_frequency} 次也可以输出，"
+        "程序会在全量文本中去重并按出现次数筛选。"
+    )
+
+
+def _term_frequency(term, game_text_content):
+    term = (term or "").strip()
+    if not term:
+        return 0
+    return game_text_content.count(term)
+
+
+def _is_invalid_dictionary_term(term):
+    term = (term or "").strip()
+    if not term:
+        return True
+    if len(term) <= 1:
+        return True
+    if term.startswith("[") and term.endswith("]"):
+        return True
+    return False
+
+
+def _row_quality_score(row, game_text_content):
+    original = row[0].strip() if row else ""
+    non_empty_fields = sum(1 for value in row if isinstance(value, str) and value.strip())
+    total_text = sum(len(value.strip()) for value in row if isinstance(value, str))
+    frequency = _term_frequency(original, game_text_content)
+    return (frequency, non_empty_fields, total_text)
+
+
+def _merge_dictionary_rows(rows, expected_columns, game_text_content, min_term_frequency, message_queue, stage_label):
+    merged = {}
+    skipped_low_frequency = 0
+    skipped_invalid = 0
+
+    for row in rows:
+        if len(row) != expected_columns:
+            continue
+        cleaned_row = [(value or "").strip() for value in row]
+        original = cleaned_row[0]
+        if _is_invalid_dictionary_term(original):
+            skipped_invalid += 1
+            continue
+        frequency = _term_frequency(original, game_text_content)
+        if frequency < min_term_frequency:
+            skipped_low_frequency += 1
+            continue
+
+        key = original.casefold()
+        existing = merged.get(key)
+        if existing is None or _row_quality_score(cleaned_row, game_text_content) > _row_quality_score(existing, game_text_content):
+            merged[key] = cleaned_row
+
+    if skipped_invalid:
+        message_queue.put(("log", ("normal", f"{stage_label}: 已过滤 {skipped_invalid} 条无效/过短候选。")))
+    if skipped_low_frequency:
+        message_queue.put(("log", ("normal", f"{stage_label}: 已过滤 {skipped_low_frequency} 条全局出现次数不足 {min_term_frequency} 的候选。")))
+
+    return list(merged.values())
+
+
+def _split_chunk_in_half(chunk_text):
+    lines = chunk_text.splitlines()
+    if len(lines) <= 1:
+        return None
+    midpoint = max(1, len(lines) // 2)
+    return "\n".join(lines[:midpoint]), "\n".join(lines[midpoint:])
+
+
+def _request_dictionary_chunk(
+    request_model,
+    prompt_template,
+    chunk_text,
+    character_reference_csv_content,
+    expected_columns,
+    stage_label,
+    message_queue,
+    chunk_index,
+    chunk_count,
+    min_term_frequency,
+    max_retries,
+    split_depth=0,
+):
+    prompt = _format_dictionary_prompt(prompt_template, chunk_text, character_reference_csv_content)
+    prompt = _append_chunk_instruction(prompt, chunk_index, chunk_count, min_term_frequency)
+    success, csv_response, error_message = _call_world_dict_model_with_retry_limit(
+        lambda: request_model(prompt),
+        f"{stage_label} 分块 {chunk_index}/{chunk_count}",
+        message_queue,
+        max_retries,
+    )
+
+    if success:
+        return True, _parse_csv_response(csv_response, expected_columns, message_queue), None
+
+    if _is_context_limit_error(error_message) and split_depth < 5:
+        halves = _split_chunk_in_half(chunk_text)
+        if halves:
+            message_queue.put((
+                "log",
+                (
+                    "warning",
+                    f"{stage_label} 分块 {chunk_index}/{chunk_count} 仍超过模型上下文，自动继续二分后重试。",
+                ),
+            ))
+            all_rows = []
+            any_success = False
+            last_error = error_message
+            for sub_index, sub_chunk in enumerate(halves, start=1):
+                sub_success, sub_rows, sub_error = _request_dictionary_chunk(
+                    request_model,
+                    prompt_template,
+                    sub_chunk,
+                    character_reference_csv_content,
+                    expected_columns,
+                    stage_label,
+                    message_queue,
+                    chunk_index,
+                    chunk_count,
+                    min_term_frequency,
+                    max_retries,
+                    split_depth=split_depth + 1,
+                )
+                any_success = any_success or sub_success
+                if sub_rows:
+                    all_rows.extend(sub_rows)
+                if sub_error:
+                    last_error = sub_error
+            return any_success, all_rows, None if any_success else last_error
+
+    return False, [], error_message
+
+
+def _generate_dictionary_in_chunks(
+    request_model,
+    prompt_template,
+    game_text_content,
+    character_reference_csv_content,
+    expected_columns,
+    stage_label,
+    message_queue,
+    pipeline_config,
+):
+    chunks = _split_text_for_dictionary_chunks(
+        game_text_content,
+        prompt_template,
+        character_reference_csv_content,
+        pipeline_config["max_prompt_chars"],
+        pipeline_config["chunk_overlap_lines"],
+    )
+    if not chunks:
+        return True, [], None
+
+    concurrency = min(
+        len(chunks),
+        _coerce_int(pipeline_config.get("chunk_concurrency"), DEFAULT_DICT_CHUNK_CONCURRENCY, minimum=1),
+    )
+    max_retries = _coerce_int(
+        pipeline_config.get("max_retries_per_chunk"),
+        DEFAULT_DICT_MAX_RETRIES_PER_CHUNK,
+        minimum=1,
+    )
+    failed_retry_rounds = _coerce_int(
+        pipeline_config.get("failed_chunk_retry_rounds"),
+        DEFAULT_DICT_FAILED_CHUNK_RETRY_ROUNDS,
+        minimum=0,
+    )
+    allow_partial_results = _coerce_bool(
+        pipeline_config.get("allow_partial_results"),
+        DEFAULT_DICT_ALLOW_PARTIAL_RESULTS,
+    )
+
+    message_queue.put((
+        "log",
+        (
+            "normal",
+            f"{stage_label}: 文本过大，自动分为 {len(chunks)} 个片段请求 API "
+            f"(单次目标上限约 {pipeline_config['max_prompt_chars']} 字符，并发 {concurrency}，每块最多重试 {max_retries} 次)。",
+        ),
+    ))
+
+    def request_one(chunk_index, chunk_text):
+        message_queue.put(("log", ("normal", f"{stage_label}: 调用 API 处理分块 {chunk_index}/{len(chunks)}...")))
+        return _request_dictionary_chunk(
+            request_model,
+            prompt_template,
+            chunk_text,
+            character_reference_csv_content,
+            expected_columns,
+            stage_label,
+            message_queue,
+            chunk_index,
+            len(chunks),
+            pipeline_config["min_term_frequency"],
+            max_retries,
+        )
+
+    all_rows = []
+    successful_chunk_indexes = set()
+    failed_results = {}
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_to_chunk = {
+            executor.submit(request_one, chunk_index, chunk_text): chunk_index
+            for chunk_index, chunk_text in enumerate(chunks, start=1)
+        }
+        completed_chunks = 0
+        for future in as_completed(future_to_chunk):
+            chunk_index = future_to_chunk[future]
+            completed_chunks += 1
+            message_queue.put(("status", f"{stage_label}分块处理中 {completed_chunks}/{len(chunks)}..."))
+            try:
+                chunk_success, chunk_rows, chunk_error = future.result()
+            except Exception as chunk_exc:
+                log.exception(f"{stage_label}: 分块 {chunk_index}/{len(chunks)} 执行线程异常。")
+                chunk_success, chunk_rows, chunk_error = False, [], str(chunk_exc)
+
+            if chunk_success:
+                successful_chunk_indexes.add(chunk_index)
+                all_rows.extend(chunk_rows)
+                failed_results.pop(chunk_index, None)
+                message_queue.put(("log", ("normal", f"{stage_label}: 分块 {chunk_index}/{len(chunks)} 解析出 {len(chunk_rows)} 条候选。")))
+            else:
+                failed_results[chunk_index] = chunk_error
+                message_queue.put(("log", ("error", f"{stage_label}: 分块 {chunk_index}/{len(chunks)} 失败: {chunk_error}")))
+
+    for retry_round in range(1, failed_retry_rounds + 1):
+        if not failed_results:
+            break
+        failed_indexes = sorted(failed_results)
+        message_queue.put((
+            "log",
+            (
+                "warning",
+                f"{stage_label}: 首轮后仍有 {len(failed_indexes)} 个分块失败，开始第 {retry_round}/{failed_retry_rounds} 轮串行补偿重试。",
+            ),
+        ))
+        failed_results = {}
+        for chunk_index in failed_indexes:
+            message_queue.put(("status", f"{stage_label}补偿重试分块 {chunk_index}/{len(chunks)}..."))
+            chunk_success, chunk_rows, chunk_error = request_one(chunk_index, chunks[chunk_index - 1])
+            if chunk_success:
+                successful_chunk_indexes.add(chunk_index)
+                all_rows.extend(chunk_rows)
+                message_queue.put(("log", ("normal", f"{stage_label}: 补偿重试分块 {chunk_index}/{len(chunks)} 成功，解析出 {len(chunk_rows)} 条候选。")))
+            else:
+                failed_results[chunk_index] = chunk_error
+                message_queue.put(("log", ("error", f"{stage_label}: 补偿重试分块 {chunk_index}/{len(chunks)} 仍失败: {chunk_error}")))
+
+    successful_chunks = len(successful_chunk_indexes)
+    failed_chunks = len(failed_results)
+    last_error = next(iter(failed_results.values()), None)
+
+    if successful_chunks == 0:
+        return False, [], last_error or "所有分块均调用失败"
+
+    if failed_chunks > 0:
+        failed_list = ", ".join(str(index) for index in sorted(failed_results))
+        level = "warning" if allow_partial_results else "error"
+        action = "将保存部分成功结果" if allow_partial_results else "未保存不完整词典"
+        message_queue.put(("log", (level, f"{stage_label}: 最终失败分块: {failed_list}；{action}。")))
+
+    merged_rows = _merge_dictionary_rows(
+        all_rows,
+        expected_columns,
+        game_text_content,
+        pipeline_config["min_term_frequency"],
+        message_queue,
+        stage_label,
+    )
+    message_queue.put((
+        "log",
+        (
+            "normal",
+            f"{stage_label}: 分块完成，成功 {successful_chunks} 个、失败 {failed_chunks} 个；"
+            f"候选 {len(all_rows)} 条，去重过滤后 {len(merged_rows)} 条。",
+        ),
+    ))
+    if failed_chunks > 0 and not allow_partial_results:
+        return False, merged_rows, f"{failed_chunks} 个分块失败，未保存不完整词典"
+    return True, merged_rows, None
 
 # --- 主任务函数 ---
 def run_generate_dictionary(game_path, works_dir, world_dict_config, message_queue):
@@ -159,6 +696,7 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         openai_temperature = world_dict_config.get("openai_temperature", 0.2)
         openai_max_tokens = world_dict_config.get("openai_max_tokens")
         openai_extra_params = world_dict_config.get("openai_extra_params", {})
+        pipeline_config = _get_pipeline_config(world_dict_config)
         if provider == PROVIDER_OPENAI:
             try:
                 openai_temperature = float(openai_temperature)
@@ -298,6 +836,10 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
             if len(game_text_content.encode('utf-8')) / (1024*1024) > MAX_TEXT_SIZE_MB:
                  log.warning(f"聚合后的带前缀游戏文本大小 ({len(game_text_content.encode('utf-8')) / (1024*1024):.2f} MB) 较大，API 调用可能耗时较长或失败。")
                  message_queue.put(("log",("warning", "游戏文本内容（含元数据前缀）较多，API处理可能需要较长时间。")))
+            if _prompt_exceeds_limit(char_prompt_template, game_text_content, "", pipeline_config["max_prompt_chars"]):
+                 message_queue.put(("log", ("normal", f"人物词典 Prompt 超过分块阈值 ({pipeline_config['max_prompt_chars']} 字符)，将使用分块生成。")))
+            if _prompt_exceeds_limit(entity_prompt_template, game_text_content, "", pipeline_config["max_prompt_chars"]):
+                 message_queue.put(("log", ("normal", f"事物词典 Prompt 超过分块阈值 ({pipeline_config['max_prompt_chars']} 字符)，将使用分块生成。")))
 
         except json.JSONDecodeError as json_err: 
             log.exception(f"加载或解析JSON文件 '{json_path}' 失败: {json_err}")
@@ -309,14 +851,15 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         # --- 初始化字典模型客户端 ---
         try:
             if provider == PROVIDER_GEMINI:
-                client = gemini.GeminiClient(api_key)
-                log.info("Gemini 客户端初始化成功。")
+                gemini.GeminiClient(api_key)
                 def request_model(prompt):
+                    client = gemini.GeminiClient(api_key)
                     return client.generate_content(model_name, prompt)
+                log.info("Gemini 客户端初始化成功。")
             else:
-                client = deepseek.DeepSeekClient(api_url, api_key)
-                log.info(f"OpenAI 兼容客户端初始化成功 (URL: {api_url}).")
+                deepseek.DeepSeekClient(api_url, api_key)
                 def request_model(prompt):
+                    client = deepseek.DeepSeekClient(api_url, api_key)
                     extra_kwargs = dict(openai_extra_params)
                     temperature = extra_kwargs.pop('temperature', openai_temperature)
                     try:
@@ -339,6 +882,7 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                         max_tokens=max_tokens_value,
                         **extra_kwargs
                     )
+                log.info(f"OpenAI 兼容客户端初始化成功 (URL: {api_url}).")
         except Exception as client_err:
             raise ConnectionError(f"初始化字典模型 API 客户端失败: {client_err}") from client_err
 
@@ -349,19 +893,51 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         message_queue.put(("log", ("normal", "阶段 1: 开始生成人物词典...")))
         character_data = []
         try:
-            char_final_prompt = char_prompt_template.format(game_text=game_text_content)
-            message_queue.put(("log", ("normal", f"调用 {provider_display} (人物提取)...")))
-            success, char_csv_response, error_message = _call_world_dict_model_with_retry(
-                lambda: request_model(char_final_prompt), '人物词典生成', message_queue
+            use_chunked_character = _prompt_exceeds_limit(
+                char_prompt_template,
+                game_text_content,
+                "",
+                pipeline_config["max_prompt_chars"],
             )
+
+            if use_chunked_character:
+                success, character_data, error_message = _generate_dictionary_in_chunks(
+                    request_model,
+                    char_prompt_template,
+                    game_text_content,
+                    "",
+                    8,
+                    "人物词典生成",
+                    message_queue,
+                    pipeline_config,
+                )
+            else:
+                char_final_prompt = _format_dictionary_prompt(char_prompt_template, game_text_content)
+                message_queue.put(("log", ("normal", f"调用 {provider_display} (人物提取)...")))
+                success, char_csv_response, error_message = _call_world_dict_model_with_retry(
+                    lambda: request_model(char_final_prompt), '人物词典生成', message_queue
+                )
+                if not success and _is_context_limit_error(error_message):
+                    message_queue.put(("log", ("warning", "人物词典单次请求超过模型上下文限制，自动改用分块生成。")))
+                    success, character_data, error_message = _generate_dictionary_in_chunks(
+                        request_model,
+                        char_prompt_template,
+                        game_text_content,
+                        "",
+                        8,
+                        "人物词典生成",
+                        message_queue,
+                        pipeline_config,
+                    )
+                elif success:
+                    message_queue.put(("log", ("success", "人物提取 API 调用成功，正在解析...")))
+                    # 解析 CSV (期望 8 列)
+                    character_data = _parse_csv_response(char_csv_response, 8, message_queue)
 
             if not success:
                 message_queue.put(("log", ("error", f"人物词典生成失败: {provider_display} 调用失败: {error_message}")))
                 # 不抛出异常，允许继续尝试生成事物词典，但记录失败状态
             else:
-                message_queue.put(("log", ("success", "人物提取 API 调用成功，正在解析...")))
-                # 解析 CSV (期望 8 列)
-                character_data = _parse_csv_response(char_csv_response, 8, message_queue)
                 character_entries_count = len(character_data)
                 message_queue.put(("log", ("normal", f"解析完成，获得 {character_entries_count} 条有效人物条目。")))
 
@@ -423,22 +999,60 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         message_queue.put(("log", ("normal", "阶段 2: 开始生成事物词典...")))
         entity_data = []
         try:
-            entity_final_prompt = entity_prompt_template.format(
-                game_text=game_text_content,
-                character_reference_csv_content=character_reference_csv_content
+            entity_reference_for_prompt = _limit_csv_reference_content(
+                character_reference_csv_content,
+                pipeline_config["max_reference_chars"],
+                message_queue,
             )
-            message_queue.put(("log", ("normal", f"调用 {provider_display} (事物提取)...")))
-            success, entity_csv_response, error_message = _call_world_dict_model_with_retry(
-                lambda: request_model(entity_final_prompt), '事物词典生成', message_queue
+            use_chunked_entity = _prompt_exceeds_limit(
+                entity_prompt_template,
+                game_text_content,
+                entity_reference_for_prompt,
+                pipeline_config["max_prompt_chars"],
             )
+
+            if use_chunked_entity:
+                success, entity_data, error_message = _generate_dictionary_in_chunks(
+                    request_model,
+                    entity_prompt_template,
+                    game_text_content,
+                    entity_reference_for_prompt,
+                    4,
+                    "事物词典生成",
+                    message_queue,
+                    pipeline_config,
+                )
+            else:
+                entity_final_prompt = _format_dictionary_prompt(
+                    entity_prompt_template,
+                    game_text_content,
+                    entity_reference_for_prompt,
+                )
+                message_queue.put(("log", ("normal", f"调用 {provider_display} (事物提取)...")))
+                success, entity_csv_response, error_message = _call_world_dict_model_with_retry(
+                    lambda: request_model(entity_final_prompt), '事物词典生成', message_queue
+                )
+                if not success and _is_context_limit_error(error_message):
+                    message_queue.put(("log", ("warning", "事物词典单次请求超过模型上下文限制，自动改用分块生成。")))
+                    success, entity_data, error_message = _generate_dictionary_in_chunks(
+                        request_model,
+                        entity_prompt_template,
+                        game_text_content,
+                        entity_reference_for_prompt,
+                        4,
+                        "事物词典生成",
+                        message_queue,
+                        pipeline_config,
+                    )
+                elif success:
+                    message_queue.put(("log", ("success", "事物提取 API 调用成功，正在解析...")))
+                    # 解析 CSV (期望 4 列)
+                    entity_data = _parse_csv_response(entity_csv_response, 4, message_queue)
 
             if not success:
                 message_queue.put(("log", ("error", f"事物词典生成失败: {provider_display} 调用失败: {error_message}")))
                 # 记录失败状态
             else:
-                message_queue.put(("log", ("success", "事物提取 API 调用成功，正在解析...")))
-                # 解析 CSV (期望 4 列)
-                entity_data = _parse_csv_response(entity_csv_response, 4, message_queue)
                 entity_entries_count = len(entity_data)
                 message_queue.put(("log", ("normal", f"解析完成，获得 {entity_entries_count} 条有效事物条目。")))
 

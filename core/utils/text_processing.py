@@ -2,6 +2,7 @@
 import re
 import datetime
 import logging # 使用标准日志库记录更底层的细节
+from core.utils import control_tokens
 
 # 配置一个基础的日志记录器，供 utils 模块内部使用
 # 在主应用中可能会有更高级的日志配置
@@ -55,20 +56,22 @@ def validate_translation(original, translated, post_processed_translation):
         # 规则 1: 检查后处理后的译文中是否残留日语假名
         # \u3040-\u309F: Hiragana, \u30A0-\u30FF: Katakana
         kana_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF]')
-        if kana_pattern.search(post_processed_translation):
+        text_for_kana_check = control_tokens.strip_token_literals(post_processed_translation)
+        if kana_pattern.search(text_for_kana_check):
             reason = (
                 f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
             )
             log.warning(reason)
             return False, reason
 
-        # 规则 2: 如果原文以 \\ 开头，译文是否也以 \\ 开头 (检查原始译文)
-        if original.startswith('\\\\') and not translated.startswith('\\\\'):
-             reason = f"验证失败: 译文丢失了开头格式符 '\\\\'。原文: '{original[:50]}...', 译文: '{translated[:50]}...'"
-             log.warning(reason)
-             return False, reason
+        # 规则 2: 控制码精确保留校验。
+        control_ok, control_reason = control_tokens.validate_restored_text(original, post_processed_translation)
+        if not control_ok:
+            reason = f"验证失败: {control_reason}"
+            log.warning(reason)
+            return False, reason
 
-        # 规则 3: RPG 控制码按类型逐一对齐，减少误报（检查“译文-已还原PUA未后处理”）
+        # 规则 3: 旧版 RPG 控制码按类型逐一对齐，保留为兼容性兜底。
         allowed_codes = [r'\\\.', r'\\<', r'\\>', r'\\\|', r'\\\^', r'\\!']
         def _count_codes(text: str):
             return {pat: len(re.findall(pat, text)) for pat in allowed_codes}
@@ -83,25 +86,7 @@ def validate_translation(original, translated, post_processed_translation):
             log.warning(reason)
             return False, reason
 
-        # 规则 4: 检查上半直角引号「 (检查原始译文)
-        original_quote_count = original.count('「')
-        translated_quote_count = translated.count('「')
-        # 允许译文比原文多，但不允许少
-        if original_quote_count > translated_quote_count:
-            reason = f"验证失败: 上半引号「数量少于原文。原文({original_quote_count}): '{original[:50]}...', 译文({translated_quote_count}): '{translated[:50]}...'"
-            log.warning(reason)
-            return False, reason
-
-        # 规则 5: 检查上半直角双引号『 (检查原始译文)
-        original_double_quote_count = original.count('『')
-        translated_double_quote_count = translated.count('『')
-        # 允许译文比原文多，但不允许少
-        if original_double_quote_count > translated_double_quote_count:
-            reason = f"验证失败: 上半双引号『数量少于原文。原文({original_double_quote_count}): '{original[:50]}...', 译文({translated_double_quote_count}): '{translated[:50]}...'"
-            log.warning(reason)
-            return False, reason
-            
-        # 新增：规则 6: 检查 PUA 占位符是否完全还原（检查后处理后的文本）
+        # 规则 4: 检查 PUA 占位符是否完全还原（检查后处理后的文本）
         # 如果后处理后的文本仍然包含 PUA 字符，说明还原失败或 API 返回了 PUA 字符
         pua_pattern = re.compile(r'[\uE000-\uF8FF]') # PUA 范围
         if pua_pattern.search(post_processed_translation):
@@ -121,26 +106,12 @@ def validate_translation(original, translated, post_processed_translation):
 def pre_process_text_for_llm(text):
     """在发送给 LLM 前替换特殊标记为 PUA 占位符"""
     if not isinstance(text, str): return text
-    # 优先替换更长的模式或可能包含其他模式的模式
-    processed_text = text.replace(r'\!\n', '\uE010') # \!\n
-    processed_text = processed_text.replace(r'\!', '\uE002') # \!
-    processed_text = processed_text.replace(r'\.', '\uE005') # \.
-    processed_text = processed_text.replace(r'\<', '\uE006') # \<
-    processed_text = processed_text.replace(r'\>', '\uE007') # \>
-    processed_text = processed_text.replace(r'\|', '\uE008') # \|
-    processed_text = processed_text.replace(r'\^', '\uE009') # \^
-    # 再替换单字符模式
-    processed_text = processed_text.replace('「', '\uE000') # 「
-    processed_text = processed_text.replace('」', '\uE001') # 」
-    processed_text = processed_text.replace('『', '\uE003') # 『
-    processed_text = processed_text.replace('』', '\uE004') # 』
-    # log.debug(f"Preprocessed: '{text[:50]}...' -> '{processed_text[:50]}...'")
-    return processed_text
+    return control_tokens.protect_text(text).text
 
 def restore_pua_placeholders(text):
     """将译文中的 PUA 占位符还原为原始标记"""
     if not isinstance(text, str): return text
-    # 按照与 pre_process 相反但逻辑对应的顺序还原
+    # 兼容旧版本固定 PUA 输出；新翻译链路使用 control_tokens.restore_protected_text。
     processed_text = text.replace('\uE000', '「')
     processed_text = processed_text.replace('\uE001', '」')
     processed_text = processed_text.replace('\uE002', r'\!')
@@ -148,11 +119,10 @@ def restore_pua_placeholders(text):
     processed_text = processed_text.replace('\uE004', '』')
     processed_text = processed_text.replace('\uE005', r'\.')
     processed_text = processed_text.replace('\uE006', r'\<')
-    processed_text = processed_text.replace('\uE007', r'\>') 
+    processed_text = processed_text.replace('\uE007', r'\>')
     processed_text = processed_text.replace('\uE008', r'\|')
     processed_text = processed_text.replace('\uE009', r'\^')
     processed_text = processed_text.replace('\uE010', r'\!\n')
-    # log.debug(f"Restored PUA: '{text[:50]}...' -> '{processed_text[:50]}...'")
     return processed_text
 
 
@@ -170,6 +140,10 @@ def repair_translation_format(original_text: str, restored_translation: str) -> 
     text = restored_translation
 
     # 1) 移除未知反斜杠序列（白名单之外）
+    # 若原文或译文含通用控制码，删除未知序列可能破坏插件语法；交由控制码校验处理。
+    if control_tokens.extract_control_literals(original_text) or control_tokens.extract_control_literals(text):
+        return text
+
     whitelist = [r'\.', r'\<', r'\>', r'\|', r'\^', r'\!']
     any_bs_ascii = re.compile(r'(?<!\\)\\[ -~]')
     whitelist_set = set(whitelist)
@@ -279,28 +253,28 @@ def post_process_translation(text, original_text, apply_gbk_compatibility=True):
     if open_bracket_count > close_bracket_count:
         missing_count = open_bracket_count - close_bracket_count
         log.debug(f"Adding {missing_count} missing '」' to translation: '{processed_text[:50]}...'")
-        processed_text += '」' * missing_count
+        processed_text = _append_before_trailing_structural_controls(processed_text, '」' * missing_count)
 
     open_double_bracket_count = processed_text.count('『')
     close_double_bracket_count = processed_text.count('』')
     if open_double_bracket_count > close_double_bracket_count:
         missing_count = open_double_bracket_count - close_double_bracket_count
         log.debug(f"Adding {missing_count} missing '』' to translation: '{processed_text[:50]}...'")
-        processed_text += '』' * missing_count
+        processed_text = _append_before_trailing_structural_controls(processed_text, '』' * missing_count)
 
     # 规则 3.1: 移除『“xxx”』这种多余引号（仅处理两侧都多出且原文没有的狭窄情况）
     if isinstance(original_text, str) and '『“' not in original_text and '”』' not in original_text:
         processed_text = re.sub(r'『“([\s\S]*?)”』', r'『\1』', processed_text)
 
-    # 规则 4: 恢复前导换行符
-    original_leading_newlines = ""
-    for char_val in original_text: # 修正：直接迭代字符串字符
-        if char_val == '\n':
-            original_leading_newlines += '\n'
-        else:
-            break
-    current_text_without_leading_newlines = processed_text.lstrip('\n')
-    processed_text = original_leading_newlines + current_text_without_leading_newlines
+    # 规则 4: 恢复前导排版空白行。
+    # RPG Maker 文本常用“全角空格组成的空白行 + 正文行”做标题居中。
+    # 模型通常会保留换行但省略空白行里的空格；这里用原文的空白行前缀替换译文前缀，
+    # 避免后续控制码行数校验稳定误判。
+    original_leading_blank_prefix = _leading_blank_line_prefix(original_text)
+    if original_leading_blank_prefix:
+        processed_text = original_leading_blank_prefix + _strip_leading_blank_lines(processed_text)
+    else:
+        processed_text = _strip_leading_blank_lines(processed_text)
     
     # 规则 5: 空格数量修正
     original_lines = original_text.split('\n')
@@ -354,6 +328,65 @@ def post_process_translation(text, original_text, apply_gbk_compatibility=True):
 
 
 # --- 其他文本工具 ---
+
+def _leading_blank_line_prefix(text: str) -> str:
+    """Return exact leading lines that contain only whitespace and end in '\n'."""
+    if not isinstance(text, str) or not text:
+        return ""
+
+    cursor = 0
+    pieces = []
+    while cursor < len(text):
+        newline_index = text.find('\n', cursor)
+        if newline_index < 0:
+            break
+        line = text[cursor:newline_index]
+        if line.strip() != "":
+            break
+        pieces.append(text[cursor:newline_index + 1])
+        cursor = newline_index + 1
+    return "".join(pieces)
+
+
+def _strip_leading_blank_lines(text: str) -> str:
+    """Remove leading whitespace-only lines, preserving indentation on the first content line."""
+    if not isinstance(text, str) or not text:
+        return text
+
+    cursor = 0
+    while cursor < len(text):
+        newline_index = text.find('\n', cursor)
+        if newline_index < 0:
+            break
+        line = text[cursor:newline_index]
+        if line.strip() != "":
+            break
+        cursor = newline_index + 1
+    return text[cursor:]
+
+
+def _append_before_trailing_structural_controls(text: str, suffix: str) -> str:
+    """Append text without moving RPG Maker wait/end controls away from line end."""
+    if not suffix:
+        return text
+    if not isinstance(text, str) or not text:
+        return text + suffix
+
+    last_newline = text.rfind('\n')
+    line_start = 0 if last_newline < 0 else last_newline + 1
+    last_line = text[line_start:]
+    expected_end = len(last_line)
+    insert_column = len(last_line)
+    for token in reversed(list(control_tokens.iter_token_occurrences(last_line, include_quotes=False))):
+        if token.kind not in {"structural-control", "plugin:LL_StandingPicture"}:
+            break
+        if token.end != expected_end:
+            break
+        insert_column = token.start
+        expected_end = token.start
+
+    insert_at = line_start + insert_column
+    return text[:insert_at] + suffix + text[insert_at:]
 
 def sanitize_filename(filename):
     """移除或替换文件名中的非法字符，用于创建基于游戏名的目录等。"""
