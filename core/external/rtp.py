@@ -253,6 +253,15 @@ def install_rtp_files(target_game_dir, selected_rtp_zips):
                         rtp_skipped += 1
                         continue
 
+                    # EasyRPG prioritises .png over .xyz when both share the same base name.
+                    # Skip installing a .png RTP file if the game already has the .xyz variant,
+                    # so the original game graphics are not shadowed.
+                    if destination_path.lower().endswith('.png'):
+                        xyz_counterpart = destination_path[:-4] + '.xyz'
+                        if os.path.exists(xyz_counterpart):
+                            rtp_skipped += 1
+                            continue
+
                     try:
                         with zip_ref.open(info, "r") as src, open(destination_path, "wb") as dst:
                             shutil.copyfileobj(src, dst)
