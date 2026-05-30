@@ -186,7 +186,7 @@ class ProModePanel(ttk.Frame):
         if not selected_rtps:
             self.rtp_button_text.set("RTP选择: 无")
         elif len(selected_rtps) == 1:
-            name_map = {'2000': '2000', '2000en': '2000en', '2003': '2003', '2003steam': '2003steam'}
+            name_map = {'2000': '2000', '2000en': '2000en', '2003': '2003', '2003steam': '2003steam', '2003zh_tw': '2003繁中'}
             display_name = name_map.get(selected_rtps[0], selected_rtps[0])
             self.rtp_button_text.set(f"RTP选择: {display_name}")
         else:
