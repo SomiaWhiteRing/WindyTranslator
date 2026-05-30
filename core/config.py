@@ -147,6 +147,7 @@ N. 译文行N
 """
 }
 
+
 # --- 默认专业模式配置 ---
 DEFAULT_PRO_MODE_SETTINGS = {
     "export_encoding": "932",   # 默认 Shift-JIS
@@ -156,7 +157,8 @@ DEFAULT_PRO_MODE_SETTINGS = {
         "2000": True,
         "2000en": False,
         "2003": False,
-        "2003steam": False
+        "2003steam": False,
+        "2003zh_tw": False
     }
 }
 

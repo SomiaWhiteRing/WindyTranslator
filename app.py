@@ -147,7 +147,7 @@ class RPGTranslatorApp:
 
         # 从配置中获取所需参数
         pro_config = self.config.get('pro_mode_settings', {}) # 专业模式的独立配置
-        rtp_options = pro_config.get('rtp_options', {'2000': True, '2000en': False, '2003': False, '2003steam': False})
+        rtp_options = pro_config.get('rtp_options', {'2000': True, '2000en': False, '2003': False, '2003steam': False, '2003zh_tw': False})
         export_encoding = pro_config.get('export_encoding', '932')
         import_encoding = pro_config.get('import_encoding', '936')
         rewrite_rtp_fix = pro_config.get('rewrite_rtp_fix', True)
@@ -640,7 +640,7 @@ class RPGTranslatorApp:
         from ui.rtp_dialog import RTPSelectionWindow # 导入 RTP 选择窗口类
         # RTP 配置现在存在 config['pro_mode_settings']['rtp_options'] 中
         pro_settings = self.config.setdefault('pro_mode_settings', {})
-        rtp_options = pro_settings.setdefault('rtp_options', {'2000': True, '2000en': False, '2003': False, '2003steam': False})
+        rtp_options = pro_settings.setdefault('rtp_options', {'2000': True, '2000en': False, '2003': False, '2003steam': False, '2003zh_tw': False})
         # 传递配置给窗口，窗口修改后直接更新这个字典
         RTPSelectionWindow(self.root, self, rtp_options)
         # 更新专业模式面板上的按钮文本 (需要 MainWindow 提供方法)
