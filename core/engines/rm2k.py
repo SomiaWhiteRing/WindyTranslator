@@ -59,7 +59,8 @@ def auto_detect_encoding(game_path: str) -> str:
         return "cp932"
 
     try:
-        _, entries, _ = _read_lmt(open(lmt_path, "rb").read())
+        with open(lmt_path, "rb") as f:
+            _, entries, _ = _read_lmt(f.read())
         sample: List[bytes] = []
         for eid, fields in entries:
             if eid == 0:
@@ -239,7 +240,8 @@ def export_names(game_path: str, encoding_code: str, message_queue=None) -> bool
         return True
 
     try:
-        _, lmt_entries, _ = _read_lmt(open(lmt_path, "rb").read())
+        with open(lmt_path, "rb") as f:
+            _, lmt_entries, _ = _read_lmt(f.read())
         names: Dict[int, str] = {}
         for eid, fields in lmt_entries:
             if eid == 0:
@@ -279,9 +281,8 @@ def import_names(game_path: str, encoding_code: str, message_queue=None) -> bool
         return True
 
     try:
-        translations = _parse_mapnames_file(
-            open(names_path, "r", encoding="utf-8-sig").read()
-        )
+        with open(names_path, "r", encoding="utf-8-sig") as f:
+            translations = _parse_mapnames_file(f.read())
     except Exception as e:
         _log("error", f"  [RM2K] 讀取地圖名稱文件失敗: {e}")
         return False
@@ -295,7 +296,8 @@ def import_names(game_path: str, encoding_code: str, message_queue=None) -> bool
         return False
 
     try:
-        magic, entries, lmt_tail = _read_lmt(open(lmt_path, "rb").read())
+        with open(lmt_path, "rb") as f:
+            magic, entries, lmt_tail = _read_lmt(f.read())
         new_entries = []
         count = 0
         for eid, fields in entries:
