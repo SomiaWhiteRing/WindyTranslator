@@ -40,7 +40,12 @@ _DETECT_CANDIDATES = ["cp932", "gbk", "big5", "cp1252", "utf-8"]
 
 
 def _codec(code: str) -> str:
-    return _CODE_TO_CODEC.get(str(code), "cp932")
+    import codecs
+    try:
+        codecs.lookup(code)
+        return code  # already a valid codec name (e.g. "big5" from auto_detect_encoding)
+    except LookupError:
+        return _CODE_TO_CODEC.get(str(code), "cp932")
 
 
 def auto_detect_encoding(game_path: str) -> str:

@@ -160,8 +160,9 @@ def run_export(game_path, export_encoding, message_queue):
                 # --- 导出 RM2K 地图名称 ---
                 try:
                     from core.engines import rm2k
-                    message_queue.put(("log", ("normal", "正在导出 RM2K 地图名称...")))
-                    rm2k.export_names(game_path, export_encoding, message_queue)
+                    src_enc = rm2k.auto_detect_encoding(game_path)
+                    message_queue.put(("log", ("normal", f"正在导出 RM2K 地图名称（偵測來源編碼: {src_enc}）...")))
+                    rm2k.export_names(game_path, src_enc, message_queue)
                 except Exception as rm2k_err:
                     log.exception("导出 RM2K 地图名称时发生错误。")
                     message_queue.put(("warning", f"导出 RM2K 地图名称失败（不影响主要导出结果）: {rm2k_err}"))
