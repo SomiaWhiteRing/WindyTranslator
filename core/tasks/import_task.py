@@ -74,6 +74,17 @@ def run_import(game_path, import_encoding, message_queue):
 
         if return_code == 0:
             message_queue.put(("log", ("success", "RPGRewriter 导入命令成功完成。")))
+
+            # --- 导入 RM2K 地图名称 ---
+            try:
+                from core.engines import rm2k
+                message_queue.put(("log", ("normal", "正在导入 RM2K 地图名称...")))
+                rm2k.import_names(game_path, import_encoding, message_queue)
+            except Exception as rm2k_err:
+                log.exception("导入 RM2K 地图名称时发生错误。")
+                message_queue.put(("warning", f"导入 RM2K 地图名称失败（不影响主要导入结果）: {rm2k_err}"))
+            # -----------------------------------------
+
             message_queue.put(("success", "文本已从 StringScripts 文件夹导入到游戏中。"))
             message_queue.put(("status", "文本导入完成"))
             message_queue.put(("done", None))

@@ -157,6 +157,16 @@ def run_export(game_path, export_encoding, message_queue):
         if export_successful:
             if os.path.exists(string_scripts_path):
 
+                # --- 导出 RM2K 地图名称 ---
+                try:
+                    from core.engines import rm2k
+                    message_queue.put(("log", ("normal", "正在导出 RM2K 地图名称...")))
+                    rm2k.export_names(game_path, export_encoding, message_queue)
+                except Exception as rm2k_err:
+                    log.exception("导出 RM2K 地图名称时发生错误。")
+                    message_queue.put(("warning", f"导出 RM2K 地图名称失败（不影响主要导出结果）: {rm2k_err}"))
+                # -----------------------------------------
+
                 # --- 新增：备份 StringScripts 到 StringScripts_Origin ---
                 try:
                     message_queue.put(("log", ("normal", "正在备份原始 StringScripts 到 StringScripts_Origin...")))
