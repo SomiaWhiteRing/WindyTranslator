@@ -21,6 +21,7 @@ _MAX_ZIP_COMMENT = 65535
 _CANDIDATE_ENCODINGS = ("utf-8", "gbk", "cp932", "cp437")
 _ZIP_NAME_ENCODING_OVERRIDES = {
     "2000fix.zip": "gbk",
+    "2003zh_tw.zip": "big5",
 }
 _KANA_RE = re.compile(r"[\u3040-\u30ff]")
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")

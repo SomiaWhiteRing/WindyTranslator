@@ -20,7 +20,7 @@ class RTPSelectionWindow(tk.Toplevel):
         self.rtp_config = rtp_config # 直接引用 App 中的配置字典部分
 
         self.title("选择RTP")
-        self.geometry("250x200") # 调整大小以适应内容
+        self.geometry("280x230") # 调整大小以适应内容
         self.transient(parent) # 依附于父窗口
         self.grab_set()        # 设为模式对话框
         self.resizable(False, False)
@@ -32,7 +32,8 @@ class RTPSelectionWindow(tk.Toplevel):
             '2000': tk.BooleanVar(value=self.rtp_config.get('2000', True)), # 默认勾选 2000
             '2000en': tk.BooleanVar(value=self.rtp_config.get('2000en', False)),
             '2003': tk.BooleanVar(value=self.rtp_config.get('2003', False)),
-            '2003steam': tk.BooleanVar(value=self.rtp_config.get('2003steam', False))
+            '2003steam': tk.BooleanVar(value=self.rtp_config.get('2003steam', False)),
+            '2003zh_tw': tk.BooleanVar(value=self.rtp_config.get('2003zh_tw', False))
         }
 
         # --- 创建控件 ---
@@ -45,6 +46,7 @@ class RTPSelectionWindow(tk.Toplevel):
         ttk.Checkbutton(frame, text="RPG Maker 2000 (英文版)", variable=self.rtp_vars['2000en']).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(frame, text="RPG Maker 2003", variable=self.rtp_vars['2003']).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(frame, text="RPG Maker 2003 (Steam版)", variable=self.rtp_vars['2003steam']).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(frame, text="RPG Maker 2003 (繁體中文版)", variable=self.rtp_vars['2003zh_tw']).pack(anchor=tk.W, pady=2)
 
         # 确定按钮
         confirm_button = ttk.Button(frame, text="确定", command=self._on_confirm)
