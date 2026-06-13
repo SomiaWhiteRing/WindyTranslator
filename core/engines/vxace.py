@@ -268,24 +268,51 @@ def _detach_event_command_parameter_aliases(cmd_list: Any) -> None:
     """
     Work around a rubymarshal writer bug with Marshal link references.
 
-    Some VX Ace data files share the same `@parameters` Array between multiple
-    RPG::EventCommand objects (Marshal LINK). When writing back, rubymarshal may
-    corrupt those links, resulting in malformed commands such as:
-        code=101 parameters=["<ORIGINAL_TEXT:...>"] or parameters=[]
+    Some VX Ace data files share objects between event command parameters
+    (Marshal LINK). Move routes are a common example: a RPG::MoveCommand can be
+    present both inside RPG::MoveRoute.@list and as a later 505 command
+    parameter. When writing back, rubymarshal may corrupt those links or emit a
+    link to an object that is still being unmarshaled.
 
-    Detaching the list objects and RubyString values removes the need for LINKs,
-    keeping serialization stable while preserving values.
+    Detaching nested parameter values removes the need for those LINKs while
+    preserving values.
     """
-    _, _, _, RubyString = _import_rubymarshal()
+    _, _, RubyObject, RubyString = _import_rubymarshal()
+    try:
+        from rubymarshal.classes import UserDef, UsrMarshal
+    except Exception as e:  # pragma: no cover
+        raise VXAceError("缺少依赖：rubymarshal。请先安装 requirements.txt 中的依赖。") from e
 
     def detach_value(val: Any) -> Any:
         if isinstance(val, list):
             return [detach_value(x) for x in val]
+        if isinstance(val, dict):
+            return {detach_value(k): detach_value(v) for k, v in val.items()}
         if isinstance(val, RubyString):
-            return RubyString(str(val.text), attributes=dict(getattr(val, "attributes", {}) or {}))
+            attrs = getattr(val, "attributes", {}) or {}
+            return RubyString(str(val.text), attributes={k: detach_value(v) for k, v in attrs.items()})
+        if isinstance(val, UserDef):
+            attrs = getattr(val, "attributes", {}) or {}
+            clone = UserDef(val.ruby_class_name, attributes={k: detach_value(v) for k, v in attrs.items()})
+            private_data = getattr(val, "_private_data", None)
+            if isinstance(private_data, bytes):
+                private_data = bytearray(private_data).decode("latin-1").encode("latin-1")
+            clone._load(private_data)
+            return clone
+        if isinstance(val, UsrMarshal):
+            attrs = getattr(val, "attributes", {}) or {}
+            clone = UsrMarshal(val.ruby_class_name, attributes={k: detach_value(v) for k, v in attrs.items()})
+            clone.marshal_load(detach_value(getattr(val, "_private_data", None)))
+            return clone
+        if isinstance(val, RubyObject):
+            attrs = getattr(val, "attributes", {}) or {}
+            return RubyObject(val.ruby_class_name, attributes={k: detach_value(v) for k, v in attrs.items()})
         if isinstance(val, str):
             # Ensure a unique object instance to avoid Marshal LINKs for strings.
             return RubyString(val, attributes={"E": True})
+        if isinstance(val, bytes):
+            # Force a distinct bytes object; bytes(val) may return val unchanged.
+            return bytearray(val).decode("latin-1").encode("latin-1")
         return val
 
     if not isinstance(cmd_list, list):
@@ -300,6 +327,40 @@ def _detach_event_command_parameter_aliases(cmd_list: Any) -> None:
         attrs["@parameters"] = [detach_value(x) for x in params]
 
 
+def _validate_no_downgraded_userdef_objects(obj: Any, path_hint: str) -> None:
+    """
+    RGSS Color/Tone are Marshal USERDEF objects. If they are rewritten as plain
+    RubyObject instances, RGSS may reject the rvdata2 with "dump format error".
+    """
+    try:
+        from rubymarshal.classes import RubyObject, UserDef
+    except Exception as e:  # pragma: no cover
+        raise VXAceError("缺少依赖：rubymarshal。请先安装 requirements.txt 中的依赖。") from e
+
+    def walk(val: Any, trail: str) -> None:
+        if isinstance(val, UserDef):
+            return
+        if isinstance(val, RubyObject):
+            if getattr(val, "ruby_class_name", None) in {"Color", "Tone"}:
+                raise VXAceError(
+                    f"写入后校验失败: {path_hint} 的 {val.ruby_class_name} 对象被写成普通对象 "
+                    f"({trail})，RGSS 可能报 dump format error。请从原版 Data 还原后重试。"
+                )
+            for attr_name, attr_value in (getattr(val, "attributes", {}) or {}).items():
+                walk(attr_value, f"{trail}.{attr_name}")
+            return
+        if isinstance(val, list):
+            for idx, item in enumerate(val):
+                walk(item, f"{trail}[{idx}]")
+            return
+        if isinstance(val, dict):
+            for key, item in val.items():
+                walk(key, f"{trail}.key")
+                walk(item, f"{trail}[{key!r}]")
+
+    walk(obj, "root")
+
+
 def _validate_no_corrupted_show_text_commands_in_map(map_obj: Any, path_hint: str) -> None:
     """
     Validate that no Show Text (101) commands are malformed after serialization.
@@ -309,6 +370,7 @@ def _validate_no_corrupted_show_text_commands_in_map(map_obj: Any, path_hint: st
     which breaks face/background/position in-game.
     """
     _, _, _, RubyString = _import_rubymarshal()
+    _validate_no_downgraded_userdef_objects(map_obj, path_hint)
 
     events = _get_attr(map_obj, "events", {})
     if not isinstance(events, dict):
@@ -351,6 +413,7 @@ def _validate_no_corrupted_show_text_commands_in_map(map_obj: Any, path_hint: st
 
 def _validate_no_corrupted_show_text_commands_in_common_events(common_events: Any, path_hint: str) -> None:
     _, _, _, RubyString = _import_rubymarshal()
+    _validate_no_downgraded_userdef_objects(common_events, path_hint)
     if not isinstance(common_events, list):
         return
     for ce_idx, ce in enumerate(common_events):
@@ -1474,6 +1537,7 @@ def import_from_string_scripts(game_path: str, message_queue) -> int:
                 for page in pages:
                     cmd_list = _get_attr(page, "list", [])
                     _detach_event_command_parameter_aliases(cmd_list)
+            log.info(f"写入 VX Ace 地图数据: {map_path}")
             _save_rvdata2_with_validation(
                 map_path,
                 map_obj,
@@ -1512,6 +1576,7 @@ def import_from_string_scripts(game_path: str, message_queue) -> int:
                                 continue
                             cmd_list = _get_attr(ce, "list", [])
                             _detach_event_command_parameter_aliases(cmd_list)
+                        log.info(f"写入 VX Ace 公共事件数据: {common_path}")
                         _save_rvdata2_with_validation(
                             common_path,
                             common_events,
