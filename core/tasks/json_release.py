@@ -10,6 +10,142 @@ log = logging.getLogger(__name__)
 
 MULTILINE_BLOCK_MARKERS = {"Message", "StringPicture", "ScrollText"}
 DEFAULT_RELEASE_WORKERS = min(4, max(1, os.cpu_count() or 1))
+MAX_SCHEMA_ERRORS_TO_REPORT = 10
+
+
+def _json_type_name(value):
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "布尔值"
+    if isinstance(value, dict):
+        return "对象"
+    if isinstance(value, list):
+        return "数组"
+    if isinstance(value, str):
+        return "字符串"
+    if isinstance(value, (int, float)):
+        return "数字"
+    return type(value).__name__
+
+
+def _short_repr(value, max_len=80):
+    text = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
+
+
+def _find_json_key_line(json_text, key, start_pos=0):
+    if not isinstance(key, str):
+        return None, -1
+
+    candidates = [
+        json.dumps(key, ensure_ascii=False),
+        json.dumps(key, ensure_ascii=True),
+    ]
+    for candidate in candidates:
+        pos = json_text.find(candidate, start_pos)
+        if pos != -1:
+            return json_text.count("\n", 0, pos) + 1, pos
+    return None, -1
+
+
+def _validate_translation_json_schema(data, json_text):
+    errors = []
+
+    def add_error(path, line, message):
+        if len(errors) < MAX_SCHEMA_ERRORS_TO_REPORT:
+            errors.append({"path": path, "line": line, "message": message})
+
+    if not isinstance(data, dict):
+        add_error(
+            "$",
+            None,
+            f"JSON 顶层必须是按文件名组织的对象，实际为{_json_type_name(data)}。",
+        )
+        return errors
+
+    for source_file_name, translations_for_this_file in data.items():
+        file_path_label = f"$[{source_file_name!r}]"
+        file_line, file_pos = _find_json_key_line(json_text, source_file_name)
+
+        if not isinstance(source_file_name, str) or not source_file_name:
+            add_error(
+                "$",
+                None,
+                f"文件名键必须是非空字符串，实际为{_json_type_name(source_file_name)}：{_short_repr(source_file_name)}",
+            )
+            continue
+
+        if not isinstance(translations_for_this_file, dict):
+            add_error(
+                file_path_label,
+                file_line,
+                f"文件 '{source_file_name}' 下必须是原文到翻译对象的映射，实际为{_json_type_name(translations_for_this_file)}。"
+            )
+            continue
+
+        for original_text, translation_metadata_obj in translations_for_this_file.items():
+            entry_line, _ = _find_json_key_line(json_text, original_text, max(file_pos, 0))
+            entry_label = f"{file_path_label}[{_short_repr(original_text)!r}]"
+
+            if not isinstance(original_text, str):
+                add_error(
+                    file_path_label,
+                    file_line,
+                    f"文件 '{source_file_name}' 下的原文键必须是字符串，实际为{_json_type_name(original_text)}。"
+                )
+                continue
+
+            if not isinstance(translation_metadata_obj, dict):
+                add_error(
+                    entry_label,
+                    entry_line,
+                    "每个原文条目的值必须是对象，至少包含 text 字段；"
+                    f"实际为{_json_type_name(translation_metadata_obj)}：{_short_repr(translation_metadata_obj)}"
+                )
+                continue
+
+            if "text" not in translation_metadata_obj:
+                add_error(
+                    entry_label,
+                    entry_line,
+                    "翻译对象缺少 text 字段。"
+                )
+                continue
+
+            translated_text = translation_metadata_obj["text"]
+            if translated_text is not None and not isinstance(translated_text, str):
+                add_error(
+                    entry_label + "['text']",
+                    entry_line,
+                    f"text 字段必须是字符串或 null，实际为{_json_type_name(translated_text)}。"
+                )
+
+    return errors
+
+
+def _format_schema_errors(selected_json_path, errors):
+    lines = [
+        f"翻译 JSON 结构不符合释放器要求：{selected_json_path}",
+        "期望格式示例：",
+        '{',
+        '  "Map001.txt": {',
+        '    "原文": { "text": "译文", "status": "success" }',
+        '  }',
+        '}',
+        "发现的问题：",
+    ]
+
+    for error in errors:
+        line_text = f"行 {error['line']}，" if error["line"] else ""
+        lines.append(f"- {line_text}位置 {error['path']}：{error['message']}")
+
+    if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
+        lines.append(f"- 仅显示前 {MAX_SCHEMA_ERRORS_TO_REPORT} 个结构问题，请先修正这些问题后重试。")
+
+    return "\n".join(lines)
 
 
 def _extract_marker_type(line):
@@ -256,6 +392,49 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
             message_queue.put(("done", None))
             return
 
+        if not selected_json_path or not os.path.exists(selected_json_path):
+            message_queue.put(("error", f"指定的翻译 JSON 文件无效或不存在: {selected_json_path}"))
+            message_queue.put(("status", "释放 JSON 失败 (JSON文件无效)"))
+            message_queue.put(("done", None))
+            return
+
+        message_queue.put(("status", "正在加载并校验翻译 JSON..."))
+        message_queue.put(("log", ("normal", f"使用翻译文件: {selected_json_path}")))
+
+        load_json_start_time = time.perf_counter()
+        try:
+            with open(selected_json_path, "r", encoding="utf-8") as f_json_in:
+                translation_json_text = f_json_in.read()
+            all_translations_per_file = json.loads(translation_json_text)
+        except json.JSONDecodeError as load_json_err:
+            log.exception(f"翻译 JSON 语法错误: {selected_json_path} - {load_json_err}")
+            message_queue.put((
+                "error",
+                f"翻译 JSON 不是合法 JSON：{selected_json_path}\n"
+                f"第 {load_json_err.lineno} 行，第 {load_json_err.colno} 列：{load_json_err.msg}"
+            ))
+            message_queue.put(("status", "释放 JSON 失败 (JSON语法错误)"))
+            message_queue.put(("done", None))
+            return
+        except Exception as load_json_err:
+            log.exception(f"加载翻译 JSON 文件失败: {selected_json_path} - {load_json_err}")
+            message_queue.put(("error", f"加载翻译 JSON 文件失败: {load_json_err}"))
+            message_queue.put(("status", "释放 JSON 失败 (加载JSON出错)"))
+            message_queue.put(("done", None))
+            return
+
+        schema_errors = _validate_translation_json_schema(all_translations_per_file, translation_json_text)
+        if schema_errors:
+            message_queue.put(("error", _format_schema_errors(selected_json_path, schema_errors)))
+            message_queue.put(("status", "释放 JSON 失败 (JSON结构错误)"))
+            message_queue.put(("done", None))
+            return
+
+        load_json_elapsed = time.perf_counter() - load_json_start_time
+        log.debug(f"加载按文件组织的翻译数据完成。共涉及 {len(all_translations_per_file)} 个源文件，耗时 {load_json_elapsed:.2f} 秒。")
+        message_queue.put(("log", ("normal", f"已加载按文件组织的翻译数据，共涉及 {len(all_translations_per_file)} 个源文件。")))
+        message_queue.put(("status", "正在恢复 StringScripts 并应用翻译..."))
+
         message_queue.put(("log", ("normal", "找到备份目录 StringScripts_Origin，准备恢复...")))
         restore_start_time = time.perf_counter()
         try:
@@ -279,30 +458,6 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
             message_queue.put(("status", "释放 JSON 失败 (恢复后目录丢失)"))
             message_queue.put(("done", None))
             return
-
-        if not selected_json_path or not os.path.exists(selected_json_path):
-            message_queue.put(("error", f"指定的翻译 JSON 文件无效或不存在: {selected_json_path}"))
-            message_queue.put(("status", "释放 JSON 失败 (JSON文件无效)"))
-            message_queue.put(("done", None))
-            return
-
-        message_queue.put(("status", "正在加载翻译并按文件应用..."))
-        message_queue.put(("log", ("normal", f"使用翻译文件: {selected_json_path}")))
-
-        load_json_start_time = time.perf_counter()
-        try:
-            with open(selected_json_path, "r", encoding="utf-8") as f_json_in:
-                all_translations_per_file = json.load(f_json_in)
-        except Exception as load_json_err:
-            log.exception(f"加载翻译 JSON 文件失败: {selected_json_path} - {load_json_err}")
-            message_queue.put(("error", f"加载翻译 JSON 文件失败: {load_json_err}"))
-            message_queue.put(("status", "释放 JSON 失败 (加载JSON出错)"))
-            message_queue.put(("done", None))
-            return
-
-        load_json_elapsed = time.perf_counter() - load_json_start_time
-        log.debug(f"加载按文件组织的翻译数据完成。共涉及 {len(all_translations_per_file)} 个源文件，耗时 {load_json_elapsed:.2f} 秒。")
-        message_queue.put(("log", ("normal", f"已加载按文件组织的翻译数据，共涉及 {len(all_translations_per_file)} 个源文件。")))
 
         overall_applied_count = 0
         overall_skipped_count = 0
