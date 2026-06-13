@@ -27,6 +27,9 @@ ORIGINAL_DB_STORE_FILENAME = "RTA_VXACE_ORIGINAL_DB.json"
 MESSAGE_MARKER_PREFIX = "<ORIGINAL_TEXT:"
 MESSAGE_MARKER_SUFFIX = ">"
 
+SCROLL_TEXT_MARKER_PREFIX = "<ORIGINAL_SCROLL_TEXT:"
+SCROLL_TEXT_MARKER_SUFFIX = ">"
+
 # Choice markers are not provided by the original Ruby script; we add our own.
 CHOICE_MARKER_PREFIX = "<ORIGINAL_CHOICE:"
 CHOICE_MARKER_SUFFIX = ">"
@@ -397,7 +400,11 @@ def _validate_no_corrupted_show_text_commands_in_map(map_obj: Any, path_hint: st
                     )
                 face_name = params[0]
                 face_str = str(face_name.text) if isinstance(face_name, RubyString) else str(face_name or "")
-                if face_str.startswith(MESSAGE_MARKER_PREFIX) or face_str.startswith(CHOICE_MARKER_PREFIX):
+                if (
+                    face_str.startswith(MESSAGE_MARKER_PREFIX)
+                    or face_str.startswith(SCROLL_TEXT_MARKER_PREFIX)
+                    or face_str.startswith(CHOICE_MARKER_PREFIX)
+                ):
                     raise VXAceError(
                         f"写入后校验失败: {path_hint} 的 Show Text(101) face_name 被 marker 污染 "
                         f"(Event {ev_id} Page {page_idx + 1} Cmd {cmd_idx}): {face_str[:80]!r}。"
@@ -434,7 +441,11 @@ def _validate_no_corrupted_show_text_commands_in_common_events(common_events: An
                 )
             face_name = params[0]
             face_str = str(face_name.text) if isinstance(face_name, RubyString) else str(face_name or "")
-            if face_str.startswith(MESSAGE_MARKER_PREFIX) or face_str.startswith(CHOICE_MARKER_PREFIX):
+            if (
+                face_str.startswith(MESSAGE_MARKER_PREFIX)
+                or face_str.startswith(SCROLL_TEXT_MARKER_PREFIX)
+                or face_str.startswith(CHOICE_MARKER_PREFIX)
+            ):
                 raise VXAceError(
                     f"写入后校验失败: {path_hint} 的 Show Text(101) face_name 被 marker 污染 "
                     f"(CommonEvent[{ce_idx}] Cmd {cmd_idx}): {face_str[:80]!r}。"
@@ -448,6 +459,52 @@ def _validate_no_corrupted_show_text_commands_in_common_events(common_events: An
                 )
 
 
+def _validate_no_corrupted_show_text_commands_in_troops(troops: Any, path_hint: str) -> None:
+    _, _, _, RubyString = _import_rubymarshal()
+    _validate_no_downgraded_userdef_objects(troops, path_hint)
+    if not isinstance(troops, list):
+        return
+    for troop_idx, troop in enumerate(troops):
+        if troop is None:
+            continue
+        pages = _get_attr(troop, "pages", [])
+        if not isinstance(pages, list):
+            continue
+        for page_idx, page in enumerate(pages):
+            cmd_list = _get_attr(page, "list", [])
+            if not isinstance(cmd_list, list):
+                continue
+            for cmd_idx, cmd in enumerate(cmd_list):
+                code, _indent, params = _event_command_fields(cmd)
+                if code != 101:
+                    continue
+                if not isinstance(params, list) or len(params) != 4:
+                    raise VXAceError(
+                        f"写入后校验失败: {path_hint} 存在被写坏的 Show Text(101) 指令 "
+                        f"(Troop[{troop_idx}] Page {page_idx + 1} Cmd {cmd_idx}, "
+                        f"params_len={len(params) if isinstance(params, list) else 'N/A'})。"
+                        "请从原版 Data 还原后重试。"
+                    )
+                face_name = params[0]
+                face_str = str(face_name.text) if isinstance(face_name, RubyString) else str(face_name or "")
+                if (
+                    face_str.startswith(MESSAGE_MARKER_PREFIX)
+                    or face_str.startswith(SCROLL_TEXT_MARKER_PREFIX)
+                    or face_str.startswith(CHOICE_MARKER_PREFIX)
+                ):
+                    raise VXAceError(
+                        f"写入后校验失败: {path_hint} 的 Show Text(101) face_name 被 marker 污染 "
+                        f"(Troop[{troop_idx}] Page {page_idx + 1} Cmd {cmd_idx}): {face_str[:80]!r}。"
+                        "请从原版 Data 还原后重试。"
+                    )
+                if not (isinstance(params[1], int) and isinstance(params[2], int) and isinstance(params[3], int)):
+                    raise VXAceError(
+                        f"写入后校验失败: {path_hint} 的 Show Text(101) 参数类型异常 "
+                        f"(Troop[{troop_idx}] Page {page_idx + 1} Cmd {cmd_idx})。"
+                        "请从原版 Data 还原后重试。"
+                    )
+
+
 def _encode_message_marker(original_text: str) -> str:
     encoded = base64.b64encode(original_text.encode("utf-8")).decode("ascii")
     return f"{MESSAGE_MARKER_PREFIX}{encoded}{MESSAGE_MARKER_SUFFIX}"
@@ -459,6 +516,23 @@ def _decode_message_marker(comment: str) -> Optional[str]:
     if not (comment.startswith(MESSAGE_MARKER_PREFIX) and comment.endswith(MESSAGE_MARKER_SUFFIX)):
         return None
     payload = comment[len(MESSAGE_MARKER_PREFIX) : -len(MESSAGE_MARKER_SUFFIX)]
+    try:
+        return base64.b64decode(payload).decode("utf-8", errors="strict")
+    except Exception:
+        return None
+
+
+def _encode_scroll_text_marker(original_text: str) -> str:
+    encoded = base64.b64encode(original_text.encode("utf-8")).decode("ascii")
+    return f"{SCROLL_TEXT_MARKER_PREFIX}{encoded}{SCROLL_TEXT_MARKER_SUFFIX}"
+
+
+def _decode_scroll_text_marker(comment: str) -> Optional[str]:
+    if not isinstance(comment, str):
+        return None
+    if not (comment.startswith(SCROLL_TEXT_MARKER_PREFIX) and comment.endswith(SCROLL_TEXT_MARKER_SUFFIX)):
+        return None
+    payload = comment[len(SCROLL_TEXT_MARKER_PREFIX) : -len(SCROLL_TEXT_MARKER_SUFFIX)]
     try:
         return base64.b64decode(payload).decode("utf-8", errors="strict")
     except Exception:
@@ -485,6 +559,46 @@ def _decode_choice_marker(comment: str) -> Optional[List[str]]:
     except Exception:
         return None
     return None
+
+
+def _extract_note_tag_values(note: str, tag_name: str, *, include_empty: bool = True) -> List[str]:
+    values: List[str] = []
+    tag_re = re.compile(rf"^<{re.escape(tag_name)}:(.*)>$")
+    for line in _normalize_newlines(note).split("\n"):
+        m = tag_re.match(line.strip())
+        if not m:
+            continue
+        value = _normalize_newlines(m.group(1))
+        if include_empty or value != "":
+            values.append(value)
+    return values
+
+
+def _replace_note_tag_values(note: str, tag_name: str, replacements: List[str]) -> Tuple[str, bool]:
+    tag_re = re.compile(rf"^<{re.escape(tag_name)}:(.*)>$")
+    replacement_idx = 0
+    changed = False
+    out_lines: List[str] = []
+    for line in _normalize_newlines(note).split("\n"):
+        stripped = line.strip()
+        m = tag_re.match(stripped)
+        if not m:
+            out_lines.append(line)
+            continue
+        current = _normalize_newlines(m.group(1))
+        if current == "":
+            out_lines.append(line)
+            continue
+        if replacement_idx >= len(replacements):
+            out_lines.append(line)
+            continue
+        replacement = _normalize_newlines(replacements[replacement_idx]).replace("\n", " ")
+        replacement_idx += 1
+        new_line = f"<{tag_name}:{replacement}>"
+        if new_line != line:
+            changed = True
+        out_lines.append(new_line)
+    return "\n".join(out_lines), changed
 
 
 def _normalize_newlines(text: str) -> str:
@@ -726,9 +840,12 @@ def _export_command_list_to_lines(cmd_list: Any) -> List[str]:
 
     lines: List[str] = []
     text_buffer: List[str] = []
+    scroll_text_buffer: List[str] = []
     pending_original_message: Optional[str] = None
+    pending_original_scroll_text: Optional[str] = None
     pending_original_choices: Optional[List[str]] = None
     skipping_translated_message = False
+    skipping_translated_scroll_text = False
 
     def flush_message():
         if not text_buffer:
@@ -742,12 +859,26 @@ def _export_command_list_to_lines(cmd_list: Any) -> List[str]:
             lines.append("##\n")
         text_buffer.clear()
 
+    def flush_scroll_text():
+        if not scroll_text_buffer:
+            return
+        scroll_text = "\n".join(scroll_text_buffer)
+        scroll_text = _normalize_newlines(scroll_text)
+        if scroll_text != "":
+            lines.append("#ScrollText#\n")
+            for ln in scroll_text.split("\n"):
+                lines.append(f"{ln}\n")
+            lines.append("##\n")
+        scroll_text_buffer.clear()
+
     for cmd in cmd_list:
         code, _indent, params = _event_command_fields(cmd)
 
         # End of a (possibly skipped) 401 block
         if skipping_translated_message and code != 401:
             skipping_translated_message = False
+        if skipping_translated_scroll_text and code != 405:
+            skipping_translated_scroll_text = False
 
         # comment marker storage (inserted by importer)
         if code == 108 and params:
@@ -756,12 +887,17 @@ def _export_command_list_to_lines(cmd_list: Any) -> List[str]:
             if decoded is not None:
                 pending_original_message = decoded
                 continue
+            decoded_scroll_text = _decode_scroll_text_marker(comment)
+            if decoded_scroll_text is not None:
+                pending_original_scroll_text = decoded_scroll_text
+                continue
             decoded_choices = _decode_choice_marker(comment)
             if decoded_choices is not None:
                 pending_original_choices = decoded_choices
                 continue
 
         if code == 101:  # Show Text (face/background/position)
+            flush_scroll_text()
             flush_message()
             face_name = _as_str(params[0]) if len(params) > 0 else ""
             try:
@@ -790,6 +926,27 @@ def _export_command_list_to_lines(cmd_list: Any) -> List[str]:
             text_buffer.append(_normalize_newlines(text))
             continue
 
+        if code == 405:  # scrolling text line
+            flush_message()
+            if skipping_translated_scroll_text:
+                continue
+            if pending_original_scroll_text is not None:
+                scroll_text = _normalize_newlines(pending_original_scroll_text)
+                if scroll_text != "":
+                    lines.append("#ScrollText#\n")
+                    for ln in scroll_text.split("\n"):
+                        lines.append(f"{ln}\n")
+                    lines.append("##\n")
+                pending_original_scroll_text = None
+                skipping_translated_scroll_text = True
+                continue
+
+            text = _as_str(params[0]) if params else ""
+            scroll_text_buffer.append(_normalize_newlines(text))
+            continue
+
+        flush_scroll_text()
+
         if code == 102:  # choices
             flush_message()
             choices_raw = pending_original_choices if pending_original_choices is not None else (params[0] if params else [])
@@ -806,11 +963,19 @@ def _export_command_list_to_lines(cmd_list: Any) -> List[str]:
         flush_message()
 
     flush_message()
+    flush_scroll_text()
     if pending_original_message is not None and not skipping_translated_message:
         message_text = _normalize_newlines(pending_original_message)
         if message_text != "":
             lines.append("#Message#\n")
             for ln in message_text.split("\n"):
+                lines.append(f"{ln}\n")
+            lines.append("##\n")
+    if pending_original_scroll_text is not None and not skipping_translated_scroll_text:
+        scroll_text = _normalize_newlines(pending_original_scroll_text)
+        if scroll_text != "":
+            lines.append("#ScrollText#\n")
+            for ln in scroll_text.split("\n"):
                 lines.append(f"{ln}\n")
             lines.append("##\n")
     return lines
@@ -932,6 +1097,33 @@ def export_to_string_scripts(game_path: str, message_queue) -> None:
                 _write_text_file(os.path.join(string_scripts_path, "CommonEvents.txt"), out_lines)
                 message_queue.put(("log", ("success", "公共事件对话导出完成：CommonEvents.txt")))
 
+    # --- Export troop event dialogues ---
+    troops_path = os.path.join(data_dir, "Troops.rvdata2")
+    if os.path.isfile(troops_path):
+        try:
+            troops = _load_rvdata2(troops_path)
+        except Exception as e:
+            log.warning(f"读取敌群事件失败: {troops_path} - {e}")
+            troops = None
+        if isinstance(troops, list):
+            out_lines: List[str] = []
+            for idx, troop in enumerate(troops):
+                if troop is None:
+                    continue
+                pages = _get_attr(troop, "pages", [])
+                if not isinstance(pages, list) or not pages:
+                    continue
+                entry_lines = [f"*****Entry{idx}*****\n"]
+                for page_idx, page in enumerate(pages):
+                    entry_lines.append(f"-----Page{page_idx + 1}-----\n")
+                    cmd_list = _get_attr(page, "list", [])
+                    entry_lines.extend(_export_command_list_to_lines(cmd_list))
+                if any(line.startswith("#") for line in entry_lines):
+                    out_lines.extend(entry_lines)
+            if any(line.startswith("#") for line in out_lines):
+                _write_text_file(os.path.join(string_scripts_path, "Troops.txt"), out_lines)
+                message_queue.put(("log", ("success", "敌群事件对话导出完成：Troops.txt")))
+
     # --- Export database ---
     original_db_store_modified, db_files = _export_database(
         data_dir=data_dir,
@@ -973,6 +1165,7 @@ def _export_database(
         folder_name: str,
         rvdata2_name: str,
         fields: List[Tuple[str, str, bool]],
+        extra_export_fn=None,
     ) -> int:
         nonlocal original_store_modified
         path = os.path.join(data_dir, rvdata2_name)
@@ -1012,6 +1205,9 @@ def _export_database(
                     entry_lines.append(f"#{marker}#\n")
                     entry_lines.append(f"{original_val}\n")
 
+            if extra_export_fn is not None:
+                extra_export_fn(idx, obj, entry_lines)
+
             if any(l.startswith("#") for l in entry_lines):
                 out_lines.extend(entry_lines)
                 out_lines.append("\n")
@@ -1020,6 +1216,28 @@ def _export_database(
             _write_text_file(out_file, out_lines)
             return 1
         return 0
+
+    def get_original_list(store_key: str, current_values: List[str]) -> List[str]:
+        nonlocal original_store_modified
+        stored = original_store.get(store_key)
+        if isinstance(stored, list) and all(isinstance(x, str) for x in stored):
+            return [_normalize_newlines(x) for x in stored]
+        original_store[store_key] = current_values
+        original_store_modified = True
+        return current_values
+
+    def export_enemy_extra_fields(idx: int, obj: Any, entry_lines: List[str]) -> None:
+        note_obj = _get_attr(obj, "note", "")
+        note = _normalize_newlines(_as_str(note_obj))
+        monster_book_lines = _extract_note_tag_values(note, "図鑑説明", include_empty=False)
+        if monster_book_lines:
+            store_key = f"Enemies.rvdata2:{idx}:note.図鑑説明"
+            original_lines = get_original_list(store_key, monster_book_lines)
+            if any(line != "" for line in original_lines):
+                entry_lines.append("#MonsterBookDescription#\n")
+                for line in original_lines:
+                    entry_lines.append(f"{line}\n")
+                entry_lines.append("##\n")
 
     exported_files += export_array_table_compact(
         "Actors",
@@ -1079,6 +1297,7 @@ def _export_database(
             ("Name", "name", False),
             ("Description", "description", True),
         ],
+        export_enemy_extra_fields,
     )
     exported_files += export_array_table_compact(
         "States",
@@ -1255,7 +1474,7 @@ def _parse_string_scripts_text(text: str) -> List[_ParsedEntry]:
         marker = m.group(1)
         i += 1
 
-        if marker in ("Message", "StringPicture"):
+        if marker in ("Message", "ScrollText", "StringPicture", "MonsterBookDescription"):
             buf: List[str] = []
             while i < len(lines) and lines[i].strip() != "##":
                 buf.append(lines[i].rstrip("\n"))
@@ -1293,7 +1512,7 @@ def _build_translation_map(origin_text: str, translated_text: str) -> Dict[str, 
         t = translated_entries[idx]
         if o.marker != t.marker:
             continue
-        if o.marker in ("Message", "StringPicture"):
+        if o.marker in ("Message", "ScrollText", "StringPicture", "MonsterBookDescription"):
             if isinstance(o.content, str) and isinstance(t.content, str):
                 mapping[o.content] = t.content
         elif o.marker == "Choice":
@@ -1313,6 +1532,9 @@ def _is_comment_marker(cmd: Any, kind: str) -> Tuple[bool, Optional[Any]]:
     comment = _as_str(params[0])
     if kind == "message":
         decoded = _decode_message_marker(comment)
+        return decoded is not None, decoded
+    if kind == "scroll_text":
+        decoded = _decode_scroll_text_marker(comment)
         return decoded is not None, decoded
     if kind == "choice":
         decoded = _decode_choice_marker(comment)
@@ -1405,6 +1627,65 @@ def _update_event_command_list(cmd_list: Any, translation_map: Dict[str, str]) -
                 continue
 
             i = (marker_index if has_marker else block_start_index) - 1
+            continue
+
+        # --- Scrolling Text (405 block + optional marker 108) ---
+        if code == 405:
+            first_text_index = i
+            while first_text_index > 0:
+                prev_code, _prev_indent, _prev_params = _event_command_fields(cmd_list[first_text_index - 1])
+                if prev_code != 405:
+                    break
+                first_text_index -= 1
+
+            marker_index = first_text_index - 1
+            has_marker = False
+            original_text: Optional[str] = None
+            if marker_index >= 0:
+                ok, decoded = _is_comment_marker(cmd_list[marker_index], "scroll_text")
+                if ok and isinstance(decoded, str):
+                    has_marker = True
+                    original_text = decoded
+
+            if not has_marker:
+                buf: List[str] = []
+                for k in range(first_text_index, i + 1):
+                    _c, _ind, p = _event_command_fields(cmd_list[k])
+                    buf.append(_normalize_newlines(_as_str(p[0]) if p else ""))
+                original_text = "\n".join(buf)
+
+            original_text = _normalize_newlines(original_text or "")
+            new_text = translation_map.get(original_text)
+            new_text = _normalize_newlines(new_text) if isinstance(new_text, str) else None
+
+            if new_text is not None and new_text.strip() != "" and new_text != original_text:
+                new_cmds: List[Any] = []
+                if not has_marker:
+                    marker_str = _encode_scroll_text_marker(original_text)
+                    new_cmds.append(_new_event_command(108, indent, [_str_like(marker_str, params[0] if params else "")]))
+                for line in new_text.split("\n"):
+                    new_cmds.append(_new_event_command(405, indent, [_str_like(line, params[0] if params else "")]))
+
+                start_idx = first_text_index
+                length = i - first_text_index + 1
+                cmd_list[start_idx : start_idx + length] = new_cmds
+                modified = True
+                i = (marker_index - 1) if has_marker else (start_idx - 1)
+                continue
+
+            if has_marker and (new_text is None or new_text.strip() == "" or new_text == original_text):
+                new_cmds2: List[Any] = []
+                for line in original_text.split("\n"):
+                    new_cmds2.append(_new_event_command(405, indent, [_str_like(line, params[0] if params else "")]))
+
+                start_idx = marker_index
+                length = i - start_idx + 1
+                cmd_list[start_idx : start_idx + length] = new_cmds2
+                modified = True
+                i = start_idx - 1
+                continue
+
+            i = (marker_index if has_marker else first_text_index) - 1
             continue
 
         # --- Choices (102) with optional marker 108 right before it ---
@@ -1586,6 +1867,55 @@ def import_from_string_scripts(game_path: str, message_queue) -> int:
                         )
                         modified_files += 1
 
+    # --- Troop events ---
+    troops_origin = os.path.join(backup_path, "Troops.txt")
+    troops_translated = os.path.join(string_scripts_path, "Troops.txt")
+    if os.path.isfile(troops_origin) and os.path.isfile(troops_translated):
+        try:
+            origin_text = open(troops_origin, "r", encoding="utf-8-sig", errors="replace").read()
+            translated_text = open(troops_translated, "r", encoding="utf-8-sig", errors="replace").read()
+            tmap = _build_translation_map(origin_text, translated_text)
+        except Exception:
+            tmap = {}
+        if tmap:
+            troops_path = os.path.join(data_dir, "Troops.rvdata2")
+            if os.path.isfile(troops_path):
+                try:
+                    troops = _load_rvdata2(troops_path)
+                except Exception:
+                    troops = None
+                if isinstance(troops, list):
+                    troops_modified = False
+                    for troop in troops:
+                        if troop is None:
+                            continue
+                        pages = _get_attr(troop, "pages", [])
+                        if not isinstance(pages, list):
+                            continue
+                        for page in pages:
+                            cmd_list = _get_attr(page, "list", [])
+                            if _update_event_command_list(cmd_list, tmap):
+                                troops_modified = True
+                    if troops_modified:
+                        for troop in troops:
+                            if troop is None:
+                                continue
+                            pages = _get_attr(troop, "pages", [])
+                            if not isinstance(pages, list):
+                                continue
+                            for page in pages:
+                                cmd_list = _get_attr(page, "list", [])
+                                _detach_event_command_parameter_aliases(cmd_list)
+                        log.info(f"写入 VX Ace 敌群事件数据: {troops_path}")
+                        _save_rvdata2_with_validation(
+                            troops_path,
+                            troops,
+                            lambda reloaded, p=troops_path: _validate_no_corrupted_show_text_commands_in_troops(
+                                reloaded, p
+                            ),
+                        )
+                        modified_files += 1
+
     # --- Database import ---
     db_dir = os.path.join(string_scripts_path, "Database")
     if os.path.isdir(db_dir):
@@ -1720,6 +2050,18 @@ def _import_database(db_dir: str, data_dir: str) -> int:
             changed = True
         return changed
 
+    def apply_enemy(obj: Any, entry: Dict[str, Any]) -> bool:
+        changed = apply_name_desc(obj, entry)
+        if "MonsterBookDescription" in entry and isinstance(entry["MonsterBookDescription"], str):
+            old_note = _get_attr(obj, "note", "")
+            old_note_text = _as_str(old_note)
+            replacements = _normalize_newlines(entry["MonsterBookDescription"]).split("\n")
+            new_note, note_changed = _replace_note_tag_values(old_note_text, "図鑑説明", replacements)
+            if note_changed:
+                _set_attr(obj, "note", _str_like(new_note, old_note))
+                changed = True
+        return changed
+
     def apply_skill(obj: Any, entry: Dict[str, Any]) -> bool:
         changed = apply_name_desc(obj, entry)
         if "Message1" in entry and isinstance(entry["Message1"], str):
@@ -1747,7 +2089,7 @@ def _import_database(db_dir: str, data_dir: str) -> int:
     import_array_group("Items", "Items.rvdata2", apply_name_desc)
     import_array_group("Weapons", "Weapons.rvdata2", apply_name_desc)
     import_array_group("Armors", "Armors.rvdata2", apply_name_desc)
-    import_array_group("Enemies", "Enemies.rvdata2", apply_name_desc)
+    import_array_group("Enemies", "Enemies.rvdata2", apply_enemy)
     import_array_group("States", "States.rvdata2", apply_state)
 
     # MapInfos
