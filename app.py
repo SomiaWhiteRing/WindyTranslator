@@ -10,6 +10,7 @@ import logging
 import time
 import csv
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 # 导入 UI 层 (这里先假设 UI 类已定义，后面再实现)
 from ui import main_window #, config_dialogs, rtp_dialog, dict_editor # 等
@@ -227,30 +228,35 @@ class RPGTranslatorApp:
              self._open_dict_editor() # 直接调用内部方法
              return
         
-        elif task_name == 'fix_fallback': # 修正回退任务
+        elif task_name == 'fix_fallback': # 译文问题审阅任务
             fallback_csv_path = self._get_fallback_csv_path() # 获取路径
             translated_json_path = self._get_translated_json_path() # 获取翻译 JSON 路径
 
             if not fallback_csv_path or not translated_json_path:
-                messagebox.showerror("错误", "无法确定修正所需的文件路径 (可能是游戏路径未设置?)。", parent=self.root)
+                messagebox.showerror("错误", "无法确定审阅所需的文件路径 (可能是游戏路径未设置?)。", parent=self.root)
                 return
 
-            if self._check_fallback_csv_status(fallback_csv_path): # 检查文件状态
-                 from ui.fix_fallback_dialog import FixFallbackDialog # 导入对话框
-                 try:
-                    FixFallbackDialog(
-                        parent=self.root,
-                        app_controller=self, # 传递 App 实例
-                        fallback_csv_path=fallback_csv_path, # 传递 CSV 路径
-                        translated_json_path=translated_json_path # 传递 JSON 路径
-                    )
-                    self.log_message("修正回退对话框已打开。", "normal")
-                 except Exception as e:
-                    log.exception("打开修正回退对话框时出错。")
-                    messagebox.showerror("错误", f"无法打开修正回退对话框:\n{e}", parent=self.root)
-            else:
-                 messagebox.showinfo("提示", "没有检测到需要修正的回退项。", parent=self.root)
-                 self.log_message("没有需要修正的回退项。", "normal")
+            if not os.path.exists(translated_json_path):
+                messagebox.showinfo("提示", "未找到 translation_translated.json。请先完成翻译。", parent=self.root)
+                self.log_message("没有可审阅的翻译 JSON。", "normal")
+                return
+
+            try:
+                from ui.translation_review_dialog import LineLimitCheckerApp
+
+                review_window = tk.Toplevel(self.root)
+                review_window.transient(self.root)
+                LineLimitCheckerApp(
+                    review_window,
+                    initial_path=Path(translated_json_path),
+                    fallback_csv_path=Path(fallback_csv_path),
+                    integrated_mode=True,
+                    on_saved=self._check_and_update_ui_states,
+                )
+                self.log_message("译文问题审阅器已打开。", "normal")
+            except Exception as e:
+                log.exception("打开译文问题审阅器时出错。")
+                messagebox.showerror("错误", f"无法打开译文问题审阅器:\n{e}", parent=self.root)
             return # 处理完毕，直接返回
         elif task_name == 'configure_gemini':
              self._open_gemini_config() # 直接调用内部方法
@@ -364,11 +370,27 @@ class RPGTranslatorApp:
             log.error(f"检查回退 CSV 文件状态时出错 ({csv_path}): {e}")
             return False # 读取出错，视为禁用
 
+    def _check_review_issue_status(self, translated_json_path, fallback_csv_path=None):
+        """检查是否存在可用统一审阅器处理的问题。"""
+        if not translated_json_path:
+            return False
+        try:
+            from ui.translation_review_dialog import translation_json_has_reviewable_issues
+
+            return translation_json_has_reviewable_issues(
+                Path(translated_json_path),
+                Path(fallback_csv_path) if fallback_csv_path else None,
+            )
+        except Exception as e:
+            log.error(f"检查审阅问题状态时出错 ({translated_json_path}): {e}")
+            return False
+
     def _check_and_update_ui_states(self): # <--- 新增: 统一检查和更新 UI
         """检查依赖文件状态的 UI 元素并更新它们。"""
-        # 检查回退按钮状态
+        # 检查审阅按钮状态
         fallback_csv_path = self._get_fallback_csv_path()
-        enable_fix_button = self._check_fallback_csv_status(fallback_csv_path)
+        translated_json_path = self._get_translated_json_path()
+        enable_fix_button = self._check_review_issue_status(translated_json_path, fallback_csv_path)
         if hasattr(self, 'main_window') and self.main_window:
             self.main_window.update_fix_fallback_button_state(enable_fix_button)
         # 未来可以添加其他需要根据文件状态更新的 UI 逻辑
