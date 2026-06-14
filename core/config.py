@@ -166,6 +166,8 @@ DEFAULT_PRO_MODE_SETTINGS = {
 # --- 完整的默认应用配置 ---
 DEFAULT_CONFIG = {
     "selected_mode": "easy", # 默认启动模式
+    "enable_completion_notification": False,
+    "completion_notification_identity_registered": False,
     # 使用深拷贝确保子字典独立
     "world_dict_config": DEFAULT_WORLD_DICT_CONFIG.copy(),
     "translate_config": DEFAULT_TRANSLATE_CONFIG.copy(),
@@ -269,6 +271,11 @@ class ConfigManager:
 
         # 确保顶层 selected_mode 存在
         final_config.setdefault('selected_mode', DEFAULT_CONFIG['selected_mode'])
+        final_config.setdefault('enable_completion_notification', DEFAULT_CONFIG['enable_completion_notification'])
+        final_config.setdefault(
+            'completion_notification_identity_registered',
+            DEFAULT_CONFIG['completion_notification_identity_registered'],
+        )
 
         return final_config
 

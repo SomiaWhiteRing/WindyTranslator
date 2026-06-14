@@ -3,3 +3,5 @@ google-genai
 google-api-core
 openai
 rubymarshal==1.2.10
+winsdk
+pywin32

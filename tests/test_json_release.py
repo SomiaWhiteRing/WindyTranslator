@@ -1,5 +1,6 @@
 import queue
 
+import core.tasks.json_release as json_release
 from core.tasks.json_release import _format_schema_errors, _validate_translation_json_schema, run_release_json
 
 
@@ -18,6 +19,37 @@ def test_validate_translation_json_schema_reports_file_mapping_type_error():
     assert "行 2" in message
     assert '"Map001.txt"' in message
     assert '"原文": { "text": "译文"' in message
+
+
+def test_validate_translation_json_schema_skips_line_lookup_for_valid_data(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("valid schema should not search json text for line numbers")
+
+    monkeypatch.setattr(json_release, "_find_json_key_line", fail_if_called)
+
+    errors = _validate_translation_json_schema(
+        {"Map001.txt": {"原文": {"text": "译文", "status": "success"}}},
+        '{"Map001.txt": {"原文": {"text": "译文", "status": "success"}}}',
+    )
+
+    assert errors == []
+
+
+def test_validate_translation_json_schema_stops_after_error_report_limit(monkeypatch):
+    lookup_count = 0
+
+    def count_lookup(*args, **kwargs):
+        nonlocal lookup_count
+        lookup_count += 1
+        return 1, 0
+
+    monkeypatch.setattr(json_release, "_find_json_key_line", count_lookup)
+
+    data = {"Map001.txt": {f"原文{i}": {"status": "missing text"} for i in range(20)}}
+    errors = _validate_translation_json_schema(data, "{}")
+
+    assert len(errors) == json_release.MAX_SCHEMA_ERRORS_TO_REPORT
+    assert lookup_count == json_release.MAX_SCHEMA_ERRORS_TO_REPORT + 1
 
 
 def test_run_release_json_reports_json_syntax_line_and_does_not_restore(tmp_path):

@@ -9,6 +9,7 @@ import traceback
 import logging
 import time
 import csv
+import platform
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -26,8 +27,48 @@ from core.utils import (text_processing, dictionary_manager)
 from ui.dict_editor import DictEditorWindow
 from core.utils.file_system import get_executable_dir, ensure_dir_exists  # 导入路径辅助函数
 from core.utils.engine_detection import detect_game_engine
+from core.utils import windows_notifications
 
 log = logging.getLogger(__name__) # 获取 logger 实例
+
+CONTINUOUS_TASK_NAMES = {
+    'initialize',
+    'export',
+    'rename',
+    'create_json',
+    'generate_dictionary',
+    'translate',
+    'release_json',
+    'import',
+    'easy_flow',
+}
+
+FAILURE_STATUS_KEYWORDS = ("失败", "中止", "错误")
+
+
+class TaskMessageProxy:
+    """Forward task messages while tracking whether the task reported a problem."""
+
+    def __init__(self, target_queue):
+        self.target_queue = target_queue
+        self.has_problem = False
+        self._lock = threading.Lock()
+
+    def put(self, message):
+        with self._lock:
+            self._track_message(message)
+        self.target_queue.put(message)
+
+    def _track_message(self, message):
+        if not isinstance(message, tuple) or len(message) < 2:
+            return
+
+        msg_type, content = message[0], message[1]
+        if msg_type == "error":
+            self.has_problem = True
+        elif msg_type == "status" and isinstance(content, str):
+            if any(keyword in content for keyword in FAILURE_STATUS_KEYWORDS):
+                self.has_problem = True
 
 class RPGTranslatorApp:
     """主应用程序类，负责协调 UI 和核心逻辑。"""
@@ -295,6 +336,10 @@ class RPGTranslatorApp:
             self.log_message(f"保存配置失败: {e}", "error")
             messagebox.showerror("保存失败", f"无法保存配置文件。\n错误: {e}", parent=self.root)
 
+    def completion_notifications_enabled(self):
+        """返回是否启用任务完成提醒。"""
+        return bool(self.config.get('enable_completion_notification', False))
+
     def log_message(self, message, level="normal"):
         """将消息记录到 UI 日志区域。"""
         if hasattr(self, 'main_window') and self.main_window:
@@ -424,6 +469,8 @@ class RPGTranslatorApp:
         self.set_processing_state(True)
         self.update_status(f"正在执行: {task_name}...")
         self._stop_requested = False # 重置停止标志
+        task_message_proxy = TaskMessageProxy(self.message_queue)
+        tracked_args = self._replace_message_queue_arg(args, task_message_proxy)
 
         # 从 kwargs 中提取 task_id_for_callback，以便在异常时使用
         # 实际的 task_id 会通过 kwargs 传递给 task_func
@@ -433,10 +480,11 @@ class RPGTranslatorApp:
             task_start_time = time.time()
             task_succeeded = False
             try:
-                task_result = task_func(*args, **kwargs)
+                task_result = task_func(*tracked_args, **kwargs)
                 task_succeeded = bool(task_result)
                 # 注意：任务成功完成的消息由任务自身通过队列发送 ("success", ...)
             except Exception as e:
+                task_message_proxy.has_problem = True
                 # 捕获任务函数本身抛出的未处理异常（理论上不应发生）
                 log.exception(f"任务 '{task_name}' 执行期间发生未捕获的严重错误。")
                 # 发送错误消息到队列
@@ -460,7 +508,13 @@ class RPGTranslatorApp:
                 # 在主线程中更新状态
                 self.root.after(0, lambda: self.set_processing_state(False))
                 self.root.after(10, self._check_and_update_ui_states) # <--- 新增: 任务完成后也检查状态
-                if task_name == 'release_json' and task_succeeded and self._should_auto_import_after_release():
+                auto_import_pending = task_name == 'release_json' and task_succeeded and self._should_auto_import_after_release()
+                if self._should_emit_completion_notification(task_name, mode, task_succeeded) and not auto_import_pending:
+                    self.root.after(
+                        50,
+                        lambda problem=task_message_proxy.has_problem: self._maybe_send_completion_notification(problem)
+                    )
+                if auto_import_pending:
                     release_game_path = args[0] if args else None
                     self.root.after(100, lambda gp=release_game_path, m=mode: self._auto_import_after_release(gp, m))
                 # 移除对线程的引用
@@ -469,6 +523,88 @@ class RPGTranslatorApp:
         # 启动线程
         self.current_task_thread = threading.Thread(target=wrapper, daemon=True)
         self.current_task_thread.start()
+
+    def _replace_message_queue_arg(self, args, replacement_queue):
+        """Replace the task's message queue argument with a tracking proxy."""
+        return [
+            replacement_queue if arg is self.message_queue else arg
+            for arg in args
+        ]
+
+    def _is_continuous_task(self, task_name, mode):
+        if task_name == 'easy_flow':
+            return mode == 'easy'
+        return mode == 'pro' and task_name in CONTINUOUS_TASK_NAMES
+
+    def _should_emit_completion_notification(self, task_name, mode, task_succeeded):
+        """判断某个任务结束后是否应考虑发送完成提醒。"""
+        if not self._is_continuous_task(task_name, mode):
+            return False
+        if task_name == 'release_json' and task_succeeded and self._should_auto_import_after_release():
+            return False
+        return True
+
+    def _app_window_is_active(self):
+        try:
+            if platform.system() == "Windows":
+                return self._windows_app_window_is_foreground()
+            return self.root.focus_displayof() is not None
+        except Exception:
+            log.debug("检查窗口活跃状态失败，按活跃处理。", exc_info=True)
+            return True
+
+    def _windows_app_window_is_foreground(self):
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        foreground_window = user32.GetForegroundWindow()
+        if not foreground_window:
+            return False
+
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        foreground_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(foreground_window, ctypes.byref(foreground_pid))
+        if foreground_pid.value == os.getpid():
+            return True
+
+        try:
+            if self.root.focus_displayof() is not None:
+                return True
+            root_window = self.root.winfo_id()
+        except tk.TclError:
+            return True
+
+        # Tk may expose a child HWND via winfo_id(); compare top-level ancestors too.
+        ga_root = 2
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.IsChild.argtypes = [wintypes.HWND, wintypes.HWND]
+        user32.IsChild.restype = wintypes.BOOL
+        root_top = user32.GetAncestor(root_window, ga_root) or root_window
+        foreground_top = user32.GetAncestor(foreground_window, ga_root) or foreground_window
+
+        if foreground_window in (root_window, root_top):
+            return True
+        if foreground_top == root_top:
+            return True
+        return bool(user32.IsChild(root_top, foreground_window))
+
+    def _maybe_send_completion_notification(self, problem=False):
+        """Notify only when enabled and the app window is not active."""
+        if not self.completion_notifications_enabled():
+            log.debug("完成提醒未发送：配置未启用。")
+            return
+        if self._app_window_is_active():
+            log.info("完成提醒未发送：应用窗口当前处于活跃状态。")
+            return
+
+        sent = windows_notifications.send_task_notification(problem=problem)
+        if sent:
+            log.info("完成提醒已发送：%s。", "当前任务出现问题" if problem else "当前任务已完成")
+        else:
+            log.warning("完成提醒未发送：Windows 任务中心提醒调用失败，请检查 winsdk/pywin32、通知权限或专注助手设置。")
 
     def _should_auto_import_after_release(self):
         """检查第六步完成后是否应自动执行第七步。"""

@@ -53,75 +53,98 @@ def _find_json_key_line(json_text, key, start_pos=0):
 
 def _validate_translation_json_schema(data, json_text):
     errors = []
+    file_pos_by_name = {}
 
-    def add_error(path, line, message):
+    def get_file_pos(source_file_name):
+        if source_file_name not in file_pos_by_name:
+            _, file_pos_by_name[source_file_name] = _find_json_key_line(json_text, source_file_name)
+        return file_pos_by_name[source_file_name]
+
+    def add_error(path, message, key=None, start_pos=0):
         if len(errors) < MAX_SCHEMA_ERRORS_TO_REPORT:
+            line = None
+            if key is not None:
+                line, _ = _find_json_key_line(json_text, key, start_pos)
             errors.append({"path": path, "line": line, "message": message})
 
     if not isinstance(data, dict):
         add_error(
             "$",
-            None,
             f"JSON 顶层必须是按文件名组织的对象，实际为{_json_type_name(data)}。",
         )
         return errors
 
     for source_file_name, translations_for_this_file in data.items():
         file_path_label = f"$[{source_file_name!r}]"
-        file_line, file_pos = _find_json_key_line(json_text, source_file_name)
 
         if not isinstance(source_file_name, str) or not source_file_name:
             add_error(
                 "$",
-                None,
                 f"文件名键必须是非空字符串，实际为{_json_type_name(source_file_name)}：{_short_repr(source_file_name)}",
             )
+            if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
+                break
             continue
 
         if not isinstance(translations_for_this_file, dict):
             add_error(
                 file_path_label,
-                file_line,
-                f"文件 '{source_file_name}' 下必须是原文到翻译对象的映射，实际为{_json_type_name(translations_for_this_file)}。"
+                f"文件 '{source_file_name}' 下必须是原文到翻译对象的映射，实际为{_json_type_name(translations_for_this_file)}。",
+                key=source_file_name,
             )
+            if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
+                break
             continue
 
         for original_text, translation_metadata_obj in translations_for_this_file.items():
-            entry_line, _ = _find_json_key_line(json_text, original_text, max(file_pos, 0))
             entry_label = f"{file_path_label}[{_short_repr(original_text)!r}]"
 
             if not isinstance(original_text, str):
                 add_error(
                     file_path_label,
-                    file_line,
-                    f"文件 '{source_file_name}' 下的原文键必须是字符串，实际为{_json_type_name(original_text)}。"
+                    f"文件 '{source_file_name}' 下的原文键必须是字符串，实际为{_json_type_name(original_text)}。",
+                    key=source_file_name,
                 )
+                if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
+                    break
                 continue
 
             if not isinstance(translation_metadata_obj, dict):
                 add_error(
                     entry_label,
-                    entry_line,
                     "每个原文条目的值必须是对象，至少包含 text 字段；"
-                    f"实际为{_json_type_name(translation_metadata_obj)}：{_short_repr(translation_metadata_obj)}"
+                    f"实际为{_json_type_name(translation_metadata_obj)}：{_short_repr(translation_metadata_obj)}",
+                    key=original_text,
+                    start_pos=max(get_file_pos(source_file_name), 0),
                 )
+                if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
+                    break
                 continue
 
             if "text" not in translation_metadata_obj:
                 add_error(
                     entry_label,
-                    entry_line,
-                    "翻译对象缺少 text 字段。"
+                    "翻译对象缺少 text 字段。",
+                    key=original_text,
+                    start_pos=max(get_file_pos(source_file_name), 0),
                 )
+                if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
+                    break
                 continue
 
             translated_text = translation_metadata_obj["text"]
             if translated_text is not None and not isinstance(translated_text, str):
                 add_error(
                     entry_label + "['text']",
-                    entry_line,
-                    f"text 字段必须是字符串或 null，实际为{_json_type_name(translated_text)}。"
+                    f"text 字段必须是字符串或 null，实际为{_json_type_name(translated_text)}。",
+                    key=original_text,
+                    start_pos=max(get_file_pos(source_file_name), 0),
                 )
+                if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
+                    break
+
+        if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
+            break
 
     return errors
 

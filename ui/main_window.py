@@ -1,8 +1,9 @@
 # ui/main_window.py
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, messagebox
 import datetime
 import os
+from core.utils import windows_notifications
 
 # 导入同目录下的其他 UI 面板类 (假设它们稍后会被定义)
 from . import easy_mode_panel
@@ -28,6 +29,9 @@ class MainWindow:
         self.app = app_controller # 保留对 App 控制器的引用
         self.config = config
         self.root.title("WindyTranslator")
+        self.completion_notification_var = tk.BooleanVar(
+            value=self.config.get("enable_completion_notification", False)
+        )
         # 初始大小将在切换模式时设置
         # self.root.geometry("600x750") # 初始大小由模式决定
 
@@ -70,12 +74,23 @@ class MainWindow:
         self.functions_notebook.add(self.pro_mode_frame_container, text="专业模式")
 
         # --- 3. 日志区域 ---
-        log_frame = ttk.LabelFrame(main_frame, text="操作日志", padding="5")
+        log_frame = ttk.LabelFrame(main_frame, padding="5")
         # **** 让 log_frame 在主框架中双向填充 ****
         log_frame.grid(row=2, column=0, sticky="nsew", padx=0, pady=5)
         # **** Grid 配置: 让 log_frame 内部的 Text (行 0, 列 0) 可以双向扩展 ****
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
+
+        log_header_frame = ttk.Frame(log_frame)
+        log_frame.configure(labelwidget=log_header_frame)
+        ttk.Label(log_header_frame, text="操作日志").pack(side=tk.LEFT)
+        self.completion_notification_checkbox = ttk.Checkbutton(
+            log_header_frame,
+            text="完成提醒",
+            variable=self.completion_notification_var,
+            command=self._on_completion_notification_change,
+        )
+        self.completion_notification_checkbox.pack(side=tk.LEFT, padx=(10, 0))
 
         self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, width=80, height=10, state=tk.DISABLED)
         # **** 让 log_text 填充其在 log_frame 中的单元格 ****
@@ -103,6 +118,7 @@ class MainWindow:
         # --- 保存控件引用，方便启用/禁用 ---
         self.all_controls = [
             self.browse_button,
+            self.completion_notification_checkbox,
             self.easy_panel.get_controls(), # EasyModePanel 需要提供获取其控件的方法
             self.pro_panel.get_controls()   # ProModePanel 需要提供获取其控件的方法
         ]
@@ -145,6 +161,35 @@ class MainWindow:
         if hasattr(self, 'easy_panel') and self.easy_panel.winfo_exists():
             self.easy_panel.update_progress(value)
         self.root.update_idletasks()
+
+    def _on_completion_notification_change(self):
+        """保存操作日志区域的完成提醒设置。"""
+        if self.completion_notification_var.get():
+            if not windows_notifications.has_notification_identity():
+                should_register = messagebox.askyesno(
+                    "注册提醒",
+                    "Windows 通知需要先注册应用通知身份。\n会在开始菜单添加快捷方式。\n是否现在注册？",
+                    parent=self.root,
+                )
+            else:
+                should_register = True
+
+            if not should_register or not windows_notifications.register_notification_identity():
+                self.completion_notification_var.set(False)
+                self.config["enable_completion_notification"] = False
+                self.config["completion_notification_identity_registered"] = False
+                self.app.save_config()
+                if should_register:
+                    messagebox.showerror(
+                        "注册失败",
+                        "未能注册 Windows 通知身份，完成提醒已自动关闭。",
+                        parent=self.root,
+                    )
+                return
+            self.config["completion_notification_identity_registered"] = True
+
+        self.config["enable_completion_notification"] = self.completion_notification_var.get()
+        self.app.save_config()
 
     def set_controls_enabled(self, enabled):
         """启用或禁用窗口中的主要交互控件。"""
