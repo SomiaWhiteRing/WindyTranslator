@@ -18,6 +18,7 @@ class ProModePanel(ttk.Frame):
         self.export_encoding_var = tk.StringVar(value=pro_settings.get('export_encoding', '932'))
         self.import_encoding_var = tk.StringVar(value=pro_settings.get('import_encoding', '936'))
         self.rtp_fix_check = tk.BooleanVar(value=pro_settings.get('rewrite_rtp_fix', True))
+        self.auto_import_after_release_check = tk.BooleanVar(value=pro_settings.get('auto_import_after_release', False))
         self.rtp_button_text = tk.StringVar()
 
         # --- 编码选项列表 (不变) ---
@@ -137,7 +138,14 @@ class ProModePanel(ttk.Frame):
         self.release_json_button = ttk.Button(row_frame_6, text="执行", width=button_width,
                                              command=lambda: self.app.start_task('release_json'))
         self.release_json_button.pack(side=tk.RIGHT, padx=padx_val)
-        all_controls_list.append(self.release_json_button)
+        self.auto_import_after_release_checkbox = ttk.Checkbutton(
+            row_frame_6,
+            text="释放后自动导入",
+            variable=self.auto_import_after_release_check,
+            command=self._save_settings,
+        )
+        self.auto_import_after_release_checkbox.pack(side=tk.RIGHT, padx=padx_val)
+        all_controls_list.extend([self.release_json_button, self.auto_import_after_release_checkbox])
         row_idx += 1
 
         # --- 7. 导入文本 ---
@@ -217,5 +225,6 @@ class ProModePanel(ttk.Frame):
             'export_encoding': export_code,
             'import_encoding': import_code,
             'rewrite_rtp_fix': self.rtp_fix_check.get(),
+            'auto_import_after_release': self.auto_import_after_release_check.get(),
         }
         self.app.save_pro_mode_settings(settings_to_save)

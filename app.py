@@ -431,8 +431,10 @@ class RPGTranslatorApp:
 
         def wrapper():
             task_start_time = time.time()
+            task_succeeded = False
             try:
-                task_func(*args, **kwargs)
+                task_result = task_func(*args, **kwargs)
+                task_succeeded = bool(task_result)
                 # 注意：任务成功完成的消息由任务自身通过队列发送 ("success", ...)
             except Exception as e:
                 # 捕获任务函数本身抛出的未处理异常（理论上不应发生）
@@ -458,12 +460,29 @@ class RPGTranslatorApp:
                 # 在主线程中更新状态
                 self.root.after(0, lambda: self.set_processing_state(False))
                 self.root.after(10, self._check_and_update_ui_states) # <--- 新增: 任务完成后也检查状态
+                if task_name == 'release_json' and task_succeeded and self._should_auto_import_after_release():
+                    release_game_path = args[0] if args else None
+                    self.root.after(100, lambda gp=release_game_path, m=mode: self._auto_import_after_release(gp, m))
                 # 移除对线程的引用
                 self.current_task_thread = None
 
         # 启动线程
         self.current_task_thread = threading.Thread(target=wrapper, daemon=True)
         self.current_task_thread.start()
+
+    def _should_auto_import_after_release(self):
+        """检查第六步完成后是否应自动执行第七步。"""
+        pro_config = self.config.get('pro_mode_settings', {})
+        return bool(pro_config.get('auto_import_after_release', False))
+
+    def _auto_import_after_release(self, game_path, mode='pro'):
+        """第六步释放成功后自动启动第七步导入。"""
+        if self.is_processing:
+            self.root.after(100, lambda gp=game_path, m=mode: self._auto_import_after_release(gp, m))
+            return
+
+        self.log_message("释放 JSON 完成，已启用自动导入，开始执行第 7 步。", "normal")
+        self.start_task('import', mode=mode, game_path=game_path)
 
     def _process_messages(self):
         """处理来自后台任务的消息队列。"""

@@ -34,7 +34,7 @@ def test_run_release_json_reports_json_syntax_line_and_does_not_restore(tmp_path
 
     messages = queue.Queue()
 
-    run_release_json(str(game_path), str(tmp_path), str(translated_json_path), messages)
+    result = run_release_json(str(game_path), str(tmp_path), str(translated_json_path), messages)
 
     emitted = []
     while not messages.empty():
@@ -43,7 +43,31 @@ def test_run_release_json_reports_json_syntax_line_and_does_not_restore(tmp_path
     errors = [payload for kind, payload in emitted if kind == "error"]
     statuses = [payload for kind, payload in emitted if kind == "status"]
 
+    assert result is False
     assert any("不是合法 JSON" in error for error in errors)
     assert any("第 3 行" in error for error in errors)
     assert "释放 JSON 失败 (JSON语法错误)" in statuses
     assert (string_scripts_path / "Map001.txt").read_text(encoding="utf-8") == "keep current file\n"
+
+
+def test_run_release_json_returns_true_on_success(tmp_path):
+    game_path = tmp_path / "Game"
+    backup_path = game_path / "StringScripts_Origin"
+    string_scripts_path = game_path / "StringScripts"
+    translated_json_path = tmp_path / "translation_translated.json"
+
+    backup_path.mkdir(parents=True)
+    (backup_path / "Map001.txt").write_text("#Name#\n原文\n", encoding="utf-8")
+    string_scripts_path.mkdir()
+    (string_scripts_path / "Map001.txt").write_text("old current file\n", encoding="utf-8")
+    translated_json_path.write_text(
+        '{"Map001.txt": {"原文": {"text": "译文", "status": "success"}}}',
+        encoding="utf-8",
+    )
+
+    messages = queue.Queue()
+
+    result = run_release_json(str(game_path), str(tmp_path), str(translated_json_path), messages)
+
+    assert result is True
+    assert (string_scripts_path / "Map001.txt").read_text(encoding="utf-8") == "#Name#\n译文\n"

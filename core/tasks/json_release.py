@@ -390,13 +390,13 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
             message_queue.put(("error", f"错误：未找到原始脚本备份目录 StringScripts_Origin: {backup_path}"))
             message_queue.put(("status", "释放 JSON 失败 (无备份)"))
             message_queue.put(("done", None))
-            return
+            return False
 
         if not selected_json_path or not os.path.exists(selected_json_path):
             message_queue.put(("error", f"指定的翻译 JSON 文件无效或不存在: {selected_json_path}"))
             message_queue.put(("status", "释放 JSON 失败 (JSON文件无效)"))
             message_queue.put(("done", None))
-            return
+            return False
 
         message_queue.put(("status", "正在加载并校验翻译 JSON..."))
         message_queue.put(("log", ("normal", f"使用翻译文件: {selected_json_path}")))
@@ -415,20 +415,20 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
             ))
             message_queue.put(("status", "释放 JSON 失败 (JSON语法错误)"))
             message_queue.put(("done", None))
-            return
+            return False
         except Exception as load_json_err:
             log.exception(f"加载翻译 JSON 文件失败: {selected_json_path} - {load_json_err}")
             message_queue.put(("error", f"加载翻译 JSON 文件失败: {load_json_err}"))
             message_queue.put(("status", "释放 JSON 失败 (加载JSON出错)"))
             message_queue.put(("done", None))
-            return
+            return False
 
         schema_errors = _validate_translation_json_schema(all_translations_per_file, translation_json_text)
         if schema_errors:
             message_queue.put(("error", _format_schema_errors(selected_json_path, schema_errors)))
             message_queue.put(("status", "释放 JSON 失败 (JSON结构错误)"))
             message_queue.put(("done", None))
-            return
+            return False
 
         load_json_elapsed = time.perf_counter() - load_json_start_time
         log.debug(f"加载按文件组织的翻译数据完成。共涉及 {len(all_translations_per_file)} 个源文件，耗时 {load_json_elapsed:.2f} 秒。")
@@ -445,7 +445,7 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
             message_queue.put(("error", f"错误：从 StringScripts_Origin 恢复时出错: {restore_err}"))
             message_queue.put(("status", "释放 JSON 失败 (恢复备份失败)"))
             message_queue.put(("done", None))
-            return
+            return False
 
         restore_elapsed = time.perf_counter() - restore_start_time
         log.debug(
@@ -457,7 +457,7 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
             message_queue.put(("error", f"严重错误：恢复 StringScripts 后目录仍不存在: {string_scripts_path}"))
             message_queue.put(("status", "释放 JSON 失败 (恢复后目录丢失)"))
             message_queue.put(("done", None))
-            return
+            return False
 
         overall_applied_count = 0
         overall_skipped_count = 0
@@ -515,9 +515,11 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
         message_queue.put(("success", f"JSON 文件释放完成。总应用 {overall_applied_count} 翻译，总跳过 {overall_skipped_count}。"))
         message_queue.put(("status", "释放 JSON 完成"))
         message_queue.put(("done", None))
+        return True
 
     except Exception as main_release_err:
         log.exception("释放 JSON 文件任务执行期间发生意外错误。")
         message_queue.put(("error", f"释放 JSON 文件过程中发生严重错误: {main_release_err}"))
         message_queue.put(("status", "释放 JSON 失败"))
         message_queue.put(("done", None))
+        return False
