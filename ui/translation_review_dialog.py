@@ -1243,7 +1243,7 @@ class LineLimitCheckerApp:
         speaker_entry.bind("<Return>", lambda _event: self._request_refresh_entry_list())
         keyword_entry.bind("<Return>", lambda _event: self._request_refresh_entry_list())
 
-        list_frame = ttk.LabelFrame(parent, text="问题列表")
+        list_frame = ttk.LabelFrame(parent, text="问题列表（pageUP/pageDown键可快速切换）")
         list_frame.grid(row=1, column=0, sticky="nsew")
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)

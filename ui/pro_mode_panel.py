@@ -126,7 +126,7 @@ class ProModePanel(ttk.Frame):
         self.deepseek_config_button = ttk.Button(row_frame_5, text="配置", width=config_button_width,
                                               command=lambda: self.app.start_task('configure_deepseek'))
         self.deepseek_config_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.fix_fallback_button = ttk.Button(row_frame_5, text="审阅问题", width=button_width + 2,
+        self.fix_fallback_button = ttk.Button(row_frame_5, text="问题审阅", width=button_width + 2,
                                               command=lambda: self.app.start_task('fix_fallback'),
                                               state=tk.DISABLED) # <--- 初始禁用
         self.fix_fallback_button.pack(side=tk.RIGHT, padx=padx_val) # <--- 添加按钮到布局
@@ -173,9 +173,9 @@ class ProModePanel(ttk.Frame):
         """返回此面板上的所有可交互控件列表。"""
         return self.all_controls
 
-    # --- 新增: 更新审阅问题按钮状态的方法 ---
+    # --- 新增: 更新问题审阅按钮状态的方法 ---
     def update_fix_fallback_button_state(self, enabled):
-        """根据传入的状态更新 '审阅问题' 按钮的可用性。"""
+        """根据传入的状态更新 '问题审阅' 按钮的可用性。"""
         new_state = tk.NORMAL if enabled else tk.DISABLED
         if hasattr(self, 'fix_fallback_button') and self.fix_fallback_button.winfo_exists():
             try:

@@ -427,7 +427,7 @@ class RPGTranslatorApp:
                 Path(fallback_csv_path) if fallback_csv_path else None,
             )
         except Exception as e:
-            log.error(f"检查审阅问题状态时出错 ({translated_json_path}): {e}")
+            log.error(f"检查问题审阅状态时出错 ({translated_json_path}): {e}")
             return False
 
     def _check_and_update_ui_states(self): # <--- 新增: 统一检查和更新 UI
