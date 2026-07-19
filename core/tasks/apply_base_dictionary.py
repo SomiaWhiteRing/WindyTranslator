@@ -4,6 +4,7 @@ import json
 import logging
 from core.utils import file_system, text_processing, dictionary_manager
 from core.config import DEFAULT_WORLD_DICT_CONFIG
+from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +81,14 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
     callback_message_content = "应用基础字典操作已开始，但未正常完成。" # 默认失败消息
 
     try:
+        detected = detect_game_engine(game_path)
+        if detected and detected.engine == "wolf":
+            callback_task_successful = True
+            callback_message_content = "WOLF 项目不使用内置基础词典，已跳过。"
+            message_queue.put(("log", ("normal", callback_message_content)))
+            message_queue.put(("status", "应用基础字典已跳过 (WOLF)"))
+            return
+
         # --- 1. 确定文件路径 ---
         game_folder_name = text_processing.sanitize_filename(os.path.basename(game_path))
         if not game_folder_name: game_folder_name = "UntitledGame"

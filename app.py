@@ -8,7 +8,6 @@ import threading
 import traceback
 import logging
 import time
-import csv
 import platform
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -111,7 +110,6 @@ class RPGTranslatorApp:
         # --- 初始化 UI ---
         # 将 self (App实例) 传递给 MainWindow，以便 UI 调用 App 的方法
         self.main_window = main_window.MainWindow(self.root, self, self.config)
-        self._check_and_update_ui_states() # <--- 新增: 初始检查
 
         # 根据加载的配置设置初始模式和窗口大小
         initial_mode = self.config.get('selected_mode', 'easy')
@@ -131,12 +129,10 @@ class RPGTranslatorApp:
                 self.game_path.set(path)
                 self.log_message(f"已选择游戏目录: {path} ({detected.engine})")
                 self.update_status("游戏目录已选择，可以开始操作。")
-                # 清理旧状态？或者在任务开始时清理
-                self._check_and_update_ui_states() # <--- 新增: 路径改变后检查按钮状态
             else:
                 messagebox.showerror(
                     "路径无效",
-                    "选择的目录不是有效的 RPG Maker 2000/2003、VX Ace 或 MV/MZ 游戏目录（未找到 RPG_RT.lmt、Data/MapInfos.rvdata2 或 data/MapInfos.json）。",
+                    "选择的目录不是有效的受支持游戏目录（未找到 RPG_RT.lmt、Data/MapInfos.rvdata2、data/MapInfos.json 或 Data.wolf）。",
                     parent=self.root,
                 )
                 self.log_message("选择了无效的游戏目录。", "error")
@@ -145,7 +141,7 @@ class RPGTranslatorApp:
         """获取当前游戏路径。"""
         return self.game_path.get()
 
-    def start_task(self, task_name, mode='pro', game_path=None, task_id_for_callback=None):
+    def start_task(self, task_name, mode='pro', game_path=None, task_id_for_callback=None, task_payload=None):
         """
         根据任务名称启动相应的后台任务。
 
@@ -155,6 +151,7 @@ class RPGTranslatorApp:
             game_path (str, optional): 从外部（如DictEditor）传递的游戏路径。
                                       如果为 None，则使用 self.get_game_path()。
             task_id_for_callback (str, optional): 用于回调的唯一任务 ID，通常用于编辑器实例。
+            task_payload (object, optional): 独立工具任务需要的结构化参数。
         """
         if self.is_processing:
             self.log_message("请等待当前操作完成。", "error")
@@ -242,6 +239,11 @@ class RPGTranslatorApp:
         elif task_name == 'import':
             task_func = import_task.run_import
             task_args = [current_game_path, import_encoding, self.message_queue]
+        elif task_name == 'apply_wolf_fonts':
+            from core.engines import wolf
+
+            task_func = wolf.apply_font_revision
+            task_args = [current_game_path, task_payload, self.message_queue]
         elif task_name == 'easy_flow':
              # 轻松模式需要检查 API Key 是否配置
              if not world_dict_config.get("api_key") or not translate_config.get("api_key"):
@@ -292,7 +294,6 @@ class RPGTranslatorApp:
                     initial_path=Path(translated_json_path),
                     fallback_csv_path=Path(fallback_csv_path),
                     integrated_mode=True,
-                    on_saved=self._check_and_update_ui_states,
                 )
                 self.log_message("译文问题审阅器已打开。", "normal")
             except Exception as e:
@@ -396,50 +397,6 @@ class RPGTranslatorApp:
         if not translated_dir: return None
         return os.path.join(translated_dir, "translation_translated.json")
 
-    def _check_fallback_csv_status(self, csv_path): # <--- 新增: 检查 CSV 状态
-        """检查回退 CSV 文件是否存在且有数据行（非表头）。"""
-        if not csv_path or not os.path.exists(csv_path):
-            return False # 文件不存在，按钮禁用
-        try:
-            with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
-                reader = csv.reader(f)
-                header = next(reader, None) # 读取表头
-                if header is None:
-                    return False # 空文件，禁用
-                # 检查是否存在下一行 (数据行)
-                first_data_row = next(reader, None)
-                return first_data_row is not None # 如果能读到数据行，则返回 True (启用)
-        except StopIteration: # 只有表头，没有数据行
-            return False # 只有表头，禁用
-        except Exception as e:
-            log.error(f"检查回退 CSV 文件状态时出错 ({csv_path}): {e}")
-            return False # 读取出错，视为禁用
-
-    def _check_review_issue_status(self, translated_json_path, fallback_csv_path=None):
-        """检查是否存在可用统一审阅器处理的问题。"""
-        if not translated_json_path:
-            return False
-        try:
-            from ui.translation_review_dialog import translation_json_has_reviewable_issues
-
-            return translation_json_has_reviewable_issues(
-                Path(translated_json_path),
-                Path(fallback_csv_path) if fallback_csv_path else None,
-            )
-        except Exception as e:
-            log.error(f"检查问题审阅状态时出错 ({translated_json_path}): {e}")
-            return False
-
-    def _check_and_update_ui_states(self): # <--- 新增: 统一检查和更新 UI
-        """检查依赖文件状态的 UI 元素并更新它们。"""
-        # 检查审阅按钮状态
-        fallback_csv_path = self._get_fallback_csv_path()
-        translated_json_path = self._get_translated_json_path()
-        enable_fix_button = self._check_review_issue_status(translated_json_path, fallback_csv_path)
-        if hasattr(self, 'main_window') and self.main_window:
-            self.main_window.update_fix_fallback_button_state(enable_fix_button)
-        # 未来可以添加其他需要根据文件状态更新的 UI 逻辑
-
     def _find_translated_json_files(self, game_path_override=None):
         """查找当前游戏已翻译的 JSON 文件列表。"""
         translated_dir = self._get_translated_dir(game_path_override)
@@ -460,7 +417,7 @@ class RPGTranslatorApp:
         current_path = path_to_check if path_to_check is not None else self.get_game_path()
         if not current_path:
             self.log_message("请先选择有效的游戏目录。", "error")
-            messagebox.showerror("错误", "请先选择一个有效的 RPG Maker 游戏目录。", parent=self.root)
+            messagebox.showerror("错误", "请先选择一个有效的游戏目录。", parent=self.root)
             return False
         return True
 
@@ -507,7 +464,6 @@ class RPGTranslatorApp:
                 # self.message_queue.put(("done", None))
                 # 在主线程中更新状态
                 self.root.after(0, lambda: self.set_processing_state(False))
-                self.root.after(10, self._check_and_update_ui_states) # <--- 新增: 任务完成后也检查状态
                 auto_import_pending = task_name == 'release_json' and task_succeeded and self._should_auto_import_after_release()
                 if self._should_emit_completion_notification(task_name, mode, task_succeeded) and not auto_import_pending:
                     self.root.after(
@@ -675,6 +631,12 @@ class RPGTranslatorApp:
                     self.update_easy_mode_progress(content)
                 elif msg_type == "easy_status": # 特别为轻松模式
                     self.update_easy_mode_status(content)
+                elif msg_type == "font_revision_applied":
+                    if hasattr(self.main_window, "font_panel"):
+                        self.main_window.font_panel.refresh()
+                elif msg_type == "wolf_initialized":
+                    if hasattr(self.main_window, "refresh_game_context"):
+                        self.main_window.refresh_game_context()
                 elif msg_type == "done":
                     # 任务完成信号，由任务内部发送
                     # App 层主要用它来判断是否可以启动新任务
@@ -833,11 +795,15 @@ class RPGTranslatorApp:
                 # 可以尝试更优雅地停止线程，但 Popen 启动的外部进程无法直接停止
                 # self._stop_requested = True # 设置停止标志 (需要任务支持)
                 # self.thread_pool.shutdown(wait=False) # 不等待线程结束
+                if hasattr(self.main_window, "font_panel"):
+                    self.main_window.font_panel.close()
                 self.root.destroy()
             else:
                 return # 用户取消退出
         else:
              # 尝试保存最后的配置
              self.save_config()
+             if hasattr(self.main_window, "font_panel"):
+                 self.main_window.font_panel.close()
              self.thread_pool.shutdown(wait=True) # 等待线程池关闭
              self.root.destroy()

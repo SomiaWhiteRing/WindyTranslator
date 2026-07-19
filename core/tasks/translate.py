@@ -28,6 +28,17 @@ CONTROL_PLACEHOLDER_INSTRUCTION = """
 普通日文引号（「」『』）不是控制码，可以按目标语言需要自然保留或调整。
 """
 
+STRICT_LINE_MARKERS = {"StringPicture", "WOLFText"}
+
+
+def _protected_literals_for_text(text, protected_literals):
+    quote_pairs = (("「", "」"), ("『", "』"), ('"', '"'), ("'", "'"))
+    selected = []
+    for literal in protected_literals:
+        if any(f"{left}{literal}{right}" in text for left, right in quote_pairs):
+            selected.append(literal)
+    return selected
+
 # --- 批量翻译工作单元 (与上一版几乎一致，增加了 current_processing_file_name 的使用) ---
 def _translate_batch_with_retry(
     batch_metadata_items, 
@@ -48,6 +59,7 @@ def _translate_batch_with_retry(
     context_lines_config = config.get("context_lines", 10) 
     apply_gbk_compatibility = config.get("_apply_gbk_compatibility_postprocess", True)
     control_profile = config.get("_control_code_profile") or control_tokens.default_profile()
+    translation_validator = config.get("_translation_validator")
     min_batch_size = 1
     
     batch_original_texts_for_logging = [item["text_to_translate"] for item in batch_metadata_items]
@@ -63,8 +75,18 @@ def _translate_batch_with_retry(
     # 在批次范围内去重人物词典不一致的噪声告警（按 昵称-对应原名 配对）
     warned_missing_main_names = set()
 
+    protected_literals = config.get("_protected_literals") or ()
+    item_protected_literals = [
+        _protected_literals_for_text(item["text_to_translate"], protected_literals)
+        for item in batch_metadata_items
+    ]
     protected_batch_texts = [
-        control_tokens.protect_text(item["text_to_translate"], control_profile) for item in batch_metadata_items
+        control_tokens.protect_text(
+            item["text_to_translate"],
+            control_profile,
+            extra_literals=item_protected_literals[index],
+        )
+        for index, item in enumerate(batch_metadata_items)
     ]
     processed_original_texts_for_glossary_matching = [protected.text for protected in protected_batch_texts]
     combined_processed_lower_for_glossary = "\n".join(processed_original_texts_for_glossary_matching).lower()
@@ -141,7 +163,7 @@ def _translate_batch_with_retry(
             source_language=source_language, target_language=target_language,
             character_glossary_section=character_glossary_section, entity_glossary_section=entity_glossary_section,
             context_section=context_section, batch_text=batch_text_for_prompt_payload
-        ) + CONTROL_PLACEHOLDER_INSTRUCTION + timestamp_suffix
+        ) + CONTROL_PLACEHOLDER_INSTRUCTION + config.get("_translation_validator_instruction", "") + timestamp_suffix
 
         log.debug(f"调用 API 翻译批次 (文件: {current_processing_file_name or 'N/A'}, 大小: {current_batch_size}, 尝试 {attempt+1}/{max_retries+1})")
         current_api_messages_payload = [{"role": "user", "content": current_final_prompt_payload}]
@@ -255,7 +277,7 @@ def _translate_batch_with_retry(
                 if not restore_ok:
                     is_line_valid = False
                     line_validation_reason = f"控制码占位符还原失败: {restore_reason}"
-                elif marker_for_item == 'StringPicture':
+                elif marker_for_item in STRICT_LINE_MARKERS:
                     orig_lines = original_text_for_validation.splitlines()
                     tran_lines = post_processed_text_for_validation.splitlines()
                     if len(orig_lines) != len(tran_lines):
@@ -263,17 +285,28 @@ def _translate_batch_with_retry(
                         line_validation_reason = f"StringPicture 行数不一致: 原文 {len(orig_lines)} 行, 译文 {len(tran_lines)} 行"
                     else:
                         is_line_valid, line_validation_reason = text_processing.validate_translation(
-                            original_text_for_validation, repaired_text_for_validation, post_processed_text_for_validation
+                            original_text_for_validation,
+                            repaired_text_for_validation,
+                            post_processed_text_for_validation,
+                            allowed_source_literals=item_protected_literals[i],
                         )
                 else:
                     is_line_valid, line_validation_reason = text_processing.validate_translation(
-                        original_text_for_validation, repaired_text_for_validation, post_processed_text_for_validation
+                        original_text_for_validation,
+                        repaired_text_for_validation,
+                        post_processed_text_for_validation,
+                        allowed_source_literals=item_protected_literals[i],
+                    )
+                if is_line_valid and callable(translation_validator):
+                    is_line_valid, line_validation_reason = translation_validator(
+                        original_text_for_validation,
+                        post_processed_text_for_validation,
                     )
                 if not is_line_valid:
                     log.warning(f"批次内单行验证失败 (文件: {current_processing_file_name or 'N/A'}, 尝试 {attempt+1}): '{original_text_for_validation[:30]}...' 原因: {line_validation_reason}")
                     # 方案B：如果是 StringPicture 且因行数失败，尝试按行回退翻译
-                    if marker_for_item == 'StringPicture' and (line_validation_reason and '行数不一致' in line_validation_reason):
-                        success_linewise, repaired_block, post_processed_block, fallback_reason = _translate_stringpicture_by_lines(
+                    if marker_for_item in STRICT_LINE_MARKERS and (line_validation_reason and '行数不一致' in line_validation_reason):
+                        success_linewise, repaired_block, post_processed_block, fallback_reason = _translate_strict_block_by_lines(
                             original_text_for_validation,
                             marker_for_item,
                             original_item_data.get('speaker_id'),
@@ -358,9 +391,9 @@ def _translate_batch_with_retry(
                          file_name_for_log=current_processing_file_name)
         fallback_results = {}
         for item_data in batch_metadata_items:
-            original_text_key = item_data["text_to_translate"]
+            original_text_key = item_data["original_json_key"]
             fallback_results[original_text_key] = {
-                "text": original_text_key, 
+                "text": item_data["text_to_translate"],
                 "status": "fallback", 
                 "failure_context": final_fallback_reason,
                 "original_marker": item_data["original_marker"], 
@@ -402,7 +435,7 @@ def _log_batch_error(
 
 
 # --- 辅助函数：当 StringPicture 块行数不一致时，按“逐行”进行回退翻译 ---
-def _translate_stringpicture_by_lines(
+def _translate_strict_block_by_lines(
     original_block_text,
     marker_type,
     speaker_id,
@@ -425,7 +458,18 @@ def _translate_stringpicture_by_lines(
         if len(non_empty_lines) == 0:
             return True, original_block_text, original_block_text, ""
 
-        protected_lines = [control_tokens.protect_text(line, control_profile) for line in non_empty_lines]
+        protected_literals = config.get("_protected_literals") or ()
+        line_protected_literals = [
+            _protected_literals_for_text(line, protected_literals) for line in non_empty_lines
+        ]
+        protected_lines = [
+            control_tokens.protect_text(
+                line,
+                control_profile,
+                extra_literals=line_protected_literals[index],
+            )
+            for index, line in enumerate(non_empty_lines)
+        ]
         numbered_lines_for_prompt = []
         for idx, line in enumerate(non_empty_lines):
             pua_processed = protected_lines[idx].text
@@ -441,7 +485,7 @@ def _translate_stringpicture_by_lines(
             entity_glossary_section=entity_glossary_section or "",
             context_section=context_section or "",
             batch_text=batch_text_for_prompt_payload
-        ) + CONTROL_PLACEHOLDER_INSTRUCTION
+        ) + CONTROL_PLACEHOLDER_INSTRUCTION + config.get("_translation_validator_instruction", "")
 
         api_messages = [{"role": "user", "content": final_prompt}]
         api_kwargs = {}
@@ -505,7 +549,12 @@ def _translate_stringpicture_by_lines(
                 orig_line,
                 apply_gbk_compatibility=config.get("_apply_gbk_compatibility_postprocess", True)
             )
-            is_valid, reason = text_processing.validate_translation(orig_line, repaired, postp)
+            is_valid, reason = text_processing.validate_translation(
+                orig_line,
+                repaired,
+                postp,
+                allowed_source_literals=line_protected_literals[idx - 1],
+            )
             if not is_valid:
                 _log_batch_error(error_log_path, error_log_lock, "按行回退(单行验证失败)", non_empty_lines, reason, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, failed_item_index=idx-1, raw_item_translation=raw_tran, file_name_for_log=current_processing_file_name)
                 return False, None, None, f"单行验证失败: {reason}"
@@ -531,10 +580,26 @@ def _translate_stringpicture_by_lines(
             _log_batch_error(error_log_path, error_log_lock, "按行回退(整体验证-行数不一致)", [original_block_text], reason_len, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
             return False, None, None, reason_len
 
-        ok_final, reason_final = text_processing.validate_translation(original_block_text, repaired_block_text, post_processed_block_text)
+        block_literals = _protected_literals_for_text(original_block_text, protected_literals)
+        ok_final, reason_final = text_processing.validate_translation(
+            original_block_text,
+            repaired_block_text,
+            post_processed_block_text,
+            allowed_source_literals=block_literals,
+        )
         if not ok_final:
             _log_batch_error(error_log_path, error_log_lock, "按行回退(整体验证失败)", [original_block_text], reason_final, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
             return False, None, None, f"整体验证失败: {reason_final}"
+
+        translation_validator = config.get("_translation_validator")
+        if callable(translation_validator):
+            ok_final, reason_final = translation_validator(
+                original_block_text,
+                post_processed_block_text,
+            )
+            if not ok_final:
+                _log_batch_error(error_log_path, error_log_lock, "按行回退(专用验证失败)", [original_block_text], reason_final, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
+                return False, None, None, f"专用验证失败: {reason_final}"
 
         return True, repaired_block_text, post_processed_block_text, ""
     except Exception as e:
@@ -589,9 +654,9 @@ def _translation_worker(
         
         batch_processing_result = {} # 确保出错时返回的是字典
         for item_data in batch_metadata_items:
-            original_text_key = item_data["text_to_translate"]
+            original_text_key = item_data["original_json_key"]
             batch_processing_result[original_text_key] = {
-                "text": original_text_key, 
+                "text": item_data["text_to_translate"],
                 "status": "fallback", 
                 "failure_context": final_fallback_reason_worker_ex,
                 "original_marker": item_data["original_marker"], 
@@ -619,13 +684,18 @@ def _load_existing_translated_data(translated_json_path):
     return {}
 
 
-def _is_reusable_translation_result(result_obj):
+def _is_reusable_translation_result(result_obj, metadata_obj=None):
     """仅复用已成功的译文；fallback 会在本轮重新尝试。"""
     return (
         isinstance(result_obj, dict)
         and result_obj.get("status") == "success"
         and isinstance(result_obj.get("text"), str)
         and result_obj.get("text").strip() != ""
+        and not (
+            isinstance(metadata_obj, dict)
+            and result_obj.get("original_marker") == "WOLFLogic"
+            and metadata_obj.get("original_marker") != "WOLFLogic"
+        )
     )
 
 
@@ -697,7 +767,10 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     continue
                 existing_success_count += sum(
                     1 for original_json_key in data_for_this_file.keys()
-                    if _is_reusable_translation_result(existing_file_data.get(original_json_key))
+                    if _is_reusable_translation_result(
+                        existing_file_data.get(original_json_key),
+                        data_for_this_file.get(original_json_key),
+                    )
                 )
             if existing_success_count > 0:
                 message_queue.put(("log", ("normal", f"检测到已有翻译结果，可续跑复用 {existing_success_count} 条成功译文。")))
@@ -729,6 +802,20 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         current_translate_config["_apply_gbk_compatibility_postprocess"] = apply_gbk_compatibility
         control_profile = control_tokens.profile_from_game(game_path)
         current_translate_config["_control_code_profile"] = control_profile
+        if detected_game and detected_game.engine == "wolf":
+            from core.engines import wolf
+
+            wolf_logic_literals = wolf.get_protected_logic_literals(game_path)
+            current_translate_config["_translation_validator"] = wolf.validate_translation_transport
+            current_translate_config["_translation_validator_instruction"] = wolf.TRANSLATION_TRANSPORT_INSTRUCTION
+            current_translate_config["_protected_literals"] = tuple(sorted(
+                set(wolf_logic_literals) | {
+                    text_processing.convert_half_to_full_katakana(literal)
+                    for literal in wolf_logic_literals
+                },
+                key=len,
+                reverse=True,
+            ))
         if detected_game and not apply_gbk_compatibility:
             message_queue.put(("log", ("normal", f"检测到 {detected_game.engine}：跳过 RM2000/2003 的 GBK 字符兼容化后处理。")))
         else:
@@ -752,7 +839,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         message_queue.put(("log", ("normal", f"API客户端初始化成功。翻译配置: 模型={model_name}, 并发={concurrency_config}, 批大小={batch_size_config}, 上下文行数={context_lines_count}")))
 
         # --- 默认数据库过滤与自动填充准备（固定启用，读取 modules/dict） ---
-        default_db_mapping, default_db_originals = default_database.load_default_db_mapping()
+        default_db_mapping, default_db_originals = default_database.load_default_db_mapping(game_path)
 
         # --- *** 任务预切分 *** ---
         global_translation_tasks = [] # 存储所有 (batch_meta, context_meta, file_name) 的任务单元
@@ -778,6 +865,20 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             for original_json_key, metadata_obj in data_for_this_file.items():
                 # 确保元数据对象中有一个字段存储这个原始的JSON键
                 metadata_obj['original_json_key'] = original_json_key 
+                if (
+                    detected_game
+                    and detected_game.engine == "wolf"
+                    and metadata_obj.get("original_marker") == "WOLFLogic"
+                ):
+                    all_files_translated_data.setdefault(file_name, {})[original_json_key] = {
+                        "text": original_json_key,
+                        "status": "success",
+                        "failure_context": None,
+                        "original_marker": "WOLFLogic",
+                        "speaker_id": metadata_obj.get("speaker_id"),
+                    }
+                    no_content_prefilled_for_this_file += 1
+                    continue
                 # 过滤默认数据库条目（精确匹配），并就地自动填充译文
                 # 注意：以原始JSON键(原文)做精确匹配，避免半角片假名转换造成的不一致
                 if default_database.should_exclude_text(original_json_key, default_db_originals):
@@ -819,7 +920,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                         continue
 
                 existing_result_obj = existing_file_translations.get(original_json_key)
-                if _is_reusable_translation_result(existing_result_obj):
+                if _is_reusable_translation_result(existing_result_obj, metadata_obj):
                     all_files_translated_data.setdefault(file_name, {})
                     all_files_translated_data[file_name][original_json_key] = _reuse_translation_result(
                         existing_result_obj,
@@ -943,11 +1044,11 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     # 构建回退结果并合并
                     fallback_reason_exc = f"[Future执行异常({source_file_of_this_batch}): {exc}]"
                     for item_data_in_failed_batch in task_info_for_this_future["batch_items"]:
-                        original_text_key = item_data_in_failed_batch["text_to_translate"]
+                        original_text_key = item_data_in_failed_batch["original_json_key"]
                         if source_file_of_this_batch not in all_files_translated_data:
                             all_files_translated_data[source_file_of_this_batch] = {}
                         all_files_translated_data[source_file_of_this_batch][original_text_key] = {
-                            "text": original_text_key, 
+                            "text": item_data_in_failed_batch["text_to_translate"],
                             "status": "fallback", 
                             "failure_context": fallback_reason_exc,
                             "original_marker": item_data_in_failed_batch["original_marker"], 

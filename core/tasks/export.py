@@ -24,6 +24,22 @@ def run_export(game_path, export_encoding, message_queue):
     """
     try:
         detected = detect_game_engine(game_path)
+        if detected and detected.engine == "wolf":
+            message_queue.put(("status", "正在导出文本 (WOLF)..."))
+            message_queue.put(("log", ("normal", "步骤 1(WOLF): 导出文本到 StringScripts...")))
+            try:
+                from core.engines import wolf
+
+                file_count, entry_count = wolf.export_to_string_scripts(game_path, message_queue)
+                message_queue.put(("success", f"WOLF 文本导出完成：{file_count} 个文件，{entry_count} 条。"))
+                message_queue.put(("status", "文本导出完成(WOLF)"))
+            except Exception as e:
+                log.exception("WOLF 导出失败。")
+                message_queue.put(("error", f"WOLF 导出失败: {e}"))
+                message_queue.put(("status", "导出文本失败"))
+            finally:
+                message_queue.put(("done", None))
+            return
         if detected and detected.engine == "vxace":
             message_queue.put(("status", "正在导出文本 (VX Ace)..."))
             message_queue.put(("log", ("normal", "步骤 1(VX Ace): 导出文本到 StringScripts...")))

@@ -32,6 +32,30 @@ RPGRewriter是一个RPG Maker 2000/2003游戏数据处理工具，用于翻译�
 - 不得将RPGRewriter用于商业目的
 - 使用RPGRewriter时请尊重原作者的版权
 
+## UberWolf
+
+**许可证**: MIT许可证
+
+UberWolf用于解包和重新封装WOLF RPG Editor归档；随附的WolfRPGText辅助程序使用同一项目的结构化数据读写代码。
+
+**源代码**: <https://github.com/Sinflower/UberWolf>
+
+完整许可证文本见 `modules/UberWolf/LICENSE`。
+
+## Fusion Pixel Font
+
+**版权**: Copyright (c) 2022, TakWolf
+
+**许可证**: SIL Open Font License 1.1
+
+Fusion Pixel Font 为 WOLF RPG Editor 汉化提供简体中文字符覆盖。项目随附
+`12px proportional zh_hans` 字体及其上游组件许可证。
+
+**源代码与发布页**: <https://github.com/TakWolf/fusion-pixel-font>
+
+完整许可证文本见 `modules/WOLF/FusionPixel/OFL.txt`，组件声明见
+`modules/WOLF/FusionPixel/LICENSES/`。
+
 ## Python运行时库和依赖
 
 本项目使用的Python库和依赖遵循各自的许可证，包括但不限于:

@@ -9,6 +9,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.api_clients import gemini, deepseek # 导入 Gemini 或 OpenAI 兼容客户端模块
 from core.utils import file_system, text_processing, default_database
+from core.utils.engine_detection import detect_game_engine
 # 导入默认配置以获取默认文件名
 from core.config import DEFAULT_WORLD_DICT_CONFIG
 from . import apply_base_dictionary
@@ -755,7 +756,9 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
 
         # 默认数据库过滤/映射
         # 固定从 modules/dict 默认数据库映射加载
-        default_db_mapping, default_db_originals = default_database.load_default_db_mapping()
+        detected_game = detect_game_engine(game_path)
+        is_wolf = bool(detected_game and detected_game.engine == "wolf")
+        default_db_mapping, default_db_originals = default_database.load_default_db_mapping(game_path)
 
         try:
             with open(json_path, 'r', encoding='utf-8') as f_json_in:
@@ -1082,7 +1085,7 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
         # ==================================================
         # === 阶段三：应用基础字典 (Base Dictionary) ===
         # ==================================================
-        if enable_base_dict:
+        if enable_base_dict and not is_wolf:
             message_queue.put(("log", ("normal", "阶段 4.3: 检查并应用基础字典...")))
             try:
                 apply_base_dictionary.run_apply_base_dictionary(
@@ -1098,6 +1101,8 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                 message_queue.put(("status", "生成字典完成 (应用基础字典时出错)"))
                 message_queue.put(("done", None)) # 标记整个任务完成（即使子步骤失败）
                 return # 应用出错，直接返回，不再执行后续的原始 "done"
+        elif enable_base_dict and is_wolf:
+            message_queue.put(("log", ("normal", "WOLF 项目跳过内置基础人物/事物词典。")))
 
         # --- 最终总结 ---
         if character_dict_success and entity_dict_success:

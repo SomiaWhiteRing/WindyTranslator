@@ -8,6 +8,8 @@ a = Analysis(
     datas=[
         ('modules/EasyRPG', 'modules/EasyRPG'),
         ('modules/RPGRewriter', 'modules/RPGRewriter'),
+        ('modules/UberWolf', 'modules/UberWolf'),
+        ('modules/WOLF', 'modules/WOLF'),
         ('modules/RTPCollection', 'modules/RTPCollection'),
         ('modules/dict', 'modules/dict'),
         ('assets/icon.ico', 'assets')

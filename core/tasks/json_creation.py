@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 DEFAULT_SPEAKER_ID = "NARRATION" # 用于旁白或Page开始时无明确脸图的情况
 SYSTEM_TEXT_SPEAKER_ID = "SYSTEM"  # 用于系统词条、非对话文本
 ERASE_COMMAND_ID = "_ERASE_FACE_" # 用于内部标记Erase指令
-MULTILINE_BLOCK_MARKERS = {"Message", "StringPicture", "ScrollText"}
+MULTILINE_BLOCK_MARKERS = {"Message", "StringPicture", "ScrollText", "WOLFText", "WOLFLogic"}
 
 # 正则表达式预编译
 RE_MARKER_LINE = re.compile(r'#(.+)#')
@@ -273,6 +273,9 @@ def run_create_json(game_path, works_dir, message_queue):
                 if file_name.lower().endswith('.txt'):
                     file_path = os.path.join(root_dir, file_name)
                     file_key_in_json = os.path.relpath(file_path, string_scripts_path)
+                    relative_parts = os.path.normpath(file_key_in_json).split(os.sep)
+                    if len(relative_parts) >= 2 and [part.casefold() for part in relative_parts[:2]] == ["wolf", "logic"]:
+                        continue
 
                     message_queue.put(("log", ("debug", f"正在解析文件: {file_key_in_json}"))) 
                     

@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-EngineType = Literal["rm200x", "vxace", "mvmz"]
+EngineType = Literal["rm200x", "vxace", "mvmz", "wolf"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ def detect_game_engine(game_path: str) -> Optional[DetectedGame]:
     - RM2000/2003: RPG_RT.lmt exists in game root.
     - RPG Maker VX Ace: Data/MapInfos.rvdata2 exists.
     - RPG Maker MV/MZ: data/MapInfos.json or www/data/MapInfos.json exists.
+    - WOLF RPG Editor: Game.exe plus Data.wolf or an unpacked Data/BasicData/Game.dat.
     """
     if not game_path:
         return None
@@ -34,5 +35,12 @@ def detect_game_engine(game_path: str) -> Optional[DetectedGame]:
         map_infos_json = os.path.join(game_path, rel)
         if os.path.isfile(map_infos_json):
             return DetectedGame(engine="mvmz", reason=f"found {rel}")
+
+    wolf_game = os.path.join(game_path, "Game.exe")
+    wolf_archive = os.path.join(game_path, "Data.wolf")
+    wolf_game_data = os.path.join(game_path, "Data", "BasicData", "Game.dat")
+    if os.path.isfile(wolf_game) and (os.path.isfile(wolf_archive) or os.path.isfile(wolf_game_data)):
+        reason = "found Game.exe and Data.wolf" if os.path.isfile(wolf_archive) else "found unpacked WOLF Data"
+        return DetectedGame(engine="wolf", reason=reason)
 
     return None

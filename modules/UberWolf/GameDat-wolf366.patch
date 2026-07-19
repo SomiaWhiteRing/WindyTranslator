@@ -1,0 +1,29 @@
+diff --git a/UberWolfLib/WolfRPG/GameDat.hpp b/UberWolfLib/WolfRPG/GameDat.hpp
+--- a/UberWolfLib/WolfRPG/GameDat.hpp
++++ b/UberWolfLib/WolfRPG/GameDat.hpp
+@@ -85,7 +85,7 @@ protected:
+ 		// String 1
+ 		m_magicString = coder.ReadString();
+ 
+-		if (m_magicString != MAGIC_STRING)
++		if (!m_magicString.empty() && m_magicString != MAGIC_STRING)
+ 			throw WolfRPGException(std::format(L"{}Invalid magic string: \"{}\" expected: \"{}\"", ERROR_TAGW, m_magicString, MAGIC_STRING));
+ 
+ 		// String 2
+@@ -139,7 +139,7 @@ protected:
+ 		coder.WriteByteArray(m_unknown1);
+ 		coder.WriteInt(m_stringCount);
+ 		coder.WriteString(m_title);
+-		coder.WriteString(MAGIC_STRING);
++		coder.WriteString(m_magicString);
+ 		coder.WriteByteArray(m_decryptKey);
+ 		coder.WriteString(m_font);
+ 		for (const tString& font : m_subFonts)
+@@ -222,7 +222,7 @@ private:
+ 		size += m_unknown1.size() + 4;
+ 		size += sizeof(m_stringCount);
+ 		size += FileCoder::CalcStringSize(m_title) + 4;
+-		size += FileCoder::CalcStringSize(MAGIC_STRING) + 4;
++		size += FileCoder::CalcStringSize(m_magicString) + 4;
+ 		size += m_decryptKey.size() + 4;
+ 		size += FileCoder::CalcStringSize(m_font) + 4;

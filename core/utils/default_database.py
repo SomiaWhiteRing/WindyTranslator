@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Set, Tuple, Optional
 
 from core.utils.file_system import get_application_path
+from core.utils.engine_detection import detect_game_engine
 from . import file_system
 
 log = logging.getLogger(__name__)
@@ -40,8 +41,12 @@ def _load_from_modules_csv() -> Tuple[Dict[str, str], Set[str]]:
     return mapping, originals
 
 
-def load_default_db_mapping() -> Tuple[Dict[str, str], Set[str]]:
+def load_default_db_mapping(game_path: Optional[str] = None) -> Tuple[Dict[str, str], Set[str]]:
     """固定位置加载默认数据库映射 (modules/dict/default_database_dictionary.csv)。"""
+    detected = detect_game_engine(game_path) if game_path else None
+    if detected and detected.engine == "wolf":
+        log.info("WOLF 项目跳过默认数据库映射。")
+        return {}, set()
     # 确保目录存在（仅在部署环境初始化时有用）
     file_system.ensure_dir_exists(BASE_DICT_DIR)
     return _load_from_modules_csv()

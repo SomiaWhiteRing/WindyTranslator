@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger(__name__)
 
-MULTILINE_BLOCK_MARKERS = {"Message", "StringPicture", "ScrollText"}
+MULTILINE_BLOCK_MARKERS = {"Message", "StringPicture", "ScrollText", "WOLFText", "WOLFLogic"}
 DEFAULT_RELEASE_WORKERS = min(4, max(1, os.cpu_count() or 1))
 MAX_SCHEMA_ERRORS_TO_REPORT = 10
 
@@ -309,6 +309,7 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
                     )
             else:
                 new_lines.extend(temp_block_lines)
+                skipped_count += 1
 
             if i < len(lines) and lines[i].strip() == "##":
                 new_lines.append(lines[i])
@@ -347,6 +348,7 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
                         )
                 else:
                     new_lines.append(original_line_with_newline)
+                    skipped_count += 1
                 i += 1
 
             if i < len(lines) and lines[i].strip() == "##":
@@ -381,6 +383,7 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
                     )
             else:
                 new_lines.append(original_line_with_newline)
+                skipped_count += 1
             i += 1
         else:
             log.warning(f"在文件 {file_basename} 中，标记 #{original_marker_type}# 后面没有内容行。")
@@ -452,6 +455,34 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
             message_queue.put(("status", "释放 JSON 失败 (JSON结构错误)"))
             message_queue.put(("done", None))
             return False
+
+        from core.utils.engine_detection import detect_game_engine
+
+        detected = detect_game_engine(game_path)
+        if detected and detected.engine == "wolf":
+            from core.engines import wolf
+
+            wolf_errors, wolf_warnings, wolf_stats = wolf.validate_translation_release(
+                game_path, all_translations_per_file
+            )
+            for warning in wolf_warnings[:10]:
+                message_queue.put(("log", ("warning", f"WOLF 校验警告: {warning}")))
+            if wolf_errors:
+                details = "\n".join(f"- {error}" for error in wolf_errors[:10])
+                remaining = len(wolf_errors) - 10
+                if remaining > 0:
+                    details += f"\n- 另有 {remaining} 项错误未显示"
+                message_queue.put((
+                    "error",
+                    f"WOLF 翻译完整性校验失败，共 {len(wolf_errors)} 项：\n{details}"
+                ))
+                message_queue.put(("status", "释放 JSON 失败 (WOLF完整性校验)"))
+                message_queue.put(("done", None))
+                return False
+            message_queue.put((
+                "log",
+                ("success", f"WOLF 翻译完整性校验通过：{wolf_stats.get('locations', 0)} 个位置。"),
+            ))
 
         load_json_elapsed = time.perf_counter() - load_json_start_time
         log.debug(f"加载按文件组织的翻译数据完成。共涉及 {len(all_translations_per_file)} 个源文件，耗时 {load_json_elapsed:.2f} 秒。")

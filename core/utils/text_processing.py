@@ -17,9 +17,28 @@ TRANSLATION_METADATA_ANYWHERE_RE = re.compile(r'\[(?:MARKER|FACE):[^\]]+\]')
 # 额外限制：分隔符后不能直接跟数字，避免误判日期/版本号（如 2025.12.31）。
 TRANSLATION_NUMBER_PREFIX_RE = re.compile(r'^\s*\d{1,3}[\.:：、\)\]]\s*(?!\d)')
 
+# Only kana letters belong in the hard residual-language check. Whole Unicode
+# blocks also contain punctuation such as ・, ー, ゛ and ゜.
+KANA_LETTER_RE = re.compile(
+    r"[\u3041-\u3096\u309D-\u309F\u30A1-\u30FA\u30FD-\u30FF\u31F0-\u31FF\uFF66-\uFF9D]"
+)
+CJK_RE = re.compile(r"[\u3400-\u9FFF]")
+_DECORATIVE_HANDS_RE = re.compile(
+    r"(?:(?<=[(（*＊≧≦<>＜＞▽△☆★.+ﾟ゜゛])(?:ノ{2,}[゛゜]?|ﾉ{2,}[ﾞﾟ]?)"
+    r"|(?:ノ{2,}[゛゜]?|ﾉ{2,}[ﾞﾟ]?)(?=[)）*＊≧≦<>＜＞▽△☆★.+ﾟ゜゛]))"
+)
+
+
+def contains_japanese_kana(text):
+    """Return whether text contains kana letters rather than kana-block punctuation."""
+    if not isinstance(text, str) or not text:
+        return False
+    text_without_decorative_hands = _DECORATIVE_HANDS_RE.sub("", text)
+    return KANA_LETTER_RE.search(text_without_decorative_hands) is not None
+
 # --- 文本验证 ---
 
-def validate_translation(original, translated, post_processed_translation):
+def validate_translation(original, translated, post_processed_translation, allowed_source_literals=()):
     """
     验证译文是否符合特定规则（如保留标记、无假名等）。
 
@@ -54,10 +73,10 @@ def validate_translation(original, translated, post_processed_translation):
                 return False, reason
 
         # 规则 1: 检查后处理后的译文中是否残留日语假名
-        # \u3040-\u309F: Hiragana, \u30A0-\u30FF: Katakana
-        kana_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF]')
         text_for_kana_check = control_tokens.strip_token_literals(post_processed_translation)
-        if kana_pattern.search(text_for_kana_check):
+        for literal in sorted({item for item in allowed_source_literals if item}, key=len, reverse=True):
+            text_for_kana_check = text_for_kana_check.replace(literal, "")
+        if contains_japanese_kana(text_for_kana_check):
             reason = (
                 f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
             )
@@ -464,6 +483,4 @@ def has_japanese_letters(text):
     """
     if not isinstance(text, str) or not text:
         return False
-    # 平假名 3040-309F，片假名 30A0-30FF，片假名扩展 31F0-31FF，半角片假名 FF66-FF9F，CJK 4E00-9FFF
-    pattern = re.compile(r"[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\uFF66-\uFF9F\u4E00-\u9FFF]")
-    return pattern.search(text) is not None
+    return contains_japanese_kana(text) or CJK_RE.search(text) is not None

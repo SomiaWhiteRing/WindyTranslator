@@ -102,12 +102,25 @@ def profile_from_game(game_path: Optional[str]) -> ControlCodeProfile:
     )
 
 
-def protect_text(text: str, profile: Optional[ControlCodeProfile] = None) -> ProtectedText:
+def protect_text(
+    text: str,
+    profile: Optional[ControlCodeProfile] = None,
+    extra_literals: Sequence[str] = (),
+) -> ProtectedText:
     """Replace immutable control tokens with per-text PUA placeholders."""
     if not isinstance(text, str):
         text = "" if text is None else str(text)
     profile = profile or default_profile()
     spans = _scan_immutable_tokens(text, profile)
+    occupied = [(start, end) for start, end, _ in spans]
+    for literal in sorted({item for item in extra_literals if item}, key=len, reverse=True):
+        for match in re.finditer(re.escape(literal), text):
+            start, end = match.span()
+            if any(start < used_end and end > used_start for used_start, used_end in occupied):
+                continue
+            spans.append((start, end, "protected-literal"))
+            occupied.append((start, end))
+    spans.sort(key=lambda item: item[0])
     if not spans:
         return ProtectedText(text, text, tuple(), profile)
 

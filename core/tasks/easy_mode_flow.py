@@ -94,49 +94,21 @@ def run_easy_flow(
             message_queue.put(("status", f"({current_step}/{total_steps}) 正在执行: {step_name}..."))
             message_queue.put(("log", ("normal", f"--- 轻松模式步骤 {current_step}/{total_steps}: {step_name} ---")))
             
-            # --- 调用子任务 ---
-            # 子任务会自己处理异常并通过队列报告
-            # 我们需要一种方法来知道子任务是否成功完成，以便决定是否继续
-            # 修改子任务，让它们在完成后通过队列发送一个特殊的成功/失败标记？
-            # 或者 easy_flow 监听队列中的 error 消息？
-            # 采用后者：easy_flow 委托执行，App 层负责监控队列和处理错误/停止流程。
-            # 因此，easy_flow 只负责按顺序调用。
-
-            # --- **重要修改：子任务现在是阻塞的，easy_flow 等待其完成** ---
-            # 这简化了流程控制，但意味着 easy_flow 自身也需要在一个单独线程运行
-            # (这通常由 App 层的 run_in_thread 完成)
-
             # 检查释放步骤所需的文件是否存在
             if step_name == "释放JSON文件":
                  json_to_release = step_args[2] # 获取将要使用的 json 路径
                  if not os.path.exists(json_to_release):
                      message_queue.put(("warning", f"未找到预期的翻译文件 '{os.path.basename(json_to_release)}'，将跳过释放和导入步骤。"))
                      log.warning(f"跳过释放和导入，因为文件不存在: {json_to_release}")
-                     break # 跳出循环，结束流程
+                     message_queue.put(("status", "轻松模式未生成可释放的翻译文件"))
+                     return False
 
-            # --- 直接调用子任务函数 ---
             step_func(*step_args)
 
-            # --- 等待子任务完成信号 ---
-            # 子任务的最后会发送 ("done", None)
-            # 我们需要从队列里接收这个信号，才知道可以进行下一步
-            # **注意：** 这部分逻辑放在 Task 内部会导致问题，因为 Task 不应该消费队列。
-            # **正确做法：** App 层启动 easy_flow 任务，并监控队列。
-            # 当 App 收到 'done' 时，如果当前是 easy_flow 在运行，则触发 easy_flow 的下一步。
-            # 这使得 easy_flow 变成了一个状态机，由 App 控制其推进。
-            #
-            # **简化方案 (当前采用)：** 假设子任务是同步执行的（或者 easy_flow 等待它们完成）。
-            # 在 App 层的 `run_in_thread` 包装器中，当 `target_func` (即这里的 `run_easy_flow`) 返回时，
-            # 就认为整个流程结束了。子任务内部发生的错误会通过队列报告，App 层可以捕获并停止。
-            # 所以 `run_easy_flow` 内部不需要显式等待 'done' 信号。
-
-            # --- 检查子任务是否报告了错误 ---
-            # (这部分检查逻辑也应该在 App 层完成)
-            # if check_if_error_reported(message_queue): # 假设有这个函数
-            #    message_queue.put(("error", f"在步骤 '{step_name}' 中检测到错误，轻松模式中止。"))
-            #    message_queue.put(("status", f"轻松模式中止于步骤 {current_step}"))
-            #    message_queue.put(("done", None)) # 发送完成信号
-            #    return # 中止流程
+            if getattr(message_queue, "has_problem", False):
+                message_queue.put(("error", f"步骤“{step_name}”失败，轻松模式已停止。"))
+                message_queue.put(("status", f"轻松模式中止于步骤 {current_step}: {step_name}"))
+                return False
 
             # 更新进度条 (放在成功完成一步后)
             progress_value = (current_step / total_steps) * 100
@@ -148,7 +120,7 @@ def run_easy_flow(
         # 所有步骤成功完成
         message_queue.put(("success", "轻松模式所有步骤已成功完成。"))
         message_queue.put(("status", "轻松模式翻译流程完成！"))
-        # message_queue.put(("done", None)) # App 层的 run_in_thread 会在函数返回后发送 done
+        return True
 
     except Exception as e:
         # 这个异常是 easy_flow 自身发生的，而不是子任务内部的
@@ -156,4 +128,4 @@ def run_easy_flow(
         log.exception(f"轻松模式流程在步骤 '{step_name}' 外部发生意外错误。")
         message_queue.put(("error", f"轻松模式流程发生严重错误: {e}"))
         message_queue.put(("status", f"轻松模式中止于步骤 {current_step}"))
-        # message_queue.put(("done", None)) # App 层的 run_in_thread 会发送 done
+        return False

@@ -1,19 +1,15 @@
 # core/tasks/initialize.py
 import os
-import re
 import shutil
 import logging
 from core.external import easyrpg, rtp # 导入外部交互模块
-from core.utils import file_system     # 导入文件系统工具
+from core.utils import file_system, text_processing
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
 # 定义支持的日文编码（用于检测）
 JAPANESE_ENCODINGS = ['shift_jis', 'cp932', 'euc_jp']
-# 定义假名匹配模式
-KANA_PATTERN = re.compile(r'[\u3040-\u30FF]+') # 至少一个假名
-
 def _detect_and_convert_encoding(file_path, target_encoding='gbk'):
     """
     检测文件是否可能为日文编码（通过解码+假名判断），如果是则转换为目标编码。
@@ -41,7 +37,7 @@ def _detect_and_convert_encoding(file_path, target_encoding='gbk'):
                 # 尝试用严格模式解码
                 current_decoded = raw_content.decode(encoding, errors='strict')
                 # 如果解码成功且包含假名，则认为是目标文件
-                if KANA_PATTERN.search(current_decoded):
+                if text_processing.contains_japanese_kana(current_decoded):
                     decoded_content = current_decoded
                     detected_encoding = encoding
                     log.info(f"文件 {os.path.basename(file_path)} 使用 {encoding} 解码并检测到假名，标记转换。")
@@ -205,6 +201,16 @@ def run_initialize(game_path, rtp_options, message_queue):
         message_queue.put(("log", ("normal", "步骤 0: 开始初始化...")))
 
         detected = detect_game_engine(game_path)
+        if detected and detected.engine == "wolf":
+            from core.engines import wolf
+
+            message_queue.put(("log", ("normal", "检测到 WOLF RPG Editor：初始化 Data.wolf...")))
+            manifest = wolf.initialize_game(game_path, message_queue)
+            message_queue.put(("success", f"初始化完成（WOLF，封包模式 {manifest['pack_mode']}）"))
+            message_queue.put(("status", "初始化完成（WOLF）"))
+            message_queue.put(("wolf_initialized", game_path))
+            message_queue.put(("done", None))
+            return
         if detected and detected.engine == "vxace":
             message_queue.put(("log", ("success", "检测到 RPG Maker VX Ace：初始化步骤自动跳过（无需 EasyRPG/RTP/编码转换）。")))
             message_queue.put(("success", "初始化完成（VX Ace：跳过）"))

@@ -3,11 +3,15 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import datetime
 import os
+import threading
+from core.engines import wolf
 from core.utils import windows_notifications
+from core.utils.engine_detection import detect_game_engine
 
 # 导入同目录下的其他 UI 面板类 (假设它们稍后会被定义)
 from . import easy_mode_panel
 from . import pro_mode_panel
+from . import wolf_font_panel
 # 导入需要弹出的窗口 (用于类型提示或方法调用)
 from . import rtp_dialog # 需要调用更新按钮文本
 from . import config_dialogs # 可能需要引用
@@ -73,6 +77,18 @@ class MainWindow:
         self.pro_panel = pro_mode_panel.ProModePanel(self.pro_mode_frame_container, self.app, self.config) # 专业模式需要配置来初始化
         self.functions_notebook.add(self.pro_mode_frame_container, text="专业模式")
 
+        # WOLF 字体页按所选游戏动态加入 Notebook。
+        self.font_mode_frame_container = ttk.Frame(self.functions_notebook, padding="5")
+        self.font_panel = wolf_font_panel.WolfFontPanel(self.font_mode_frame_container, self.app)
+        self.root.update_idletasks()
+        self.functions_notebook.configure(height=self.pro_mode_frame_container.winfo_reqheight())
+        self._font_tab_visible = False
+        self._last_workflow_mode = "easy"
+        self._path_check_after_id = None
+        self._game_context_token = 0
+        self.functions_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.app.game_path.trace_add("write", self._on_game_path_changed)
+
         # --- 3. 日志区域 ---
         log_frame = ttk.LabelFrame(main_frame, padding="5")
         # **** 让 log_frame 在主框架中双向填充 ****
@@ -120,7 +136,8 @@ class MainWindow:
             self.browse_button,
             self.completion_notification_checkbox,
             self.easy_panel.get_controls(), # EasyModePanel 需要提供获取其控件的方法
-            self.pro_panel.get_controls()   # ProModePanel 需要提供获取其控件的方法
+            self.pro_panel.get_controls(),  # ProModePanel 需要提供获取其控件的方法
+            self.font_panel.get_controls(),
         ]
         # 扁平化控件列表
         self.flat_controls = self._flatten_controls(self.all_controls)
@@ -206,6 +223,8 @@ class MainWindow:
                                    control.tab(i, state=tab_state)
                               except tk.TclError:
                                    pass # 忽略无效 tab ID 错误
+                    elif isinstance(control, ttk.Combobox):
+                        control.configure(state="readonly" if enabled else tk.DISABLED)
                     else:
                         control.configure(state=state)
                 except tk.TclError as e:
@@ -216,8 +235,12 @@ class MainWindow:
     def get_current_mode(self):
         """获取当前选中的 Notebook 标签页对应的模式 ('easy' 或 'pro')。"""
         try:
-            selected_tab_index = self.functions_notebook.index(self.functions_notebook.select())
-            return 'easy' if selected_tab_index == 0 else 'pro'
+            selected = self.functions_notebook.select()
+            if selected == str(self.easy_mode_frame_container):
+                self._last_workflow_mode = "easy"
+            elif selected == str(self.pro_mode_frame_container):
+                self._last_workflow_mode = "pro"
+            return self._last_workflow_mode
         except Exception:
              # 如果 Notebook 还没完全加载好或发生错误
             return self.config.get('selected_mode', 'easy') # 返回配置中的模式
@@ -231,6 +254,66 @@ class MainWindow:
              print(f"切换模式时出错 (可能控件尚未就绪): {e}")
              # 可以尝试延迟执行
              # self.root.after(50, lambda: self.switch_to_mode(mode))
+
+    def _on_game_path_changed(self, *_args):
+        self._schedule_game_context_refresh(300)
+
+    def refresh_game_context(self):
+        self._schedule_game_context_refresh(0)
+
+    def _schedule_game_context_refresh(self, delay):
+        if self._path_check_after_id:
+            self.root.after_cancel(self._path_check_after_id)
+        self._game_context_token += 1
+        token = self._game_context_token
+        self._hide_font_tab()
+        self._path_check_after_id = self.root.after(
+            delay,
+            lambda: self._refresh_game_context(token),
+        )
+
+    def _refresh_game_context(self, token):
+        self._path_check_after_id = None
+        path = self.app.get_game_path().strip()
+        detected = detect_game_engine(path) if path else None
+        is_wolf = bool(detected and detected.engine == "wolf")
+        if not is_wolf:
+            return
+
+        def worker():
+            context = wolf.try_get_font_revision_context(path)
+            self.root.after(0, lambda: self._finish_game_context_check(token, path, context))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_game_context_check(self, token, path, context):
+        if token != self._game_context_token:
+            return
+        current_path = self.app.get_game_path().strip()
+        if os.path.normcase(os.path.abspath(current_path)) != os.path.normcase(os.path.abspath(path)):
+            return
+        if context is not None and not self._font_tab_visible:
+            self.functions_notebook.add(self.font_mode_frame_container, text="字体修订")
+            self._font_tab_visible = True
+        if context is not None:
+            self.font_panel.set_game_path(path, context)
+
+    def _hide_font_tab(self):
+        if not self._font_tab_visible:
+            return
+        if self.functions_notebook.select() == str(self.font_mode_frame_container):
+            self.switch_to_mode(self._last_workflow_mode)
+        self.functions_notebook.forget(self.font_mode_frame_container)
+        self._font_tab_visible = False
+        self.font_panel.set_visible(False)
+
+    def _on_tab_changed(self, _event=None):
+        selected = self.functions_notebook.select()
+        if selected == str(self.easy_mode_frame_container):
+            self._last_workflow_mode = "easy"
+        elif selected == str(self.pro_mode_frame_container):
+            self._last_workflow_mode = "pro"
+        self.font_panel.set_visible(selected == str(self.font_mode_frame_container))
 
 
     def update_rtp_button_text(self):
@@ -294,21 +377,6 @@ class MainWindow:
 
         result = selected_value.get()
         return result if result else None
-
-    
-    # --- 新增: 更新 Pro 面板修正按钮状态的中继方法 ---
-    def update_fix_fallback_button_state(self, enabled):
-        """
-        更新专业模式面板上的 '问题审阅' 按钮的状态。
-        此方法由 App 控制器调用。
-        """
-        # 检查 ProModePanel 实例是否存在且控件仍然有效
-        if hasattr(self, 'pro_panel') and self.pro_panel.winfo_exists():
-            # 调用 ProModePanel 实例上的方法来实际更新按钮状态
-            self.pro_panel.update_fix_fallback_button_state(enabled)
-        else:
-            # 如果 ProModePanel 不可用（例如窗口正在关闭），则记录日志或忽略
-            print("尝试更新问题审阅按钮状态，但 ProModePanel 不可用。")
 
     # --- 内部辅助方法 ---
 
