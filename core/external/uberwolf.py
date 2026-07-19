@@ -51,55 +51,9 @@ def unpack_game(game_path):
     return data_path
 
 
-def pack_game(game_path, pack_mode):
-    game_exe = os.path.join(game_path, "Game.exe")
-    archive_path = os.path.join(game_path, "Data.wolf")
-    data_path = os.path.join(game_path, "Data")
-    if os.path.isdir(data_path) and not os.path.exists(archive_path):
-        # UberWolf chooses its packing layout from the presence of Data.wolf.
-        with open(archive_path, "wb"):
-            pass
-    stdout, stderr = _run(UBERWOLF_CLI, ["--override", "--pack", str(pack_mode), game_exe])
-    if not os.path.isfile(archive_path):
-        details = "\n".join(part for part in (stdout, stderr) if part)
-        raise UberWolfError(f"UberWolf 未生成 Data.wolf: {archive_path}\n{details}")
-    if os.path.getsize(archive_path) == 0:
-        raise UberWolfError(f"UberWolf 生成了空的 Data.wolf: {archive_path}")
-    return archive_path
-
-
 def dump_text(data_path, json_path):
     return _run(WOLF_TEXT_HELPER, ["dump", data_path, json_path])
 
 
 def apply_text(data_path, json_path, output_data_path):
     return _run(WOLF_TEXT_HELPER, ["apply", data_path, json_path, output_data_path])
-
-
-def detect_pack_mode(game_exe):
-    try:
-        import win32api
-
-        version = win32api.GetFileVersionInfo(game_exe, "\\")
-        major = version["FileVersionMS"] >> 16
-        minor = version["FileVersionMS"] & 0xFFFF
-    except Exception as error:
-        raise UberWolfError(f"无法读取 Game.exe 的 WOLF 版本: {error}") from error
-
-    if major >= 3:
-        if minor >= 500:
-            return 7
-        if minor >= 310:
-            return 6 if minor < 500 else 7
-        if minor >= 140:
-            return 5
-        return 4
-    if major == 2:
-        if minor >= 225:
-            return 3
-        if minor >= 200:
-            return 2
-        if minor >= 100:
-            return 1
-        return 0
-    raise UberWolfError(f"暂不支持 WOLF RPG Editor {major}.{minor} 的重新封包")

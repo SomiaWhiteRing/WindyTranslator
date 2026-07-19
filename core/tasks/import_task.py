@@ -20,12 +20,12 @@ def run_import(game_path, import_encoding, message_queue):
         detected = detect_game_engine(game_path)
         if detected and detected.engine == "wolf":
             message_queue.put(("status", "正在导入文本 (WOLF)..."))
-            message_queue.put(("log", ("normal", "步骤 7(WOLF): 从 StringScripts 写回并重新封包...")))
+            message_queue.put(("log", ("normal", "步骤 7(WOLF): 从 StringScripts 写回解包后的 Data...")))
             try:
                 from core.engines import wolf
 
                 modified_entries = wolf.import_from_string_scripts(game_path, message_queue)
-                message_queue.put(("success", f"WOLF 导入完成：实际更新 {modified_entries} 条并通过封包校验。"))
+                message_queue.put(("success", f"WOLF 导入完成：实际更新 {modified_entries} 条并通过 Data 校验。"))
                 message_queue.put(("status", "文本导入完成(WOLF)"))
             except Exception as e:
                 log.exception("WOLF 导入失败。")

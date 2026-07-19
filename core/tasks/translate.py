@@ -19,6 +19,8 @@ from collections import OrderedDict
 log = logging.getLogger(__name__)
 
 TRANSLATION_METADATA_PREFIX_RE = re.compile(r'^(?:\s*\[(?:MARKER|FACE):[^\]]+\]\s*)+')
+WOLF_API_TAG_RE = re.compile(r"\{\{WINDY_WOLF_(\d+)_([0-9a-f]{8})\}\}", re.IGNORECASE)
+WOLF_API_MASK_RE = re.compile(r"\[\[W\d+:[0-9a-f]{4}\]\]", re.IGNORECASE)
 
 CONTROL_PLACEHOLDER_INSTRUCTION = """
 
@@ -29,6 +31,35 @@ CONTROL_PLACEHOLDER_INSTRUCTION = """
 """
 
 STRICT_LINE_MARKERS = {"StringPicture", "WOLFText"}
+
+
+def _mask_wolf_transport(text, optional_tags=()):
+    if WOLF_API_MASK_RE.search(text):
+        return text, ()
+    optional = set(optional_tags)
+    mappings = []
+
+    def replace(match):
+        if match.group(0) in optional:
+            return ""
+        mask = f"[[W{match.group(1)}:{match.group(2)[:4]}]]"
+        mappings.append((mask, match.group(0)))
+        return mask
+
+    return WOLF_API_TAG_RE.sub(replace, text), tuple(mappings)
+
+
+def _restore_wolf_transport_masks(text, mappings):
+    if not mappings:
+        return True, text, ""
+    expected = [mask for mask, _tag in mappings]
+    actual = WOLF_API_MASK_RE.findall(text)
+    if actual != expected:
+        return False, text, f"WOLF API 短标签序列不一致: {expected!r} != {actual!r}"
+    restored = text
+    for mask, tag in mappings:
+        restored = restored.replace(mask, tag, 1)
+    return True, restored, ""
 
 
 def _protected_literals_for_text(text, protected_literals):
@@ -80,9 +111,20 @@ def _translate_batch_with_retry(
         _protected_literals_for_text(item["text_to_translate"], protected_literals)
         for item in batch_metadata_items
     ]
+    if config.get("_mask_wolf_transport"):
+        optional_wolf_tags = config.get("_optional_wolf_transport_tags") or ()
+        masked_batch_texts = [
+            _mask_wolf_transport(item["text_to_translate"], optional_wolf_tags)
+            for item in batch_metadata_items
+        ]
+    else:
+        masked_batch_texts = [
+            (item["text_to_translate"], ())
+            for item in batch_metadata_items
+        ]
     protected_batch_texts = [
         control_tokens.protect_text(
-            item["text_to_translate"],
+            masked_batch_texts[index][0],
             control_profile,
             extra_literals=item_protected_literals[index],
         )
@@ -259,6 +301,11 @@ def _translate_batch_with_retry(
                 restore_ok, restored_text_for_validation, restore_reason = control_tokens.restore_protected_text(
                     raw_translation_for_this_item, protected_text_for_item
                 )
+                if restore_ok:
+                    restore_ok, restored_text_for_validation, restore_reason = _restore_wolf_transport_masks(
+                        restored_text_for_validation,
+                        masked_batch_texts[i][1],
+                    )
                 if restore_ok:
                     # 在验证前进行最小化修复；控制码相关内容由 control_tokens 精确校验，不做猜测式修复。
                     repaired_text_for_validation = text_processing.repair_translation_format(
@@ -462,9 +509,14 @@ def _translate_strict_block_by_lines(
         line_protected_literals = [
             _protected_literals_for_text(line, protected_literals) for line in non_empty_lines
         ]
+        if config.get("_mask_wolf_transport"):
+            optional_wolf_tags = config.get("_optional_wolf_transport_tags") or ()
+            masked_lines = [_mask_wolf_transport(line, optional_wolf_tags) for line in non_empty_lines]
+        else:
+            masked_lines = [(line, ()) for line in non_empty_lines]
         protected_lines = [
             control_tokens.protect_text(
-                line,
+                masked_lines[index][0],
                 control_profile,
                 extra_literals=line_protected_literals[index],
             )
@@ -540,6 +592,11 @@ def _translate_strict_block_by_lines(
         for idx, orig_line in enumerate(non_empty_lines, start=1):
             raw_tran = numbered_translations[idx]
             restore_ok, restored, restore_reason = control_tokens.restore_protected_text(raw_tran, protected_lines[idx - 1])
+            if restore_ok:
+                restore_ok, restored, restore_reason = _restore_wolf_transport_masks(
+                    restored,
+                    masked_lines[idx - 1][1],
+                )
             if not restore_ok:
                 _log_batch_error(error_log_path, error_log_lock, "按行回退(控制码还原失败)", non_empty_lines, restore_reason, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, failed_item_index=idx-1, raw_item_translation=raw_tran, file_name_for_log=current_processing_file_name)
                 return False, None, None, f"控制码还原失败: {restore_reason}"
@@ -806,8 +863,14 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             from core.engines import wolf
 
             wolf_logic_literals = wolf.get_protected_logic_literals(game_path)
-            current_translate_config["_translation_validator"] = wolf.validate_translation_transport
+            optional_wolf_tags = wolf.get_optional_transport_tags(game_path)
+            current_translate_config["_translation_validator"] = (
+                lambda source, translated, optional=optional_wolf_tags:
+                wolf.validate_translation_transport(source, translated, optional)
+            )
             current_translate_config["_translation_validator_instruction"] = wolf.TRANSLATION_TRANSPORT_INSTRUCTION
+            current_translate_config["_mask_wolf_transport"] = True
+            current_translate_config["_optional_wolf_transport_tags"] = optional_wolf_tags
             current_translate_config["_protected_literals"] = tuple(sorted(
                 set(wolf_logic_literals) | {
                     text_processing.convert_half_to_full_katakana(literal)

@@ -134,6 +134,83 @@ def test_wolf_transport_validator_rejects_api_result_before_checkpoint(tmp_path)
     assert result[item["original_json_key"]]["status"] == "fallback"
 
 
+def test_wolf_api_masks_roundtrip_and_reject_reordering():
+    first = "{{WINDY_WOLF_0_01ba4719}}"
+    second = "{{WINDY_WOLF_1_cc1fdd7d}}"
+    masked, mappings = translate._mask_wolf_transport(f"{first}原文{second}")
+
+    assert masked == "[[W0:01ba]]原文[[W1:cc1f]]"
+    ok, restored, reason = translate._restore_wolf_transport_masks(
+        "[[W0:01ba]]译文[[W1:cc1f]]",
+        mappings,
+    )
+    assert ok, reason
+    assert restored == f"{first}译文{second}"
+    ok, _restored, reason = translate._restore_wolf_transport_masks(
+        "[[W1:cc1f]]译文[[W0:01ba]]",
+        mappings,
+    )
+    assert not ok and "序列不一致" in reason
+
+
+def test_wolf_api_masks_drop_optional_transport_tags():
+    required = "{{WINDY_WOLF_0_01ba4719}}"
+    optional = "{{WINDY_WOLF_1_cc1fdd7d}}"
+
+    masked, mappings = translate._mask_wolf_transport(
+        f"{required}原文{optional}",
+        (optional,),
+    )
+    ok, restored, reason = translate._restore_wolf_transport_masks(
+        "[[W0:01ba]]译文",
+        mappings,
+    )
+
+    assert masked == "[[W0:01ba]]原文"
+    assert ok, reason
+    assert restored == f"{required}译文"
+    assert wolf.validate_translation_transport(
+        f"{required}原文{optional}",
+        restored,
+        (optional,),
+    ) == (True, "")
+
+
+def test_wolf_batch_uses_compact_api_masks(tmp_path):
+    class Client:
+        prompt = ""
+
+        def chat_completion(self, _model, messages, **_kwargs):
+            self.prompt = messages[0]["content"]
+            return True, "<textarea>\n1.[[W0:01ba]]中文\n</textarea>", None
+
+    client = Client()
+    tag = "{{WINDY_WOLF_0_01ba4719}}"
+    item = {
+        "original_json_key": tag + "原文",
+        "text_to_translate": tag + "原文",
+        "original_marker": "Message",
+        "speaker_id": "SYSTEM",
+    }
+    result = translate._translate_batch_with_retry(
+        [item], [], [], [], client,
+        {
+            "model": "test",
+            "max_retries": 0,
+            "_mask_wolf_transport": True,
+            "_translation_validator": wolf.validate_translation_transport,
+            "_translation_validator_instruction": wolf.TRANSLATION_TRANSPORT_INSTRUCTION,
+        },
+        str(tmp_path / "errors.log"),
+        __import__("threading").Lock(),
+        "sample.txt",
+    )
+
+    assert result[item["original_json_key"]]["text"] == tag + "中文"
+    assert tag not in client.prompt
+    assert "[[W0:01ba]]原文" in client.prompt
+
+
 def test_wolf_strict_line_fallback_runs_transport_validator(tmp_path):
     class Client:
         prompt = ""

@@ -18,7 +18,8 @@ def detect_game_engine(game_path: str) -> Optional[DetectedGame]:
     - RM2000/2003: RPG_RT.lmt exists in game root.
     - RPG Maker VX Ace: Data/MapInfos.rvdata2 exists.
     - RPG Maker MV/MZ: data/MapInfos.json or www/data/MapInfos.json exists.
-    - WOLF RPG Editor: Game.exe plus Data.wolf or an unpacked Data/BasicData/Game.dat.
+    - WOLF RPG Editor: Game.exe plus Data.wolf, Data/BasicData.wolf, or an
+      unpacked Data/BasicData/Game.dat.
     """
     if not game_path:
         return None
@@ -38,9 +39,19 @@ def detect_game_engine(game_path: str) -> Optional[DetectedGame]:
 
     wolf_game = os.path.join(game_path, "Game.exe")
     wolf_archive = os.path.join(game_path, "Data.wolf")
+    wolf_split_archive = os.path.join(game_path, "Data", "BasicData.wolf")
     wolf_game_data = os.path.join(game_path, "Data", "BasicData", "Game.dat")
-    if os.path.isfile(wolf_game) and (os.path.isfile(wolf_archive) or os.path.isfile(wolf_game_data)):
-        reason = "found Game.exe and Data.wolf" if os.path.isfile(wolf_archive) else "found unpacked WOLF Data"
+    if os.path.isfile(wolf_game) and (
+        os.path.isfile(wolf_archive)
+        or os.path.isfile(wolf_split_archive)
+        or os.path.isfile(wolf_game_data)
+    ):
+        if os.path.isfile(wolf_archive):
+            reason = "found Game.exe and Data.wolf"
+        elif os.path.isfile(wolf_split_archive):
+            reason = "found Game.exe and Data/BasicData.wolf"
+        else:
+            reason = "found unpacked WOLF Data"
         return DetectedGame(engine="wolf", reason=reason)
 
     return None

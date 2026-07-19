@@ -290,7 +290,9 @@ def discover_font_candidates(module_root=None, game_path=None, include_system=Tr
     if module_root:
         sources.append(("module", module_root, _font_paths(module_root)))
     if game_path:
-        sources.append(("game", game_path, _font_paths(game_path, recursive=False)))
+        game_paths = _font_paths(game_path, recursive=False)
+        game_paths += _font_paths(os.path.join(game_path, "Data"), recursive=False)
+        sources.append(("game", game_path, game_paths))
     if include_system:
         sources.append(("system", None, _system_font_paths()))
 
@@ -365,6 +367,7 @@ def resolve_available_font_family(candidate, available_families):
 
 def font_catalog_fingerprint(module_root=None, game_path=None, include_system=True):
     paths = _font_paths(module_root) + _font_paths(game_path, recursive=False)
+    paths += _font_paths(os.path.join(game_path, "Data"), recursive=False) if game_path else []
     if include_system and os.name == "nt":
         paths += _system_font_paths()
     return tuple(sorted(

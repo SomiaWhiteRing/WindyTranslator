@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import shutil
 import tempfile
 import queue
 
@@ -50,6 +51,38 @@ def test_wolf_detection_and_string_script_roundtrip():
             pass
         else:
             raise AssertionError("WOLF metadata traversal must be rejected")
+
+
+def test_wolf_detection_accepts_split_basic_data_archive(tmp_path):
+    (tmp_path / "Game.exe").write_bytes(b"")
+    data_path = tmp_path / "Data"
+    data_path.mkdir()
+    (data_path / "BasicData.wolf").write_bytes(b"archive")
+
+    detected = detect_game_engine(str(tmp_path))
+
+    assert detected is not None and detected.engine == "wolf"
+    assert "BasicData.wolf" in detected.reason
+
+
+def test_wolf_split_archive_inputs_keep_loose_content(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    data_path = source / "Data"
+    (data_path / "BasicData").mkdir(parents=True)
+    (data_path / "BasicData" / "Game.dat").write_bytes(b"unpacked")
+    (data_path / "BasicData.wolf").write_bytes(b"archive")
+    (data_path / "LooseArt").mkdir()
+    (data_path / "LooseArt" / "name.txt").write_text("loose", encoding="utf-8")
+    (data_path / "font.ttf").write_bytes(b"font")
+    destination.mkdir()
+
+    wolf._copy_archive_inputs(str(source), str(destination), "split")
+
+    assert not (destination / "Data" / "BasicData").exists()
+    assert (destination / "Data" / "BasicData.wolf").read_bytes() == b"archive"
+    assert (destination / "Data" / "LooseArt" / "name.txt").read_text(encoding="utf-8") == "loose"
+    assert (destination / "Data" / "font.ttf").read_bytes() == b"font"
 
 
 def test_font_revision_context_is_unavailable_before_initialize(tmp_path):
@@ -458,12 +491,10 @@ def test_wolf_transport_residue_scan_crosses_chunk_boundary(tmp_path):
 
 def test_wolf_archive_is_rolled_back_when_data_commit_fails(tmp_path, monkeypatch):
     destination = tmp_path / "Data.wolf"
-    archive = tmp_path / "new.wolf"
     data_path = tmp_path / "Data"
     staging = tmp_path / "staging"
     session_backup = tmp_path / "before.wolf"
     destination.write_bytes(b"old archive")
-    archive.write_bytes(b"new archive")
     data_path.mkdir()
     staging.mkdir()
     monkeypatch.setattr(
@@ -473,8 +504,11 @@ def test_wolf_archive_is_rolled_back_when_data_commit_fails(tmp_path, monkeypatc
     )
 
     try:
-        wolf._replace_archive_and_data(
-            str(destination), str(archive), str(data_path), str(staging), str(session_backup)
+        wolf._replace_data_and_manifest(
+            str(data_path),
+            str(staging),
+            root_archive=str(destination),
+            archive_session_backup=str(session_backup),
         )
     except PermissionError:
         pass
@@ -484,42 +518,13 @@ def test_wolf_archive_is_rolled_back_when_data_commit_fails(tmp_path, monkeypatc
     assert destination.read_bytes() == b"old archive"
 
 
-def test_wolf_new_archive_is_removed_when_data_commit_fails(tmp_path, monkeypatch):
-    destination = tmp_path / "Data.wolf"
-    archive = tmp_path / "new.wolf"
-    data_path = tmp_path / "Data"
-    staging = tmp_path / "staging"
-    session_backup = tmp_path / "before.wolf"
-    archive.write_bytes(b"new archive")
-    data_path.mkdir()
-    staging.mkdir()
-    monkeypatch.setattr(
-        wolf,
-        "_replace_data_directory",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("locked")),
-    )
-
-    try:
-        wolf._replace_archive_and_data(
-            str(destination), str(archive), str(data_path), str(staging), str(session_backup)
-        )
-    except PermissionError:
-        pass
-    else:
-        raise AssertionError("data commit failure must propagate")
-
-    assert not destination.exists()
-
-
 def test_wolf_manifest_failure_rolls_back_archive_and_data(tmp_path, monkeypatch):
     destination = tmp_path / "Data.wolf"
-    archive = tmp_path / "new.wolf"
     data_path = tmp_path / "Data"
     staging = tmp_path / "staging"
     session_backup = tmp_path / "before.wolf"
     manifest_path = tmp_path / "state" / "manifest.json"
     destination.write_bytes(b"old archive")
-    archive.write_bytes(b"new archive")
     data_path.mkdir()
     staging.mkdir()
     (data_path / "value.txt").write_text("old data", encoding="utf-8")
@@ -535,14 +540,13 @@ def test_wolf_manifest_failure_rolls_back_archive_and_data(tmp_path, monkeypatch
     monkeypatch.setattr(wolf.os, "replace", fail_manifest_publish)
 
     try:
-        wolf._replace_archive_and_data(
-            str(destination),
-            str(archive),
+        wolf._replace_data_and_manifest(
             str(data_path),
             str(staging),
-            str(session_backup),
             str(manifest_path),
             {"version": "new"},
+            str(destination),
+            str(session_backup),
         )
     except PermissionError:
         pass
@@ -552,6 +556,28 @@ def test_wolf_manifest_failure_rolls_back_archive_and_data(tmp_path, monkeypatch
     assert destination.read_bytes() == b"old archive"
     assert (data_path / "value.txt").read_text(encoding="utf-8") == "old data"
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == {"version": "old"}
+
+
+def test_wolf_loose_commit_replaces_data_and_manifest(tmp_path):
+    data_path = tmp_path / "Data"
+    staging = tmp_path / "staging"
+    manifest_path = tmp_path / "state" / "manifest.json"
+    data_path.mkdir()
+    staging.mkdir()
+    (data_path / "value.txt").write_text("old data", encoding="utf-8")
+    (staging / "value.txt").write_text("new data", encoding="utf-8")
+    wolf._write_json_atomic(str(manifest_path), {"version": "old"})
+
+    wolf._replace_data_and_manifest(
+        str(data_path),
+        str(staging),
+        str(manifest_path),
+        {"version": "new"},
+    )
+
+    assert (data_path / "value.txt").read_text(encoding="utf-8") == "new data"
+    assert not (tmp_path / "Data.wolf").exists()
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {"version": "new"}
 
 
 def test_wolf_control_transport_preserves_codes_and_exposes_ruby_text():
@@ -589,6 +615,20 @@ def test_wolf_control_transport_preserves_codes_and_exposes_ruby_text():
     )
     assert "ゝ" not in emoticon_text
     assert wolf._decode_wolf_transport(emoticon_text, emoticon_metadata) == "笑顔（ゝω・）"
+
+
+def test_wolf_optional_transport_tags_come_from_export_metadata(tmp_path):
+    origin = tmp_path / wolf.STRING_SCRIPTS_ORIGIN_DIRNAME
+    script = origin / "sample.txt"
+    wolf._write_string_script(
+        str(script),
+        [({"kind": "json", "marker": "Message"}, r"\c[1]\r[風,かぜ]が吹く")],
+    )
+    _script_rel, metadata, _text = next(wolf._iter_released_entries(str(origin)))
+    tokens = metadata["wolf_transport"]["tokens"]
+
+    assert wolf.get_optional_transport_tags(str(tmp_path)) == (tokens[1][0],)
+    assert tokens[0][0] not in wolf.get_optional_transport_tags(str(tmp_path))
 
 
 def test_wolf_control_transport_protects_message_structure():
@@ -894,7 +934,7 @@ def test_wolf_font_copy_rollback_restores_existing_file(tmp_path):
     assert destination.read_bytes() == b"user font"
 
 
-def test_wolf_font_revision_repackages_and_records_all_slots(tmp_path, monkeypatch):
+def test_wolf_font_revision_writes_loose_data_without_repacking(tmp_path, monkeypatch):
     game_path = tmp_path / "Game"
     data_path = game_path / "Data" / "BasicData"
     state_path = game_path / wolf.STATE_DIRNAME
@@ -909,41 +949,36 @@ def test_wolf_font_revision_repackages_and_records_all_slots(tmp_path, monkeypat
     snapshot_game.write_text(json.dumps(original), encoding="utf-8")
     wolf._write_json_atomic(
         str(state_path / wolf.MANIFEST_FILENAME),
-        {"engine": "wolf", "pack_mode": 7, "archive_sha256": "original"},
+        {"engine": "wolf", "pack_mode": 7, "archive_layout": "single", "archive_sha256": "original"},
     )
-    staged_data = None
-
-    def fake_dump(_data, json_root):
+    def fake_dump(source_data, json_root):
+        game_data = original
+        source_game_dat = os.path.join(source_data, "BasicData", "Game.dat")
+        try:
+            with open(source_game_dat, encoding="utf-8") as source:
+                slots = json.load(source)
+        except (OSError, ValueError):
+            slots = None
+        if isinstance(slots, list) and len(slots) == 4:
+            game_data = {"MainFont": slots[0], "SubFonts": slots[1:]}
         path = os.path.join(json_root, "game", "Game.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as output:
-            json.dump(original, output)
+            json.dump(game_data, output)
 
     def fake_apply(_data, json_root, output_data):
-        nonlocal staged_data
-        staged_data = output_data
         with open(os.path.join(json_root, "game", "Game.json"), encoding="utf-8") as source:
             slots = wolf._font_slots(json.load(source))
         with open(os.path.join(output_data, "BasicData", "Game.dat"), "w", encoding="utf-8") as output:
             json.dump(slots, output, ensure_ascii=False)
 
-    def fake_pack(root, _mode):
-        archive = os.path.join(root, "Data.wolf")
-        with open(archive, "wb") as output:
-            output.write(b"repacked")
-        return archive
-
-    def fake_unpack(root):
-        destination = os.path.join(root, "Data")
-        import shutil
-
-        shutil.copytree(staged_data, destination)
-        return destination
-
     monkeypatch.setattr(wolf.uberwolf, "dump_text", fake_dump)
     monkeypatch.setattr(wolf.uberwolf, "apply_text", fake_apply)
-    monkeypatch.setattr(wolf.uberwolf, "pack_game", fake_pack)
-    monkeypatch.setattr(wolf.uberwolf, "unpack_game", fake_unpack)
+    monkeypatch.setattr(
+        wolf.uberwolf,
+        "unpack_game",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not unpack verification archive")),
+    )
 
     font_path = wolf._fusion_font_path()
     revision = {
@@ -963,6 +998,7 @@ def test_wolf_font_revision_repackages_and_records_all_slots(tmp_path, monkeypat
         ],
         "system_font_copy_ack": [],
     }
+    archive_sha256 = wolf._sha256(str(game_path / "Data.wolf"))
 
     assert wolf.apply_font_revision(str(game_path), revision) is True
     assert json.loads((data_path / "Game.dat").read_text(encoding="utf-8")) == [
@@ -972,7 +1008,15 @@ def test_wolf_font_revision_repackages_and_records_all_slots(tmp_path, monkeypat
         "",
     ]
     assert (game_path / wolf.FUSION_FONT_FILENAME).is_file()
+    assert not (game_path / "Data.wolf").exists()
     manifest = json.loads((state_path / wolf.MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert manifest["deployment_layout"] == "loose"
+    assert manifest["retained_archive_sha256"] == archive_sha256
+    assert len(manifest["disabled_archives"]) == 1
+    disabled_archive = manifest["disabled_archives"][0]
+    assert disabled_archive["source_path"] == "Data.wolf"
+    assert disabled_archive["sha256"] == archive_sha256
+    assert wolf._sha256(wolf._safe_join(str(game_path), disabled_archive["stored_path"])) == archive_sha256
     assert manifest["font_revision"]["original_slots"] == ["MS UI Gothic", "M PLUS 1 Medium", "", ""]
     assert [item["family"] for item in manifest["font_revision"]["applied_slots"]] == [
         wolf.FUSION_FONT_FAMILY,
@@ -981,6 +1025,83 @@ def test_wolf_font_revision_repackages_and_records_all_slots(tmp_path, monkeypat
         "",
     ]
     assert manifest["font_revision"]["applied_slots"][0]["files"][0]["relative"] == "FusionPixel/font.ttf"
+    assert wolf.initialize_game(str(game_path))["font_revision"] == manifest["font_revision"]
+
+
+def test_wolf_import_writes_loose_data_without_repacking(tmp_path, monkeypatch):
+    game_path = tmp_path / "Game"
+    data_path = game_path / "Data"
+    basic_data = data_path / "BasicData"
+    state_path = game_path / wolf.STATE_DIRNAME
+    snapshot_path = state_path / wolf.JSON_SNAPSHOT_DIRNAME
+    origin_path = game_path / wolf.STRING_SCRIPTS_ORIGIN_DIRNAME
+    scripts_path = game_path / wolf.STRING_SCRIPTS_DIRNAME
+    basic_data.mkdir(parents=True)
+    (snapshot_path / "game").mkdir(parents=True)
+    (snapshot_path / "maps").mkdir()
+    origin_path.mkdir()
+    (game_path / "Game.exe").write_bytes(b"exe")
+    (basic_data / "Game.dat").write_bytes(b"old game")
+    (basic_data / "CommonEvent.dat").write_bytes(b"common")
+    (data_path / "BasicData.wolf").write_bytes(b"archive")
+    (snapshot_path / "game" / "Game.json").write_text(
+        json.dumps({"MainFont": "Test Font", "SubFonts": ["", "", ""]}),
+        encoding="utf-8",
+    )
+    (snapshot_path / "maps" / "a.json").write_text(
+        json.dumps([{"text": "原文です"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    script = origin_path / "sample.txt"
+    wolf._write_string_script(
+        str(script),
+        [({"kind": "json", "file": "maps/a.json", "path": [0, "text"], "marker": "Message"}, "原文です")],
+    )
+    shutil.copytree(origin_path, scripts_path)
+    translated_script = scripts_path / "sample.txt"
+    translated_script.write_text(
+        translated_script.read_text(encoding="utf-8").replace("原文です", "中文"),
+        encoding="utf-8",
+    )
+    wolf._write_json_atomic(
+        str(state_path / wolf.MANIFEST_FILENAME),
+        {
+            "engine": "wolf",
+            "archive_layout": "split",
+            "archive_sha256": wolf._archive_digest(str(game_path), "split"),
+            "data_sha256": wolf._data_digest(str(data_path)),
+        },
+    )
+
+    def fake_apply(_data, json_root, output_data):
+        with open(os.path.join(json_root, "maps", "a.json"), encoding="utf-8") as source:
+            translated = json.load(source)[0]["text"]
+        with open(os.path.join(output_data, "BasicData", "Game.dat"), "w", encoding="utf-8") as output:
+            output.write(translated)
+
+    def fake_dump(_data, json_root):
+        os.makedirs(os.path.join(json_root, "game"), exist_ok=True)
+        with open(os.path.join(json_root, "game", "Game.json"), "w", encoding="utf-8") as output:
+            json.dump({"MainFont": "Test Font", "SubFonts": ["", "", ""]}, output)
+
+    monkeypatch.setattr(wolf.uberwolf, "apply_text", fake_apply)
+    monkeypatch.setattr(wolf.uberwolf, "dump_text", fake_dump)
+    monkeypatch.setattr(
+        wolf.uberwolf,
+        "unpack_game",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not unpack verification archive")),
+    )
+
+    assert wolf.import_from_string_scripts(str(game_path)) == 1
+    assert (basic_data / "Game.dat").read_text(encoding="utf-8") == "中文"
+    assert not (game_path / "Data.wolf").exists()
+    assert not (data_path / "BasicData.wolf").exists()
+    manifest = json.loads((state_path / wolf.MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert manifest["archive_layout"] == "split"
+    assert manifest["deployment_layout"] == "loose"
+    assert manifest["last_import_data_sha256"] == manifest["data_sha256"]
+    assert [item["source_path"] for item in manifest["disabled_archives"]] == ["Data/BasicData.wolf"]
+    wolf.initialize_game(str(game_path))
 
 
 def test_wolf_release_validation_rejects_missing_fallback_and_broken_structure(tmp_path):
@@ -1209,8 +1330,6 @@ def test_initialize_migrates_stale_data_from_verified_last_import(tmp_path, monk
         return os.path.join(root, "Data")
 
     monkeypatch.setattr(wolf.uberwolf, "unpack_game", fake_unpack)
-    monkeypatch.setattr(wolf.uberwolf, "detect_pack_mode", lambda _path: 7)
-
     manifest = wolf.initialize_game(str(game_path))
 
     assert (data_path / "Game.dat").read_bytes() == b"new"
@@ -1250,11 +1369,97 @@ def test_initialize_rejects_restored_archive_with_imported_data(tmp_path, monkey
         return os.path.join(root, "Data")
 
     monkeypatch.setattr(wolf.uberwolf, "unpack_game", fake_unpack)
-    monkeypatch.setattr(wolf.uberwolf, "detect_pack_mode", lambda _path: 7)
-
     try:
         wolf.initialize_game(str(game_path))
     except wolf.WolfEngineError as error:
         assert "不一致" in str(error)
     else:
         raise AssertionError("mismatched Data and Data.wolf must be rejected")
+
+
+def test_initialize_unpacks_and_records_split_archive_layout(tmp_path, monkeypatch):
+    data_path = tmp_path / "Data"
+    data_path.mkdir()
+    (tmp_path / "Game.exe").write_bytes(b"exe")
+    (data_path / "BasicData.wolf").write_bytes(b"archive")
+    unpack_calls = 0
+
+    def fake_unpack(root):
+        nonlocal unpack_calls
+        unpack_calls += 1
+        basic_data = os.path.join(root, "Data", "BasicData")
+        os.makedirs(basic_data)
+        with open(os.path.join(basic_data, "Game.dat"), "wb") as output:
+            output.write(b"game")
+        with open(os.path.join(basic_data, "CommonEvent.dat"), "wb") as output:
+            output.write(b"common")
+        return os.path.join(root, "Data")
+
+    monkeypatch.setattr(wolf.uberwolf, "unpack_game", fake_unpack)
+    manifest = wolf.initialize_game(str(tmp_path))
+
+    assert unpack_calls == 1
+    assert manifest["archive_layout"] == "split"
+    assert manifest["archive_sha256"] == wolf._archive_digest(str(tmp_path), "split")
+    assert manifest["archive_data_sha256"] == manifest["data_sha256"]
+
+
+def test_initialize_accepts_game_that_started_with_loose_data(tmp_path, monkeypatch):
+    data_path = tmp_path / "Data" / "BasicData"
+    data_path.mkdir(parents=True)
+    (tmp_path / "Game.exe").write_bytes(b"exe")
+    (data_path / "Game.dat").write_bytes(b"game")
+    (data_path / "CommonEvent.dat").write_bytes(b"common")
+    monkeypatch.setattr(
+        wolf.uberwolf,
+        "unpack_game",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("loose game must not unpack")),
+    )
+
+    manifest = wolf.initialize_game(str(tmp_path))
+
+    assert manifest["archive_layout"] == "loose"
+    assert manifest["deployment_layout"] == "loose"
+    assert manifest["archive_sha256"] is None
+    assert manifest["data_sha256"] == wolf._data_digest(str(tmp_path / "Data"))
+
+
+def test_initialize_accepts_verified_loose_deployment_beside_retained_archive(tmp_path, monkeypatch):
+    data_path = tmp_path / "Data" / "BasicData"
+    state_path = tmp_path / wolf.STATE_DIRNAME
+    data_path.mkdir(parents=True)
+    state_path.mkdir()
+    (tmp_path / "Game.exe").write_bytes(b"exe")
+    archive_path = tmp_path / "Data.wolf"
+    archive_path.write_bytes(b"retained archive")
+    (data_path / "Game.dat").write_bytes(b"translated")
+    (data_path / "CommonEvent.dat").write_bytes(b"translated")
+    archive_sha256 = wolf._sha256(str(archive_path))
+    data_sha256 = wolf._data_digest(str(tmp_path / "Data"))
+    wolf._write_json_atomic(
+        str(state_path / wolf.MANIFEST_FILENAME),
+        {
+            "engine": "wolf",
+            "pack_mode": 7,
+            "archive_layout": "single",
+            "archive_sha256": archive_sha256,
+            "archive_data_sha256": "original data",
+            "retained_archive_sha256": archive_sha256,
+            "deployment_layout": "loose",
+            "last_import_data_sha256": data_sha256,
+            "data_sha256": data_sha256,
+            "font_revision": {"original_slots": ["A", "B", "", ""]},
+        },
+    )
+    monkeypatch.setattr(
+        wolf.uberwolf,
+        "unpack_game",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("verified loose Data must not be replaced")),
+    )
+
+    manifest = wolf.initialize_game(str(tmp_path))
+
+    assert manifest["deployment_layout"] == "loose"
+    assert manifest["data_sha256"] == data_sha256
+    assert manifest["font_revision"]["original_slots"] == ["A", "B", "", ""]
+    assert (data_path / "Game.dat").read_bytes() == b"translated"

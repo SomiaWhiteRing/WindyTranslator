@@ -33,6 +33,28 @@ def test_font_catalog_fingerprint_changes_with_module_fonts(tmp_path):
     assert before != after
 
 
+def test_game_font_discovery_includes_wolf_data_root(tmp_path):
+    data_path = tmp_path / "Data"
+    data_path.mkdir()
+    source = wolf._fusion_font_path()
+    destination = data_path / os.path.basename(source)
+    shutil.copy2(source, destination)
+
+    candidates = font_coverage.discover_font_candidates(
+        game_path=str(tmp_path),
+        include_system=False,
+    )
+
+    game_files = [
+        item
+        for candidate in candidates
+        if candidate["source"] == "game"
+        for item in candidate["files"]
+    ]
+    assert any(item["relative"].startswith("Data/") for item in game_files)
+    assert any(item["path"] == str(destination) for item in game_files)
+
+
 def test_visible_font_candidates_filter_system_coverage_and_later_duplicates(monkeypatch):
     candidates = [
         {"source": "module", "family": "Shared", "files": [{"path": "module.ttf"}]},

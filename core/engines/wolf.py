@@ -19,12 +19,13 @@ STRING_SCRIPTS_ORIGIN_DIRNAME = "StringScripts_Origin"
 STATE_DIRNAME = ".windy_wolf"
 JSON_SNAPSHOT_DIRNAME = "original_json"
 MANIFEST_FILENAME = "manifest.json"
+DISABLED_ARCHIVES_DIRNAME = "disabled_archives"
 FUSION_FONT_FILENAME = "fusion-pixel-12px-proportional-zh_hans.ttf"
 FUSION_FONT_FAMILY = "Fusion Pixel 12px Prop zh_hans"
 TRANSLATION_TRANSPORT_INSTRUCTION = """
 
 ### WOLF 内部标签保护
-输入中的 `{{WINDY_WOLF_...}}` 是 WOLF 运行时结构标签。必须逐个原样保留，不能删除、复制、换序或换行；标签不是可翻译文本。
+输入中的 `[[W数字:校验码]]`（以及上下文中的 `{{WINDY_WOLF_...}}`）是 WOLF 运行时结构标签。必须逐个原样保留，不能删除、复制、换序或换行；标签不是可翻译文本。
 """
 
 _REQUIRED_DATA_FILES = (
@@ -111,6 +112,135 @@ def _sha256(path):
     return digest.hexdigest()
 
 
+def _archive_layout(game_path):
+    if os.path.isfile(os.path.join(game_path, "Data.wolf")):
+        return "single"
+    if os.path.isfile(os.path.join(game_path, "Data", "BasicData.wolf")):
+        return "split"
+    return None
+
+
+def _archive_digest(game_path, layout):
+    if layout == "single":
+        return _sha256(os.path.join(game_path, "Data.wolf"))
+    if layout != "split":
+        return None
+    data_path = os.path.join(game_path, "Data")
+    archives = sorted(
+        filename
+        for filename in os.listdir(data_path)
+        if filename.lower().endswith(".wolf") and os.path.isfile(os.path.join(data_path, filename))
+    )
+    if "basicdata.wolf" not in {filename.casefold() for filename in archives}:
+        raise WolfEngineError(f"WOLF 分卷缺少 BasicData.wolf: {data_path}")
+    digest = hashlib.sha256()
+    for filename in archives:
+        path = os.path.join(data_path, filename)
+        digest.update(filename.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(os.path.getsize(path)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(_sha256(path).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _copy_archive_inputs(source_root, destination_root, layout):
+    if layout == "single":
+        shutil.copy2(
+            os.path.join(source_root, "Data.wolf"),
+            os.path.join(destination_root, "Data.wolf"),
+        )
+        return
+    if layout != "split":
+        raise WolfEngineError(f"未知的 WOLF 封包布局: {layout}")
+
+    source_data = os.path.join(source_root, "Data")
+    destination_data = os.path.join(destination_root, "Data")
+    os.makedirs(destination_data, exist_ok=True)
+    filenames = {
+        entry.name.casefold()
+        for entry in os.scandir(source_data)
+        if entry.is_file()
+    }
+    for entry in os.scandir(source_data):
+        destination = os.path.join(destination_data, entry.name)
+        if entry.is_file():
+            shutil.copy2(entry.path, destination)
+        elif entry.is_dir() and f"{entry.name}.wolf".casefold() not in filenames:
+            shutil.copytree(entry.path, destination)
+
+
+def _active_archive_relpaths(game_path):
+    result = []
+    root_archive = os.path.join(game_path, "Data.wolf")
+    if os.path.isfile(root_archive):
+        result.append("Data.wolf")
+    data_path = os.path.join(game_path, "Data")
+    if os.path.isdir(data_path):
+        result.extend(
+            f"Data/{entry.name}"
+            for entry in os.scandir(data_path)
+            if entry.is_file() and entry.name.lower().endswith(".wolf")
+        )
+    return tuple(sorted(result, key=str.casefold))
+
+
+def _validate_disabled_archives(game_path, records):
+    if not isinstance(records, list):
+        raise WolfEngineError("WOLF 已停用归档记录无效")
+    for record in records:
+        if not isinstance(record, dict):
+            raise WolfEngineError("WOLF 已停用归档记录无效")
+        source_rel = record.get("source_path")
+        stored_rel = record.get("stored_path")
+        expected_hash = record.get("sha256")
+        if not all(isinstance(value, str) and value for value in (source_rel, stored_rel, expected_hash)):
+            raise WolfEngineError("WOLF 已停用归档记录无效")
+        if os.path.isfile(_safe_join(game_path, source_rel)):
+            raise WolfEngineError(f"松散 Data 部署仍存在活动归档: {source_rel}")
+        stored_path = _safe_join(game_path, stored_rel)
+        if not os.path.isfile(stored_path) or _sha256(stored_path) != expected_hash:
+            raise WolfEngineError(f"WOLF 已停用归档备份缺失或变化: {stored_rel}")
+
+
+def _prepare_disabled_archives(game_path, previous_records):
+    records = list(previous_records) if isinstance(previous_records, list) else []
+    known = {
+        (item.get("source_path"), item.get("sha256"))
+        for item in records
+        if isinstance(item, dict)
+    }
+    for source_rel in _active_archive_relpaths(game_path):
+        source_path = _safe_join(game_path, source_rel)
+        file_sha256 = _sha256(source_path)
+        if (source_rel, file_sha256) in known:
+            continue
+        stored_rel = "/".join((STATE_DIRNAME, DISABLED_ARCHIVES_DIRNAME, file_sha256, source_rel))
+        stored_path = _safe_join(game_path, stored_rel)
+        os.makedirs(os.path.dirname(stored_path), exist_ok=True)
+        if os.path.isfile(stored_path):
+            if _sha256(stored_path) != file_sha256:
+                raise WolfEngineError(f"WOLF 归档备份冲突: {stored_rel}")
+        else:
+            temporary = f"{stored_path}.tmp"
+            shutil.copy2(source_path, temporary)
+            os.replace(temporary, stored_path)
+        records.append({
+            "source_path": source_rel,
+            "stored_path": stored_rel,
+            "sha256": file_sha256,
+        })
+        known.add((source_rel, file_sha256))
+    return records
+
+
+def _strip_split_archives(data_path):
+    for entry in os.scandir(data_path):
+        if entry.is_file() and entry.name.lower().endswith(".wolf"):
+            os.remove(entry.path)
+
+
 def _prepare_json_atomic(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp_path = f"{path}.tmp"
@@ -127,7 +257,6 @@ def _write_json_atomic(path, data):
 
 def initialize_game(game_path, message_queue=None):
     data_path = os.path.join(game_path, "Data")
-    archive_path = os.path.join(game_path, "Data.wolf")
     game_exe = os.path.join(game_path, "Game.exe")
 
     manifest_path = _state_path(game_path, MANIFEST_FILENAME)
@@ -141,23 +270,47 @@ def initialize_game(game_path, message_queue=None):
 
     current_archive_sha256 = None
     verified_pair_data_sha256 = None
+    current_archive_layout = _archive_layout(game_path)
+    previous_archive_layout = previous_manifest.get("archive_layout")
 
     if not os.path.isfile(game_exe):
         raise WolfEngineError(f"未找到 WOLF Game.exe: {game_exe}")
+    if "disabled_archives" in previous_manifest:
+        _validate_disabled_archives(game_path, previous_manifest["disabled_archives"])
+        active_archives = _active_archive_relpaths(game_path)
+        if active_archives:
+            raise WolfEngineError(f"松散 Data 部署仍存在活动归档: {', '.join(active_archives)}")
+    if (
+        previous_archive_layout in ("single", "split")
+        and current_archive_layout
+        and previous_archive_layout != current_archive_layout
+    ):
+        raise WolfEngineError("WOLF 封包布局已变化；请同时恢复 Data 与对应封包")
     if os.path.isdir(data_path):
-        _validate_data_dir(data_path)
+        unpacked_now = False
+        try:
+            _validate_data_dir(data_path)
+        except WolfEngineError:
+            if current_archive_layout != "split":
+                raise
+            if message_queue:
+                message_queue.put(("log", ("normal", "使用 UberWolfCli 解包 Data 目录中的 WOLF 分卷...")))
+            uberwolf.unpack_game(game_path)
+            _validate_data_dir(data_path)
+            unpacked_now = True
         current_data_sha256 = _data_digest(data_path)
         expected_data_sha256 = previous_manifest.get("data_sha256")
         if expected_data_sha256 and current_data_sha256 != expected_data_sha256:
             raise WolfEngineError("现有 WOLF Data 已在初始化后变化；请先导入或移走 Data 后重新初始化")
-        if os.path.isfile(archive_path):
-            current_archive_sha256 = _sha256(archive_path)
+        if current_archive_layout:
+            current_archive_sha256 = _archive_digest(game_path, current_archive_layout)
             known_archives = {
                 previous_manifest.get("archive_sha256"),
                 previous_manifest.get("last_import_sha256"),
+                previous_manifest.get("retained_archive_sha256"),
             } - {None}
             if known_archives and current_archive_sha256 not in known_archives:
-                raise WolfEngineError("Data.wolf 已在初始化后变化，拒绝继续使用可能不同源的 Data")
+                raise WolfEngineError("WOLF 封包已在初始化后变化，拒绝继续使用可能不同源的 Data")
 
             paired_data_sha256 = set()
             if current_archive_sha256 == previous_manifest.get("archive_sha256"):
@@ -169,23 +322,32 @@ def initialize_game(game_path, message_queue=None):
                 if paired:
                     paired_data_sha256.add(paired)
 
-            if paired_data_sha256:
+            loose_data_sha256 = (
+                previous_manifest.get("last_import_data_sha256")
+                if previous_manifest.get("deployment_layout") == "loose"
+                else None
+            )
+            if loose_data_sha256 and current_data_sha256 == loose_data_sha256:
+                verified_pair_data_sha256 = current_data_sha256
+            elif paired_data_sha256:
                 if current_data_sha256 not in paired_data_sha256:
-                    raise WolfEngineError("现有 Data 与 Data.wolf 不属于同一次封包；请同时恢复或移走其中一份")
+                    raise WolfEngineError("现有 Data 与 WOLF 封包不属于同一版本；请同时恢复或移走其中一份")
+                verified_pair_data_sha256 = current_data_sha256
+            elif unpacked_now:
                 verified_pair_data_sha256 = current_data_sha256
             else:
                 # ponytail: Old manifests have no archive/Data association, so pay
                 # the one-time unpack cost and persist the verified pair below.
                 with tempfile.TemporaryDirectory(prefix="windy-wolf-init-") as temp_root:
                     shutil.copy2(game_exe, os.path.join(temp_root, "Game.exe"))
-                    shutil.copy2(archive_path, os.path.join(temp_root, "Data.wolf"))
+                    _copy_archive_inputs(game_path, temp_root, current_archive_layout)
                     unpacked_data = uberwolf.unpack_game(temp_root)
                     unpacked_data_sha256 = _data_digest(unpacked_data)
                     if current_data_sha256 != unpacked_data_sha256:
                         if current_archive_sha256 != previous_manifest.get("last_import_sha256"):
-                            raise WolfEngineError("现有 Data 与 Data.wolf 内容不一致；请只保留要处理的那一份")
+                            raise WolfEngineError("现有 Data 与 WOLF 封包内容不一致；请只保留要处理的那一份")
                         if expected_data_sha256:
-                            raise WolfEngineError("现有 Data 与 Data.wolf 不属于同一次封包；请同时恢复或移走其中一份")
+                            raise WolfEngineError("现有 Data 与 WOLF 封包不属于同一版本；请同时恢复或移走其中一份")
                         _replace_data_directory(data_path, unpacked_data)
                         current_data_sha256 = unpacked_data_sha256
                         if message_queue:
@@ -197,27 +359,31 @@ def initialize_game(game_path, message_queue=None):
         if message_queue:
             message_queue.put(("log", ("normal", "检测到已解包且完整的 WOLF Data，跳过重复解包。")))
     else:
-        if not os.path.isfile(archive_path):
-            raise WolfEngineError(f"未找到 WOLF Data.wolf: {archive_path}")
+        if current_archive_layout != "single":
+            raise WolfEngineError(f"未找到 WOLF Data.wolf: {os.path.join(game_path, 'Data.wolf')}")
         if message_queue:
             message_queue.put(("log", ("normal", "使用 UberWolfCli 解包 Data.wolf...")))
         uberwolf.unpack_game(game_path)
         _validate_data_dir(data_path)
         current_data_sha256 = _data_digest(data_path)
-        current_archive_sha256 = _sha256(archive_path)
+        current_archive_sha256 = _archive_digest(game_path, current_archive_layout)
         verified_pair_data_sha256 = current_data_sha256
 
+    archive_layout = previous_archive_layout or current_archive_layout or "loose"
     original_archive_sha256 = previous_manifest.get("archive_sha256") or current_archive_sha256
     original_archive_data_sha256 = previous_manifest.get("archive_data_sha256")
     if current_archive_sha256 == original_archive_sha256 and verified_pair_data_sha256:
         original_archive_data_sha256 = verified_pair_data_sha256
-    manifest = {
+    manifest = dict(previous_manifest)
+    manifest.update({
         "engine": "wolf",
-        "pack_mode": uberwolf.detect_pack_mode(game_exe),
+        "archive_layout": archive_layout,
         "archive_sha256": original_archive_sha256,
         "archive_data_sha256": original_archive_data_sha256,
         "data_sha256": current_data_sha256,
-    }
+    })
+    if archive_layout == "loose":
+        manifest["deployment_layout"] = "loose"
     if previous_manifest.get("last_import_sha256"):
         manifest["last_import_sha256"] = previous_manifest["last_import_sha256"]
         last_import_data_sha256 = previous_manifest.get("last_import_data_sha256")
@@ -1184,14 +1350,29 @@ def _validate_wolf_transport(source_text, translated_text, metadata):
     return True, ""
 
 
-def validate_translation_transport(source_text, translated_text):
+def validate_translation_transport(source_text, translated_text, optional_tags=()):
     expected = _WOLF_TRANSPORT_TAG_RE.findall(source_text)
     if not expected:
         return True, ""
     actual = _WOLF_TRANSPORT_TAG_RE.findall(translated_text)
     if _WOLF_TRANSPORT_TAG_PREFIX in _WOLF_TRANSPORT_TAG_RE.sub("", translated_text):
         return False, "WOLF 控制码标签包含破损片段"
-    if actual != expected:
+    optional = set(optional_tags)
+    if not optional:
+        if actual != expected:
+            return False, f"WOLF 控制码标签序列不一致: {expected!r} != {actual!r}"
+        if "\n" in translated_text or "\r" in translated_text:
+            return False, "WOLF 受保护文本包含标签之外的换行"
+        return True, ""
+    expected_set = set(expected)
+    required = {tag for tag in expected if tag not in optional}
+    if any(tag not in expected_set for tag in actual):
+        return False, f"WOLF 控制码标签包含未知值: {actual!r}"
+    if any(actual.count(tag) != 1 for tag in required):
+        return False, f"WOLF 必需控制码标签缺失或重复: {expected!r} != {actual!r}"
+    if any(actual.count(tag) > 1 for tag in expected_set):
+        return False, f"WOLF 控制码标签重复: {actual!r}"
+    if actual != [tag for tag in expected if tag in actual]:
         return False, f"WOLF 控制码标签序列不一致: {expected!r} != {actual!r}"
     if "\n" in translated_text or "\r" in translated_text:
         return False, "WOLF 受保护文本包含标签之外的换行"
@@ -1404,6 +1585,23 @@ def get_protected_logic_literals(game_path):
         if metadata.get("marker") == "WOLFLogic"
         and metadata.get("logic_role", "comparison") == "comparison"
     }, key=len, reverse=True))
+
+
+def get_optional_transport_tags(game_path):
+    origin_path = os.path.join(game_path, STRING_SCRIPTS_ORIGIN_DIRNAME)
+    if not os.path.isdir(origin_path):
+        return ()
+    optional = set()
+    required = set()
+    for _script_rel, metadata, _text in _iter_released_entries(origin_path):
+        transport = metadata.get("wolf_transport")
+        if not isinstance(transport, dict):
+            continue
+        for item in transport.get("tokens", []):
+            if not isinstance(item, list) or not item or not isinstance(item[0], str):
+                continue
+            (optional if len(item) >= 4 and item[3] is False else required).add(item[0])
+    return tuple(sorted(optional - required))
 
 
 def validate_translation_release(game_path, translations):
@@ -1643,26 +1841,25 @@ def _finish_data_directory_replace(displaced):
         log.warning("无法清理已替换的 WOLF Data 临时目录: %s", displaced)
 
 
-def _replace_archive_and_data(
-    destination,
-    archive_path,
+def _replace_data_and_manifest(
     data_path,
     staging_data,
-    session_backup,
     manifest_path=None,
     manifest=None,
+    root_archive=None,
+    archive_session_backup=None,
 ):
-    destination_existed = os.path.isfile(destination)
+    archive_existed = bool(root_archive and os.path.isfile(root_archive))
     manifest_temp = None
     displaced = None
-    temp_destination = f"{destination}.windy.tmp"
-    if destination_existed:
-        shutil.copy2(destination, session_backup)
+    temp_archive = f"{root_archive}.windy.tmp" if root_archive else None
+    if archive_existed:
+        shutil.copy2(root_archive, archive_session_backup)
     if manifest_path:
         manifest_temp = _prepare_json_atomic(manifest_path, manifest)
     try:
-        shutil.copy2(archive_path, temp_destination)
-        os.replace(temp_destination, destination)
+        if archive_existed:
+            os.remove(root_archive)
         displaced = _replace_data_directory(data_path, staging_data, defer_cleanup=True)
         if manifest_temp:
             os.replace(manifest_temp, manifest_path)
@@ -1674,11 +1871,9 @@ def _replace_archive_and_data(
         except Exception as error:
             rollback_errors.append(f"Data 回滚失败: {error}")
         try:
-            if destination_existed:
-                shutil.copy2(session_backup, temp_destination)
-                os.replace(temp_destination, destination)
-            elif os.path.isfile(destination):
-                os.remove(destination)
+            if archive_existed:
+                shutil.copy2(archive_session_backup, temp_archive)
+                os.replace(temp_archive, root_archive)
         except Exception as error:
             rollback_errors.append(f"Data.wolf 回滚失败: {error}")
         if rollback_errors:
@@ -1687,7 +1882,7 @@ def _replace_archive_and_data(
             ) from commit_error
         raise
     finally:
-        for temporary in (manifest_temp, temp_destination):
+        for temporary in (manifest_temp, temp_archive):
             if temporary and os.path.exists(temporary) and not file_system.safe_remove(temporary):
                 log.warning("无法清理 WOLF 提交临时文件: %s", temporary)
     _finish_data_directory_replace(displaced)
@@ -2011,41 +2206,40 @@ def apply_font_revision(game_path, revision, message_queue=None):
 
     with tempfile.TemporaryDirectory(prefix="windy-wolf-font-apply-") as temp_root:
         patch_path = os.path.join(temp_root, "json")
-        staging_root = os.path.join(temp_root, "game")
-        staging_data = os.path.join(staging_root, "Data")
-        os.makedirs(staging_root)
+        staging_data = os.path.join(temp_root, "Data")
         if message_queue:
             message_queue.put(("log", ("normal", "解析当前 WOLF 数据并应用四槽位字体方案...")))
         uberwolf.dump_text(data_path, patch_path)
         shutil.copytree(data_path, staging_data)
-        shutil.copy2(os.path.join(game_path, "Game.exe"), os.path.join(staging_root, "Game.exe"))
         game_json_path = os.path.join(patch_path, "game", "Game.json")
         with open(game_json_path, "r", encoding="utf-8") as source:
             game_data = json.load(source)
         _set_font_slots(game_data, [item["family"] for item in prepared])
         _write_json_atomic(game_json_path, game_data)
         uberwolf.apply_text(data_path, patch_path, staging_data)
-        pack_mode = manifest.get("pack_mode")
-        if not isinstance(pack_mode, int) or not 0 <= pack_mode <= 10:
-            raise WolfEngineError(f"WOLF 封包模式无效: {pack_mode!r}")
-        archive_path = uberwolf.pack_game(staging_root, pack_mode)
+        active_archive_layout = _archive_layout(game_path)
+        disabled_archives = _prepare_disabled_archives(
+            game_path,
+            manifest.get("disabled_archives", []),
+        )
+        retained_archive_sha256 = (
+            _archive_digest(game_path, active_archive_layout)
+            if active_archive_layout in ("single", "split")
+            else manifest.get("retained_archive_sha256")
+        )
+        _strip_split_archives(staging_data)
+        verification_json = os.path.join(temp_root, "verify-json")
+        uberwolf.dump_text(staging_data, verification_json)
+        expected_slots = [item["family"] for item in prepared]
+        if _read_game_json_slots(verification_json) != expected_slots:
+            raise WolfEngineError("字体修订后的 Data 重读结果不一致，拒绝替换")
 
-        verification_root = os.path.join(temp_root, "verify")
-        os.makedirs(verification_root)
-        shutil.copy2(os.path.join(game_path, "Game.exe"), os.path.join(verification_root, "Game.exe"))
-        shutil.copy2(archive_path, os.path.join(verification_root, "Data.wolf"))
-        verified_data = uberwolf.unpack_game(verification_root)
-        if _data_manifest(staging_data) != _data_manifest(verified_data):
-            raise WolfEngineError("字体修订重新解包后不一致，拒绝替换原封包")
-
-        destination = os.path.join(game_path, "Data.wolf")
-        archive_session_backup = os.path.join(temp_root, "Data.wolf.before")
-        backup = os.path.join(game_path, "Data.wolf.windy-original.bak")
-        if os.path.isfile(destination) and not os.path.exists(backup):
-            shutil.copy2(destination, backup)
         staged_data_sha256 = _data_digest(staging_data)
         next_manifest = dict(manifest)
-        next_manifest["last_import_sha256"] = _sha256(archive_path)
+        if retained_archive_sha256:
+            next_manifest["retained_archive_sha256"] = retained_archive_sha256
+        next_manifest["disabled_archives"] = disabled_archives
+        next_manifest["deployment_layout"] = "loose"
         next_manifest["last_import_data_sha256"] = staged_data_sha256
         next_manifest["data_sha256"] = staged_data_sha256
         next_manifest["font_revision"] = {
@@ -2057,14 +2251,14 @@ def apply_font_revision(game_path, revision, message_queue=None):
         }
         font_rollback = _commit_font_files(game_path, copies)
         try:
-            _replace_archive_and_data(
-                destination,
-                archive_path,
+            root_archive = os.path.join(game_path, "Data.wolf")
+            _replace_data_and_manifest(
                 data_path,
                 staging_data,
-                archive_session_backup,
                 manifest_path,
                 next_manifest,
+                root_archive if os.path.isfile(root_archive) else None,
+                os.path.join(temp_root, "Data.wolf.before"),
             )
         except Exception:
             _rollback_font_files(font_rollback)
@@ -2078,7 +2272,7 @@ def apply_font_revision(game_path, revision, message_queue=None):
         [item["family"] for item in prepared],
     )
     if message_queue:
-        message_queue.put(("log", ("success", "WOLF 字体修订已应用并通过重新解包校验。")))
+        message_queue.put(("log", ("success", "WOLF 字体修订已应用并通过 Data 重读校验。")))
         message_queue.put(("font_revision_applied", game_path))
     return True
 
@@ -2148,11 +2342,9 @@ def import_from_string_scripts(game_path, message_queue=None):
     }
     with tempfile.TemporaryDirectory(prefix="windy-wolf-import-") as temp_root:
         patch_path = os.path.join(temp_root, "json")
-        staging_root = os.path.join(temp_root, "game")
-        staging_data = os.path.join(staging_root, "Data")
+        staging_data = os.path.join(temp_root, "Data")
         shutil.copytree(snapshot_path, patch_path)
         shutil.copytree(data_path, staging_data)
-        shutil.copy2(os.path.join(game_path, "Game.exe"), os.path.join(staging_root, "Game.exe"))
         _overlay_applied_font_slots(patch_path, manifest)
 
         json_cache = {}
@@ -2224,45 +2416,44 @@ def import_from_string_scripts(game_path, message_queue=None):
         residue_files = _transport_residue_files(staging_data)
         if residue_files:
             raise WolfEngineError(
-                "WOLF 写回数据仍含内部控制标签，拒绝封包: "
+                "WOLF 写回数据仍含内部控制标签，拒绝替换 Data: "
                 + ", ".join(residue_files[:5])
             )
-        pack_mode = manifest.get("pack_mode")
-        if not isinstance(pack_mode, int) or not 0 <= pack_mode <= 10:
-            raise WolfEngineError(f"WOLF 封包模式无效: {pack_mode!r}")
-        archive_path = uberwolf.pack_game(staging_root, pack_mode)
+        active_archive_layout = _archive_layout(game_path)
+        disabled_archives = _prepare_disabled_archives(
+            game_path,
+            manifest.get("disabled_archives", []),
+        )
+        retained_archive_sha256 = (
+            _archive_digest(game_path, active_archive_layout)
+            if active_archive_layout in ("single", "split")
+            else manifest.get("retained_archive_sha256")
+        )
+        _strip_split_archives(staging_data)
+        verification_json = os.path.join(temp_root, "verify-json")
+        uberwolf.dump_text(staging_data, verification_json)
 
-        verification_root = os.path.join(temp_root, "verify")
-        os.makedirs(verification_root)
-        shutil.copy2(os.path.join(game_path, "Game.exe"), os.path.join(verification_root, "Game.exe"))
-        shutil.copy2(archive_path, os.path.join(verification_root, "Data.wolf"))
-        verified_data = uberwolf.unpack_game(verification_root)
-        if _data_manifest(staging_data) != _data_manifest(verified_data):
-            raise WolfEngineError("重新解包后的 Data 与待封包 Data 不一致，拒绝替换原封包")
-
-        destination = os.path.join(game_path, "Data.wolf")
-        backup = os.path.join(game_path, "Data.wolf.windy-original.bak")
-        if os.path.isfile(destination) and not os.path.exists(backup):
-            shutil.copy2(destination, backup)
-        archive_session_backup = os.path.join(temp_root, "Data.wolf.before")
         staged_data_sha256 = _data_digest(staging_data)
         next_manifest = dict(manifest)
-        next_manifest["last_import_sha256"] = _sha256(archive_path)
+        if retained_archive_sha256:
+            next_manifest["retained_archive_sha256"] = retained_archive_sha256
+        next_manifest["disabled_archives"] = disabled_archives
+        next_manifest["deployment_layout"] = "loose"
         next_manifest["last_import_data_sha256"] = staged_data_sha256
         next_manifest["data_sha256"] = staged_data_sha256
-        _replace_archive_and_data(
-            destination,
-            archive_path,
+        root_archive = os.path.join(game_path, "Data.wolf")
+        _replace_data_and_manifest(
             data_path,
             staging_data,
-            archive_session_backup,
             manifest_path,
             next_manifest,
+            root_archive if os.path.isfile(root_archive) else None,
+            os.path.join(temp_root, "Data.wolf.before"),
         )
 
     if message_queue:
         message_queue.put((
             "log",
-            ("success", f"WOLF 导入完成并通过重解包校验：共 {applied} 条，实际变化 {changed} 条。"),
+            ("success", f"WOLF 导入完成并通过 Data 重读校验：共 {applied} 条，实际变化 {changed} 条。"),
         ))
     return changed
