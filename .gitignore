@@ -79,3 +79,5 @@ repomix-output.xml
 venv*
 dist*
 build*
+
+modules/WOLF/Extra

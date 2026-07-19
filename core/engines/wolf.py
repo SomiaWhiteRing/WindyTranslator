@@ -372,8 +372,6 @@ def initialize_game(game_path, message_queue=None):
     archive_layout = previous_archive_layout or current_archive_layout or "loose"
     original_archive_sha256 = previous_manifest.get("archive_sha256") or current_archive_sha256
     original_archive_data_sha256 = previous_manifest.get("archive_data_sha256")
-    if current_archive_sha256 == original_archive_sha256 and verified_pair_data_sha256:
-        original_archive_data_sha256 = verified_pair_data_sha256
     manifest = dict(previous_manifest)
     manifest.update({
         "engine": "wolf",
@@ -391,7 +389,45 @@ def initialize_game(game_path, message_queue=None):
             last_import_data_sha256 = verified_pair_data_sha256
         if last_import_data_sha256:
             manifest["last_import_data_sha256"] = last_import_data_sha256
-    _write_json_atomic(manifest_path, manifest)
+
+    active_archives = _active_archive_relpaths(game_path)
+    if active_archives:
+        disabled_archives = _prepare_disabled_archives(
+            game_path,
+            manifest.get("disabled_archives", []),
+        )
+        with tempfile.TemporaryDirectory(prefix="windy-wolf-init-disable-") as temp_root:
+            staging_data = None
+            if any(relative.startswith("Data/") for relative in active_archives):
+                staging_data = os.path.join(temp_root, "Data")
+                shutil.copytree(data_path, staging_data)
+                _strip_split_archives(staging_data)
+                current_data_sha256 = _data_digest(staging_data)
+            if current_archive_sha256 == original_archive_sha256 and verified_pair_data_sha256:
+                original_archive_data_sha256 = current_data_sha256
+            manifest["archive_data_sha256"] = original_archive_data_sha256
+            manifest["data_sha256"] = current_data_sha256
+            if current_archive_sha256 == previous_manifest.get("last_import_sha256") and verified_pair_data_sha256:
+                manifest["last_import_data_sha256"] = current_data_sha256
+            manifest["disabled_archives"] = disabled_archives
+            manifest["deployment_layout"] = "loose"
+            if current_archive_sha256:
+                manifest["retained_archive_sha256"] = current_archive_sha256
+            root_archive = os.path.join(game_path, "Data.wolf")
+            _replace_data_and_manifest(
+                data_path,
+                staging_data,
+                manifest_path,
+                manifest,
+                root_archive if os.path.isfile(root_archive) else None,
+                os.path.join(temp_root, "Data.wolf.before"),
+            )
+        if message_queue:
+            message_queue.put(("log", ("success", "WOLF 归档已备份并停用，游戏将使用解包后的 Data。")))
+    else:
+        if current_archive_sha256 == original_archive_sha256 and verified_pair_data_sha256:
+            manifest["archive_data_sha256"] = verified_pair_data_sha256
+        _write_json_atomic(manifest_path, manifest)
     return manifest
 
 
@@ -609,16 +645,28 @@ def _command_overwrites_string(command, destination, token):
     )
 
 
+def _command_uses_database_selector(command, variable_id):
+    try:
+        if int(command.get("code", -1)) != 250:
+            return False
+        selectors = command.get("intArgs") or []
+        return any(int(value) == variable_id for value in selectors[:3])
+    except (TypeError, ValueError):
+        return False
+
+
 def _analyze_json_usage(json_root):
     usage = {
         "display_database_fields": set(),
         "logic_database_fields": set(),
+        "logic_database_literals": set(),
         "logic_database_record_literals": set(),
         "comparison_literals": set(),
         "display_command_literals": set(),
         "logic_command_literals": set(),
     }
     schemas = {}
+    databases = {}
     for database_name in _DATABASE_JSON_BY_KIND.values():
         path = os.path.join(json_root, "databases", database_name)
         if not os.path.isfile(path):
@@ -628,6 +676,7 @@ def _analyze_json_usage(json_root):
                 database = json.load(source)
         except (OSError, ValueError) as error:
             raise WolfEngineError(f"无法分析 WOLF 数据库结构: {database_name}: {error}") from error
+        databases[database_name] = database
         type_names = {}
         field_names = {}
         for type_index, type_data in enumerate(database.get("types", [])):
@@ -654,6 +703,8 @@ def _analyze_json_usage(json_root):
                     data = json.load(source)
             except (OSError, ValueError) as error:
                 raise WolfEngineError(f"无法分析 WOLF JSON 用途: {filename}: {error}") from error
+            if not isinstance(data, dict):
+                continue
             if parent == "common":
                 sequences.append(data.get("commands", []))
             else:
@@ -699,8 +750,10 @@ def _analyze_json_usage(json_root):
                     following_code = int(following.get("code", -1))
                 except (TypeError, ValueError):
                     following_code = -1
-                if uses_token:
-                    if following_code == 112:
+                if _command_uses_database_selector(following, destination):
+                    logic_use = True
+                elif uses_token:
+                    if following_code in (112, 140, 213):
                         logic_use = True
                     elif following_code == 300:
                         if strings and token in str(strings[0]):
@@ -745,7 +798,7 @@ def _analyze_json_usage(json_root):
                 except (TypeError, ValueError):
                     following_code = -1
                 if uses_token:
-                    if following_code == 112:
+                    if following_code in (112, 140, 213):
                         logic_use = True
                     elif following_code in (101, 102, 150):
                         display_use = True
@@ -768,11 +821,41 @@ def _analyze_json_usage(json_root):
                 )
     usage["logic_command_literals"].update(usage["comparison_literals"])
     usage["display_database_fields"] -= usage["logic_database_fields"]
+    # ponytail: Dynamic numbered fields are treated as one family. This can protect
+    # display-only siblings; explicit selector ranges from WolfRPGText are the upgrade path.
+    for database_name, type_index, field_index in list(usage["logic_database_fields"]):
+        fields = schemas.get(database_name, {}).get("fields", {}).get(type_index, {})
+        names = [name for name, index in fields.items() if index == field_index]
+        for name in names:
+            match = re.fullmatch(r"(.*?)(\d+)", name)
+            if not match:
+                continue
+            prefix = match.group(1)
+            usage["logic_database_fields"].update(
+                (database_name, type_index, index)
+                for candidate, index in fields.items()
+                if re.fullmatch(re.escape(prefix) + r"\d+", candidate)
+            )
+    usage["display_database_fields"] -= usage["logic_database_fields"]
+    for database_name, database in databases.items():
+        for type_index, type_data in enumerate(database.get("types", [])):
+            for datum in type_data.get("data", []):
+                for field_index, field in enumerate(datum.get("data", [])):
+                    value = field.get("value")
+                    is_logic = (
+                        _uses_first_string_database_id(datum, field_index)
+                        or (database_name, type_index, field_index) in usage["logic_database_fields"]
+                        or _is_explicit_internal_database_text(value)
+                        or _database_field_marker(field.get("name")) == "WOLFLogic"
+                    )
+                    if is_logic and isinstance(value, str) and value.strip():
+                        usage["logic_database_literals"].add(value.strip().casefold())
     return usage
 
 
 def _database_value_marker(database_name, type_index, field_index, field, usage, type_name=""):
     value = field.get("value")
+    normalized_value = value.strip().casefold() if isinstance(value, str) else ""
     explicit_internal = _is_explicit_internal_database_text(value)
     marker = (
         "WOLFLogic"
@@ -785,9 +868,11 @@ def _database_value_marker(database_name, type_index, field_index, field, usage,
             key in usage["logic_database_fields"]
             or value in usage["comparison_literals"]
             or (
-                isinstance(value, str)
-                and value.strip().casefold()
-                in usage.get("logic_database_record_literals", set())
+                normalized_value
+                and (
+                    normalized_value in usage.get("logic_database_record_literals", set())
+                    or normalized_value in usage.get("logic_database_literals", set())
+                )
             )
         ):
             return "WOLFLogic"
@@ -796,9 +881,22 @@ def _database_value_marker(database_name, type_index, field_index, field, usage,
     return marker
 
 
+def _uses_first_string_database_id(datum, field_index):
+    if field_index != 0 or str(datum.get("name") or "").strip():
+        return False
+    fields = datum.get("data") or []
+    return bool(
+        fields
+        and isinstance(fields[0].get("value"), str)
+        and fields[0]["value"].strip()
+    )
+
+
 def _json_entries(json_root, json_path, usage=None):
     with open(json_path, "r", encoding="utf-8") as source:
         data = json.load(source)
+    if not isinstance(data, dict):
+        return []
     json_rel = os.path.relpath(json_path, json_root).replace(os.sep, "/")
     entries = []
 
@@ -825,23 +923,28 @@ def _json_entries(json_root, json_path, usage=None):
         for type_index, type_data in enumerate(data.get("types", [])):
             for data_index, datum in enumerate(type_data.get("data", [])):
                 fields = datum.get("data", [])
-                field_markers = [
-                    _database_value_marker(
-                        database_name,
-                        type_index,
-                        field_index,
-                        field,
-                        usage,
-                        type_data.get("name"),
+                field_markers = []
+                for field_index, field in enumerate(fields):
+                    field_markers.append(
+                        "WOLFLogic"
+                        if _uses_first_string_database_id(datum, field_index)
+                        else _database_value_marker(
+                            database_name,
+                            type_index,
+                            field_index,
+                            field,
+                            usage,
+                            type_data.get("name"),
+                        )
                     )
-                    for field_index, field in enumerate(fields)
-                ]
                 logic_values = {
                     field.get("value")
                     for field, field_marker in zip(fields, field_markers)
                     if isinstance(field.get("value"), str) and field_marker == "WOLFLogic"
                 }
                 datum_name = datum.get("name")
+                datum_name_path = ["types", type_index, "data", data_index, "name"]
+                normalized_datum_name = str(datum_name or "").strip().casefold()
                 datum_name_is_logic = (
                     _DEVELOPMENT_NAME_RE.search(str(type_data.get("name") or ""))
                     or _is_explicit_internal_database_text(datum_name)
@@ -849,36 +952,35 @@ def _json_entries(json_root, json_path, usage=None):
                     or (usage and datum_name in usage["comparison_literals"])
                     or (
                         usage
-                        and str(datum_name or "").strip().casefold()
-                        in usage.get("logic_database_record_literals", set())
+                        and normalized_datum_name
+                        and (
+                            normalized_datum_name in usage.get("logic_database_record_literals", set())
+                            or normalized_datum_name in usage.get("logic_database_literals", set())
+                        )
                     )
                 )
-                if database_name == "database.json" or datum_name_is_logic:
-                    datum_marker = (
-                        "WOLFLogic"
-                        if datum_name_is_logic
-                        else "WOLFText"
-                    )
+                if datum_name_is_logic:
                     _add_entry(
                         entries,
                         {
                             "kind": "json",
                             "file": json_rel,
-                            "path": ["types", type_index, "data", data_index, "name"],
-                            "marker": datum_marker,
-                            **({"logic_role": "identifier"} if datum_marker == "WOLFLogic" else {}),
+                            "path": datum_name_path,
+                            "marker": "WOLFLogic",
+                            "logic_role": "identifier",
                         },
                         datum_name,
                     )
                 for field_index, (field, field_marker) in enumerate(zip(fields, field_markers)):
                     value = field.get("value")
                     if isinstance(value, str) and value != "INVALID_IGNORE":
+                        path = ["types", type_index, "data", data_index, "data", field_index, "value"]
                         _add_entry(
                             entries,
                             {
                                 "kind": "json",
                                 "file": json_rel,
-                                "path": ["types", type_index, "data", data_index, "data", field_index, "value"],
+                                "path": path,
                                 "marker": field_marker,
                                 **({"logic_role": "identifier"} if field_marker == "WOLFLogic" else {}),
                             },
@@ -1486,9 +1588,8 @@ def export_to_string_scripts(game_path, message_queue=None):
             "log",
             (
                 "warning",
-                "WOLF 已按运行时用途放行 "
-                f"{len(usage['display_database_fields'])} 个数据库标识字段；"
-                "条件比较、未知用途和图片内文字仍保持保护。",
+                f"WOLF 已保护 {len(usage['logic_database_fields'])} 个运行时数据库字段。"
+                "资源路径、引擎常量和动态拼接标识不会进入翻译。",
             ),
         ))
         message_queue.put((
@@ -1797,11 +1898,35 @@ def _replace_data_directory(data_path, source_data_path, defer_cleanup=False):
             raise WolfEngineError(f"无法清理 WOLF Data 临时目录: {path}")
     shutil.copytree(source_data_path, prepared)
     if not os.path.exists(backup):
-        shutil.copytree(data_path, backup)
-    os.replace(data_path, displaced)
+        backup_temp = f"{backup}.tmp"
+        if os.path.exists(backup_temp) and not file_system.safe_remove(backup_temp):
+            raise WolfEngineError(f"无法清理 WOLF Data 备份临时目录: {backup_temp}")
+        try:
+            shutil.copytree(data_path, backup_temp)
+            os.replace(backup_temp, backup)
+        except Exception:
+            if os.path.exists(backup_temp) and not file_system.safe_remove(backup_temp):
+                log.warning("无法清理未完成的 WOLF Data 备份: %s", backup_temp)
+            raise
+    # ponytail: a bounded retry covers transient scanners; persistent locks still fail fast.
     try:
-        # ponytail: Windows scanners can briefly hold a freshly copied directory;
-        # a bounded retry handles that transient lock without weakening rollback.
+        for attempt in range(6):
+            try:
+                os.replace(data_path, displaced)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.25 * (attempt + 1))
+    except Exception as error:
+        if os.path.exists(prepared) and not file_system.safe_remove(prepared):
+            log.warning("无法清理未提交的 WOLF Data 临时目录: %s", prepared)
+        if isinstance(error, PermissionError):
+            raise WolfEngineError(
+                "无法替换 WOLF Data：目录仍被占用，请关闭游戏和正在读取游戏文件的程序后重试"
+            ) from error
+        raise
+    try:
         for attempt in range(6):
             try:
                 os.replace(prepared, data_path)
@@ -1860,7 +1985,8 @@ def _replace_data_and_manifest(
     try:
         if archive_existed:
             os.remove(root_archive)
-        displaced = _replace_data_directory(data_path, staging_data, defer_cleanup=True)
+        if staging_data:
+            displaced = _replace_data_directory(data_path, staging_data, defer_cleanup=True)
         if manifest_temp:
             os.replace(manifest_temp, manifest_path)
             manifest_temp = None
@@ -1937,6 +2063,74 @@ def _read_game_json_slots(json_root):
             return _font_slots(json.load(source))
     except (OSError, ValueError) as error:
         raise WolfEngineError(f"无法读取 WOLF 字体配置: {error}") from error
+
+
+def _json_path_value(data, path):
+    value = data
+    for part in path:
+        value = value[part]
+    return value
+
+
+def _verify_logic_json_unchanged(original_root, patched_root):
+    usage = _analyze_json_usage(original_root)
+    protected = set()
+    for root, _, files in os.walk(original_root):
+        for filename in files:
+            if not filename.lower().endswith(".json"):
+                continue
+            source_path = os.path.join(root, filename)
+            for metadata, _text in _json_entries(original_root, source_path, usage):
+                if metadata.get("kind") == "json" and metadata.get("marker") == "WOLFLogic":
+                    protected.add((metadata["file"], tuple(metadata["path"])))
+
+    cache = {}
+    for relative, path in sorted(protected, key=lambda item: (item[0].casefold(), repr(item[1]))):
+        if relative not in cache:
+            try:
+                with open(_safe_join(original_root, relative), "r", encoding="utf-8") as source:
+                    original = json.load(source)
+                with open(_safe_join(patched_root, relative), "r", encoding="utf-8") as source:
+                    patched = json.load(source)
+            except (OSError, ValueError) as error:
+                raise WolfEngineError(f"无法验证 WOLF 逻辑字段 {relative}: {error}") from error
+            cache[relative] = original, patched
+        original, patched = cache[relative]
+        try:
+            unchanged = _json_path_value(original, path) == _json_path_value(patched, path)
+        except (IndexError, KeyError, TypeError) as error:
+            raise WolfEngineError(f"WOLF 逻辑字段路径失效: {relative}: {list(path)}") from error
+        if not unchanged:
+            raise WolfEngineError(f"WOLF 逻辑字段被翻译，拒绝导入: {relative}: {list(path)}")
+
+
+def _verify_json_dump_matches(expected_root, actual_root):
+    def json_files(root):
+        return {
+            os.path.relpath(os.path.join(directory, filename), root).replace(os.sep, "/")
+            for directory, _, filenames in os.walk(root)
+            for filename in filenames
+            if filename.lower().endswith(".json")
+        }
+
+    expected_files = json_files(expected_root)
+    actual_files = json_files(actual_root)
+    if expected_files != actual_files:
+        missing = sorted(expected_files - actual_files, key=str.casefold)
+        extra = sorted(actual_files - expected_files, key=str.casefold)
+        raise WolfEngineError(f"WOLF Data 重读文件集合不一致: 缺少 {missing[:5]}，多出 {extra[:5]}")
+    for relative in sorted(expected_files, key=str.casefold):
+        expected_path = _safe_join(expected_root, relative)
+        actual_path = _safe_join(actual_root, relative)
+        try:
+            with open(expected_path, "r", encoding="utf-8") as source:
+                expected = json.load(source)
+            with open(actual_path, "r", encoding="utf-8") as source:
+                actual = json.load(source)
+        except (OSError, ValueError) as error:
+            raise WolfEngineError(f"无法比较 WOLF Data 重读结果 {relative}: {error}") from error
+        if actual != expected:
+            raise WolfEngineError(f"WOLF Data 重读内容不一致: {relative}")
 
 
 def _manifest_font_slots(manifest, fallback_slots):
@@ -2067,19 +2261,29 @@ def font_revision_missing_characters(revision, characters):
 
 def font_revision_required_characters(game_path, sample_text=""):
     scripts_path = os.path.join(game_path, STRING_SCRIPTS_DIRNAME)
-    texts = []
-    if os.path.isdir(scripts_path):
-        try:
-            texts = [
-                text
-                for metadata, text in _read_released_entries(scripts_path)
-                if metadata.get("marker") != "WOLFLogic"
-            ]
-        except (OSError, WolfEngineError):
-            texts = []
-    if texts:
-        return _required_font_characters(texts), True
-    return _required_font_characters([sample_text]), False
+    origin_path = os.path.join(game_path, STRING_SCRIPTS_ORIGIN_DIRNAME)
+    if not os.path.isdir(scripts_path) or not os.path.isdir(origin_path):
+        return _required_font_characters([sample_text]), False
+    try:
+        origin_entries = {
+            _entry_identity(script_rel, metadata): text
+            for script_rel, metadata, text in _iter_released_entries(origin_path)
+        }
+        texts = []
+        has_translation = False
+        for script_rel, metadata, text in _iter_released_entries(scripts_path):
+            if metadata.get("marker") == "WOLFLogic":
+                continue
+            original = origin_entries.get(_entry_identity(script_rel, metadata))
+            if original is None:
+                continue
+            has_translation = has_translation or text != original
+            texts.append(_decode_wolf_transport(text, metadata))
+    except (OSError, WolfEngineError):
+        return _required_font_characters([sample_text]), False
+    if not has_translation:
+        return _required_font_characters([sample_text]), False
+    return _required_font_characters(texts), True
 
 
 def _serialized_font_selection(selection):
@@ -2340,6 +2544,7 @@ def import_from_string_scripts(game_path, message_queue=None):
             origin_path
         )
     }
+    released_entries = list(_iter_released_entries(scripts_path))
     with tempfile.TemporaryDirectory(prefix="windy-wolf-import-") as temp_root:
         patch_path = os.path.join(temp_root, "json")
         staging_data = os.path.join(temp_root, "Data")
@@ -2354,7 +2559,7 @@ def import_from_string_scripts(game_path, message_queue=None):
         changed = 0
         font_texts = []
         seen_identities = set()
-        for script_rel, metadata, text in _iter_released_entries(scripts_path):
+        for script_rel, metadata, text in released_entries:
             identity = _entry_identity(script_rel, metadata)
             seen_identities.add(identity)
             if identity not in origin_entries:
@@ -2400,6 +2605,7 @@ def import_from_string_scripts(game_path, message_queue=None):
 
         for path, data in json_cache.items():
             _write_json_atomic(path, data)
+        _verify_logic_json_unchanged(snapshot_path, patch_path)
 
         applied_font_slots = _read_game_json_slots(patch_path)
         for warning in _font_coverage_warnings(game_path, applied_font_slots, font_texts):
@@ -2432,6 +2638,7 @@ def import_from_string_scripts(game_path, message_queue=None):
         _strip_split_archives(staging_data)
         verification_json = os.path.join(temp_root, "verify-json")
         uberwolf.dump_text(staging_data, verification_json)
+        _verify_json_dump_matches(patch_path, verification_json)
 
         staged_data_sha256 = _data_digest(staging_data)
         next_manifest = dict(manifest)
@@ -2456,4 +2663,5 @@ def import_from_string_scripts(game_path, message_queue=None):
             "log",
             ("success", f"WOLF 导入完成并通过 Data 重读校验：共 {applied} 条，实际变化 {changed} 条。"),
         ))
+        message_queue.put(("wolf_translation_imported", game_path))
     return changed

@@ -8,7 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger(__name__)
 
-MULTILINE_BLOCK_MARKERS = {"Message", "StringPicture", "ScrollText", "WOLFText", "WOLFLogic"}
+MULTILINE_BLOCK_MARKERS = {
+    "Message", "StringPicture", "ScrollText", "WOLFText", "WOLFLogic",
+}
 DEFAULT_RELEASE_WORKERS = min(4, max(1, os.cpu_count() or 1))
 MAX_SCHEMA_ERRORS_TO_REPORT = 10
 

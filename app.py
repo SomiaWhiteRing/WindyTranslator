@@ -316,7 +316,16 @@ class RPGTranslatorApp:
             return
 
         if task_func:
-            self._run_task_in_thread(task_func, task_args, task_kwargs, task_name, mode)
+            font_panel = None
+            if task_name == 'apply_wolf_fonts' and hasattr(self.main_window, "font_panel"):
+                font_panel = self.main_window.font_panel
+                font_panel.begin_apply()
+            try:
+                self._run_task_in_thread(task_func, task_args, task_kwargs, task_name, mode)
+            except Exception:
+                if font_panel:
+                    font_panel.finish_apply()
+                raise
 
     def save_pro_mode_settings(self, settings):
         """保存专业模式的设置到配置中。由 ProModePanel 调用。"""
@@ -459,6 +468,8 @@ class RPGTranslatorApp:
             finally:
                 elapsed = time.time() - task_start_time
                 log.info(f"任务 '{task_name}' (ID: {task_id_from_kwargs_for_exception_handling if task_id_from_kwargs_for_exception_handling else 'N/A'}) 线程执行完毕，耗时: {elapsed:.2f} 秒。")
+                if task_name == 'apply_wolf_fonts' and hasattr(self.main_window, "font_panel"):
+                    self.root.after(0, self.main_window.font_panel.finish_apply)
                 # 确保发送 'done' 信号，即使任务内部忘记发送或出错中断
                 # 但为了避免重复发送，最好还是依赖任务自身发送
                 # self.message_queue.put(("done", None))
@@ -634,6 +645,11 @@ class RPGTranslatorApp:
                 elif msg_type == "font_revision_applied":
                     if hasattr(self.main_window, "font_panel"):
                         self.main_window.font_panel.refresh()
+                elif msg_type == "wolf_translation_imported":
+                    if hasattr(self.main_window, "font_panel"):
+                        panel = self.main_window.font_panel
+                        if os.path.normcase(panel.game_path) == os.path.normcase(os.path.abspath(content)):
+                            panel.refresh()
                 elif msg_type == "wolf_initialized":
                     if hasattr(self.main_window, "refresh_game_context"):
                         self.main_window.refresh_game_context()

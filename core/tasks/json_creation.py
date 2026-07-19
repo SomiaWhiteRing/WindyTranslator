@@ -11,7 +11,9 @@ log = logging.getLogger(__name__)
 DEFAULT_SPEAKER_ID = "NARRATION" # 用于旁白或Page开始时无明确脸图的情况
 SYSTEM_TEXT_SPEAKER_ID = "SYSTEM"  # 用于系统词条、非对话文本
 ERASE_COMMAND_ID = "_ERASE_FACE_" # 用于内部标记Erase指令
-MULTILINE_BLOCK_MARKERS = {"Message", "StringPicture", "ScrollText", "WOLFText", "WOLFLogic"}
+MULTILINE_BLOCK_MARKERS = {
+    "Message", "StringPicture", "ScrollText", "WOLFText", "WOLFLogic",
+}
 
 # 正则表达式预编译
 RE_MARKER_LINE = re.compile(r'#(.+)#')

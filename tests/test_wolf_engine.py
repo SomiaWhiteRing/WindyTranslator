@@ -102,12 +102,14 @@ def test_wolf_initialize_requests_font_context_refresh(tmp_path, monkeypatch):
     monkeypatch.setattr(
         wolf,
         "initialize_game",
-        lambda _path, _messages: {"pack_mode": "v3"},
+        lambda _path, _messages: {"archive_layout": "single"},
     )
 
     initialize.run_initialize(str(tmp_path), {}, messages)
 
     queued = list(messages.queue)
+    assert ("success", "初始化完成（WOLF，原始封包布局 single）") in queued
+    assert not any(message_type == "error" for message_type, _content in queued)
     assert ("wolf_initialized", str(tmp_path)) in queued
     assert queued.index(("wolf_initialized", str(tmp_path))) < queued.index(("done", None))
 
@@ -185,7 +187,7 @@ def test_wolf_database_separates_identifiers_from_display_text(tmp_path):
     entries = wolf._json_entries(str(json_root), str(json_path))
     roles = [(metadata["path"], metadata["marker"], text) for metadata, text in entries]
 
-    assert (["types", 0, "data", 0, "name"], "WOLFText", "鉄の斧") in roles
+    assert not any(path == ["types", 0, "data", 0, "name"] for path, _marker, _text in roles)
     assert (["types", 0, "data", 1, "name"], "WOLFLogic", "ソフィア") in roles
     assert (["types", 0, "data", 1, "data", 0, "value"], "WOLFLogic", "ソフィア") in roles
     assert (["types", 0, "data", 1, "data", 1, "value"], "WOLFText", "ソフィア") in roles
@@ -194,6 +196,43 @@ def test_wolf_database_separates_identifiers_from_display_text(tmp_path):
     assert wolf._write_json_entry_groups(str(scripts), "databases/DataBase.json.txt", entries) == 2
     assert (scripts / "WOLF" / "Binary" / "databases" / "DataBase.json.txt").is_file()
     assert (scripts / "WOLF" / "Logic" / "databases" / "DataBase.json.txt").is_file()
+
+
+def test_wolf_database_first_string_data_id_stays_logic(tmp_path):
+    json_root = tmp_path / "json"
+    databases = json_root / "databases"
+    databases.mkdir(parents=True)
+    database_path = databases / "DataBase.json"
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "武装一覧",
+                "data": [
+                    {
+                        "name": "",
+                        "data": [
+                            {"name": "名称", "value": "ハンドル"},
+                            {"name": "説明", "value": "回転させる装置"},
+                        ],
+                    },
+                    {
+                        "name": "handle_id",
+                        "data": [{"name": "名称", "value": "予備ハンドル"}],
+                    },
+                ],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    roles = {
+        (tuple(metadata["path"]), text): metadata["marker"]
+        for metadata, text in wolf._json_entries(str(json_root), str(database_path))
+    }
+
+    assert roles[(("types", 0, "data", 0, "data", 0, "value"), "ハンドル")] == "WOLFLogic"
+    assert roles[(("types", 0, "data", 0, "data", 1, "value"), "回転させる装置")] == "WOLFText"
+    assert roles[(("types", 0, "data", 1, "data", 0, "value"), "予備ハンドル")] == "WOLFText"
 
 
 def test_wolf_database_identifier_roles_follow_runtime_usage(tmp_path):
@@ -280,17 +319,17 @@ def test_wolf_database_identifier_roles_follow_runtime_usage(tmp_path):
 
     assert ("database.json", 0, 0) in usage["display_database_fields"]
     assert ("database.json", 1, 0) in usage["logic_database_fields"]
-    assert roles[(("types", 0, "data", 0, "name"), "鉄の斧")] == "WOLFText"
-    assert roles[(("types", 0, "data", 0, "data", 0, "value"), "鉄の斧")] == "WOLFText"
+    assert roles[(("types", 0, "data", 0, "name"), "鉄の斧")] == "WOLFLogic"
+    assert roles[(("types", 0, "data", 0, "data", 0, "value"), "鉄の斧")] == "WOLFLogic"
     assert roles[(("types", 0, "data", 1, "name"), "ソフィア")] == "WOLFLogic"
     assert roles[(("types", 1, "data", 0, "data", 0, "value"), "内部キー")] == "WOLFLogic"
     assert roles[(("types", 2, "data", 0, "data", 0, "value"), "未使用キー")] == "WOLFLogic"
     common_entries = wolf._json_entries(str(json_root), str(common_path), usage)
-    assert any(
-        metadata["marker"] == "WOLFLogic" and text == "ソフィア"
-        for metadata, text in common_entries
-        if metadata["path"] == ["commands", 4, "stringArgs", 0]
+    command_logic = next(
+        metadata for metadata, text in common_entries
+        if metadata["path"] == ["commands", 4, "stringArgs", 0] and text == "ソフィア"
     )
+    assert command_logic["marker"] == "WOLFLogic"
 
 
 def test_wolf_database_record_name_used_cross_database_by_code250_stays_logic(tmp_path):
@@ -349,6 +388,223 @@ def test_wolf_database_record_name_used_cross_database_by_code250_stays_logic(tm
         and text == "Ayaは元気？"
         for metadata, text in entries
     )
+
+
+def test_wolf_database_value_used_as_jump_label_stays_logic(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Particle.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir(parents=True)
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "パーティクル",
+                "data": [{
+                    "name": "arm_pose",
+                    "data": [{"name": "名前", "value": "[rb]ウィル腕 - 構え"}],
+                }],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "stringArgs": ["", "パーティクル", "", "名前"],
+                    "intArgs": [0, 1600000, 0, 0x51200, 3000001],
+                },
+                {"code": 213, "stringArgs": [r"\s[1]"]},
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    roles = {
+        (tuple(metadata["path"]), text): metadata["marker"]
+        for metadata, text in wolf._json_entries(str(json_root), str(database_path), usage)
+    }
+
+    assert ("database.json", 0, 0) in usage["logic_database_fields"]
+    assert roles[
+        (("types", 0, "data", 0, "data", 0, "value"), "[rb]ウィル腕 - 構え")
+    ] == "WOLFLogic"
+
+
+def test_wolf_database_value_used_as_sound_resource_stays_logic(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Sound.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir(parents=True)
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Scene",
+                "data": [{
+                    "name": "battle",
+                    "data": [{"name": "Value", "value": "BGM/battle.ogg"}],
+                }],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "stringArgs": ["", "Scene", "", "Value"],
+                    "intArgs": [0, 0, 0, 0x51200, 1600006],
+                },
+                {"code": 140, "stringArgs": [r"\cself[6]"]},
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert ("database.json", 0, 0) in usage["logic_database_fields"]
+
+
+def test_wolf_closed_jump_label_group_stays_logic(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Particle.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir(parents=True)
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "パーティクル",
+                "data": [{
+                    "name": "[rb]ウィル腕 - 構え",
+                    "data": [{"name": "名前", "value": "[rb]ウィル腕 - 構え"}],
+                }],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "stringArgs": ["", "パーティクル", "", "名前"],
+                    "intArgs": [0, 1600000, 0, 0x51200, 3000001],
+                },
+                {"code": 213, "stringArgs": [r"\s[1]"]},
+                {"code": 212, "stringArgs": ["[rb]ウィル腕 - 構え"]},
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    entries = [
+        *wolf._json_entries(str(json_root), str(database_path), usage),
+        *wolf._json_entries(str(json_root), str(common_path), usage),
+    ]
+    grouped = [
+        metadata for metadata, text in entries
+        if text == "[rb]ウィル腕 - 構え"
+    ]
+
+    assert len(grouped) == 2
+    assert {metadata["marker"] for metadata in grouped} == {"WOLFLogic"}
+
+
+def test_wolf_dynamic_database_selector_protects_reference_pair(tmp_path):
+    json_root = tmp_path / "json"
+    databases = json_root / "databases"
+    common = json_root / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    database_path = databases / "DataBase.json"
+    c_database_path = databases / "CDataBase.json"
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "操作盤名",
+                "data": [{
+                    "name": "通常戦闘",
+                    "data": [
+                        {"name": "リソース名1", "value": "戦_バリア"},
+                        {"name": "リソース名2", "value": "戦_フォーカス"},
+                    ],
+                }],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    c_database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "汎用リソース管理",
+                "data": [{
+                    "name": "戦_バリア",
+                    "data": [{"name": "name", "value": "戦_バリア"}],
+                }],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (common / "OperationPanel.json").write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600096],
+                    "stringArgs": ["", "操作盤名", "", "リソース名1"],
+                },
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 1600096, 0x51000, 1600009],
+                    "stringArgs": ["", "汎用リソース管理", "", "name"],
+                },
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    database_entries = wolf._json_entries(str(json_root), str(database_path), usage)
+    c_database_entries = wolf._json_entries(str(json_root), str(c_database_path), usage)
+    database_roles = {
+        (tuple(metadata["path"]), text): metadata["marker"]
+        for metadata, text in database_entries
+    }
+    c_database_roles = {
+        (tuple(metadata["path"]), text): metadata["marker"]
+        for metadata, text in c_database_entries
+    }
+
+    assert ("database.json", 0, 0) in usage["logic_database_fields"]
+    assert ("database.json", 0, 1) in usage["logic_database_fields"]
+    assert "戦_バリア".casefold() in usage["logic_database_literals"]
+    assert database_roles[(("types", 0, "data", 0, "data", 0, "value"), "戦_バリア")] == "WOLFLogic"
+    assert c_database_roles[(("types", 0, "data", 0, "name"), "戦_バリア")] == "WOLFLogic"
+    assert c_database_roles[(("types", 0, "data", 0, "data", 0, "value"), "戦_バリア")] == "WOLFLogic"
+
+    patched_root = tmp_path / "patched"
+    shutil.copytree(json_root, patched_root)
+    patched_database = json.loads((patched_root / "databases" / "DataBase.json").read_text(encoding="utf-8"))
+    patched_database["types"][0]["data"][0]["data"][0]["value"] = "战_屏障"
+    (patched_root / "databases" / "DataBase.json").write_text(
+        json.dumps(patched_database, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    try:
+        wolf._verify_logic_json_unchanged(str(json_root), str(patched_root))
+    except wolf.WolfEngineError as error:
+        assert "逻辑字段被翻译" in str(error)
+    else:
+        raise AssertionError("dynamic database selector values must remain unchanged")
 
 
 def test_wolf_resource_detection_handles_multiline_parameters():
@@ -578,6 +834,61 @@ def test_wolf_loose_commit_replaces_data_and_manifest(tmp_path):
     assert (data_path / "value.txt").read_text(encoding="utf-8") == "new data"
     assert not (tmp_path / "Data.wolf").exists()
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == {"version": "new"}
+
+
+def test_wolf_original_data_backup_is_published_atomically(tmp_path, monkeypatch):
+    data_path = tmp_path / "Data"
+    staging = tmp_path / "staging"
+    data_path.mkdir()
+    staging.mkdir()
+    (data_path / "a.txt").write_text("original a", encoding="utf-8")
+    (data_path / "b.txt").write_text("original b", encoding="utf-8")
+    (staging / "a.txt").write_text("translated a", encoding="utf-8")
+    (staging / "b.txt").write_text("translated b", encoding="utf-8")
+    real_copytree = wolf.shutil.copytree
+
+    def interrupt_backup(source, destination, *args, **kwargs):
+        if os.path.basename(destination) == "Data.windy-original.bak.tmp":
+            os.makedirs(destination)
+            shutil.copy2(os.path.join(source, "a.txt"), os.path.join(destination, "a.txt"))
+            raise OSError("interrupted backup")
+        return real_copytree(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(wolf.shutil, "copytree", interrupt_backup)
+    try:
+        wolf._replace_data_directory(str(data_path), str(staging))
+    except OSError:
+        pass
+    else:
+        raise AssertionError("interrupted backup must fail the replacement")
+
+    backup = tmp_path / "Data.windy-original.bak"
+    assert not backup.exists()
+    assert not (tmp_path / "Data.windy-original.bak.tmp").exists()
+    assert (data_path / "b.txt").read_text(encoding="utf-8") == "original b"
+
+    monkeypatch.setattr(wolf.shutil, "copytree", real_copytree)
+    wolf._replace_data_directory(str(data_path), str(staging))
+
+    assert (backup / "a.txt").read_text(encoding="utf-8") == "original a"
+    assert (backup / "b.txt").read_text(encoding="utf-8") == "original b"
+    assert (data_path / "b.txt").read_text(encoding="utf-8") == "translated b"
+
+
+def test_wolf_json_reread_rejects_ignored_patch(tmp_path):
+    expected = tmp_path / "expected" / "maps"
+    actual = tmp_path / "actual" / "maps"
+    expected.mkdir(parents=True)
+    actual.mkdir(parents=True)
+    (expected / "Map001.json").write_text('{"text":"中文"}', encoding="utf-8")
+    (actual / "Map001.json").write_text('{"text":"原文"}', encoding="utf-8")
+
+    try:
+        wolf._verify_json_dump_matches(str(expected.parent), str(actual.parent))
+    except wolf.WolfEngineError as error:
+        assert "重读内容不一致" in str(error)
+    else:
+        raise AssertionError("ignored JSON patch must fail reread verification")
 
 
 def test_wolf_control_transport_preserves_codes_and_exposes_ruby_text():
@@ -1081,8 +1392,13 @@ def test_wolf_import_writes_loose_data_without_repacking(tmp_path, monkeypatch):
 
     def fake_dump(_data, json_root):
         os.makedirs(os.path.join(json_root, "game"), exist_ok=True)
+        os.makedirs(os.path.join(json_root, "maps"), exist_ok=True)
         with open(os.path.join(json_root, "game", "Game.json"), "w", encoding="utf-8") as output:
             json.dump({"MainFont": "Test Font", "SubFonts": ["", "", ""]}, output)
+        with open(os.path.join(_data, "BasicData", "Game.dat"), encoding="utf-8") as source:
+            translated = source.read()
+        with open(os.path.join(json_root, "maps", "a.json"), "w", encoding="utf-8") as output:
+            json.dump([{"text": translated}], output, ensure_ascii=False)
 
     monkeypatch.setattr(wolf.uberwolf, "apply_text", fake_apply)
     monkeypatch.setattr(wolf.uberwolf, "dump_text", fake_dump)
@@ -1092,7 +1408,9 @@ def test_wolf_import_writes_loose_data_without_repacking(tmp_path, monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not unpack verification archive")),
     )
 
-    assert wolf.import_from_string_scripts(str(game_path)) == 1
+    messages = queue.Queue()
+    assert wolf.import_from_string_scripts(str(game_path), messages) == 1
+    assert ("wolf_translation_imported", str(game_path)) in list(messages.queue)
     assert (basic_data / "Game.dat").read_text(encoding="utf-8") == "中文"
     assert not (game_path / "Data.wolf").exists()
     assert not (data_path / "BasicData.wolf").exists()
@@ -1259,6 +1577,26 @@ def test_wolf_release_validation_accepts_kana_block_punctuation(tmp_path):
     assert errors == []
 
 
+def test_font_required_characters_waits_for_released_translation(tmp_path):
+    origin_path = tmp_path / wolf.STRING_SCRIPTS_ORIGIN_DIRNAME
+    scripts_path = tmp_path / wolf.STRING_SCRIPTS_DIRNAME
+    metadata = {"kind": "json", "file": "maps/a.json", "path": [0], "marker": "Message"}
+    original = [(metadata, "原文です")]
+    wolf._write_string_script(str(origin_path / "sample.txt"), original)
+    wolf._write_string_script(str(scripts_path / "sample.txt"), original)
+
+    required, from_scripts = wolf.font_revision_required_characters(str(tmp_path), "示例文字")
+
+    assert required == set("示例文字")
+    assert from_scripts is False
+
+    wolf._write_string_script(str(scripts_path / "sample.txt"), [(metadata, "中文译文")])
+    required, from_scripts = wolf.font_revision_required_characters(str(tmp_path), "示例文字")
+
+    assert required == set("中文译文")
+    assert from_scripts is True
+
+
 def test_replace_data_directory_preserves_first_backup(tmp_path):
     data_path = tmp_path / "Data"
     source_path = tmp_path / "staging"
@@ -1297,6 +1635,61 @@ def test_replace_data_directory_retries_transient_windows_lock(tmp_path, monkeyp
 
     assert blocked == 2
     assert (data_path / "value.txt").read_text(encoding="utf-8") == "new"
+
+
+def test_replace_data_directory_retries_initial_displacement_lock(tmp_path, monkeypatch):
+    data_path = tmp_path / "Data"
+    source_path = tmp_path / "staging"
+    data_path.mkdir()
+    source_path.mkdir()
+    (data_path / "value.txt").write_text("old", encoding="utf-8")
+    (source_path / "value.txt").write_text("new", encoding="utf-8")
+    real_replace = os.replace
+    blocked = 0
+
+    def transient_replace(source, destination):
+        nonlocal blocked
+        if source == str(data_path) and blocked < 2:
+            blocked += 1
+            raise PermissionError(5, "transient data lock")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(wolf.os, "replace", transient_replace)
+    monkeypatch.setattr(wolf.time, "sleep", lambda _seconds: None)
+
+    wolf._replace_data_directory(str(data_path), str(source_path))
+
+    assert blocked == 2
+    assert (data_path / "value.txt").read_text(encoding="utf-8") == "new"
+
+
+def test_replace_data_directory_cleans_prepared_data_after_persistent_lock(tmp_path, monkeypatch):
+    data_path = tmp_path / "Data"
+    source_path = tmp_path / "staging"
+    data_path.mkdir()
+    source_path.mkdir()
+    (data_path / "value.txt").write_text("old", encoding="utf-8")
+    (source_path / "value.txt").write_text("new", encoding="utf-8")
+    real_replace = os.replace
+
+    def locked_replace(source, destination):
+        if source == str(data_path):
+            raise PermissionError(5, "persistent data lock")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(wolf.os, "replace", locked_replace)
+    monkeypatch.setattr(wolf.time, "sleep", lambda _seconds: None)
+
+    try:
+        wolf._replace_data_directory(str(data_path), str(source_path))
+    except wolf.WolfEngineError as error:
+        assert "目录仍被占用" in str(error)
+    else:
+        raise AssertionError("persistent Data lock must fail")
+
+    assert (data_path / "value.txt").read_text(encoding="utf-8") == "old"
+    assert not (tmp_path / "Data.windy.tmp").exists()
+    assert not (tmp_path / "Data.windy.previous.tmp").exists()
 
 
 def test_initialize_migrates_stale_data_from_verified_last_import(tmp_path, monkeypatch):
@@ -1382,6 +1775,8 @@ def test_initialize_unpacks_and_records_split_archive_layout(tmp_path, monkeypat
     data_path.mkdir()
     (tmp_path / "Game.exe").write_bytes(b"exe")
     (data_path / "BasicData.wolf").write_bytes(b"archive")
+    archive_sha256 = wolf._archive_digest(str(tmp_path), "split")
+    split_file_sha256 = wolf._sha256(str(data_path / "BasicData.wolf"))
     unpack_calls = 0
 
     def fake_unpack(root):
@@ -1400,8 +1795,43 @@ def test_initialize_unpacks_and_records_split_archive_layout(tmp_path, monkeypat
 
     assert unpack_calls == 1
     assert manifest["archive_layout"] == "split"
-    assert manifest["archive_sha256"] == wolf._archive_digest(str(tmp_path), "split")
+    assert manifest["archive_sha256"] == archive_sha256
     assert manifest["archive_data_sha256"] == manifest["data_sha256"]
+    assert manifest["deployment_layout"] == "loose"
+    assert not (data_path / "BasicData.wolf").exists()
+    disabled = manifest["disabled_archives"]
+    assert [item["source_path"] for item in disabled] == ["Data/BasicData.wolf"]
+    assert wolf._sha256(wolf._safe_join(str(tmp_path), disabled[0]["stored_path"])) == split_file_sha256
+
+
+def test_initialize_unpacks_and_disables_single_archive(tmp_path, monkeypatch):
+    (tmp_path / "Game.exe").write_bytes(b"exe")
+    archive_path = tmp_path / "Data.wolf"
+    archive_path.write_bytes(b"archive")
+    archive_sha256 = wolf._sha256(str(archive_path))
+
+    def fake_unpack(root):
+        basic_data = os.path.join(root, "Data", "BasicData")
+        os.makedirs(basic_data)
+        with open(os.path.join(basic_data, "Game.dat"), "wb") as output:
+            output.write(b"game")
+        with open(os.path.join(basic_data, "CommonEvent.dat"), "wb") as output:
+            output.write(b"common")
+        return os.path.join(root, "Data")
+
+    monkeypatch.setattr(wolf.uberwolf, "unpack_game", fake_unpack)
+    manifest = wolf.initialize_game(str(tmp_path))
+
+    assert not archive_path.exists()
+    assert manifest["archive_layout"] == "single"
+    assert manifest["archive_sha256"] == archive_sha256
+    assert manifest["archive_data_sha256"] == manifest["data_sha256"]
+    assert manifest["deployment_layout"] == "loose"
+    disabled = manifest["disabled_archives"]
+    assert [item["source_path"] for item in disabled] == ["Data.wolf"]
+    assert wolf._sha256(wolf._safe_join(str(tmp_path), disabled[0]["stored_path"])) == archive_sha256
+    assert not (tmp_path / "Data.windy-original.bak").exists()
+    assert wolf.initialize_game(str(tmp_path))["data_sha256"] == manifest["data_sha256"]
 
 
 def test_initialize_accepts_game_that_started_with_loose_data(tmp_path, monkeypatch):
@@ -1424,7 +1854,7 @@ def test_initialize_accepts_game_that_started_with_loose_data(tmp_path, monkeypa
     assert manifest["data_sha256"] == wolf._data_digest(str(tmp_path / "Data"))
 
 
-def test_initialize_accepts_verified_loose_deployment_beside_retained_archive(tmp_path, monkeypatch):
+def test_initialize_disables_restored_archive_beside_verified_loose_deployment(tmp_path, monkeypatch):
     data_path = tmp_path / "Data" / "BasicData"
     state_path = tmp_path / wolf.STATE_DIRNAME
     data_path.mkdir(parents=True)
@@ -1463,3 +1893,5 @@ def test_initialize_accepts_verified_loose_deployment_beside_retained_archive(tm
     assert manifest["data_sha256"] == data_sha256
     assert manifest["font_revision"]["original_slots"] == ["A", "B", "", ""]
     assert (data_path / "Game.dat").read_bytes() == b"translated"
+    assert not archive_path.exists()
+    assert [item["source_path"] for item in manifest["disabled_archives"]] == ["Data.wolf"]

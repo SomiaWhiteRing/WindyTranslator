@@ -30,8 +30,11 @@ class WolfFontPanel(ttk.Frame):
         self._loading = False
         self._visible = False
         self._poll_after_id = None
+        self._font_apply_active = False
         self._registered_fonts = set()
         self._preloaded_context = None
+        self.required_characters = set()
+        self.required_from_scripts = False
 
         self.sample_var = tk.StringVar(value=DEFAULT_SAMPLE)
         self.size_var = tk.IntVar(value=12)
@@ -178,19 +181,37 @@ class WolfFontPanel(ttk.Frame):
             self._poll_after_id = None
 
     def refresh(self):
-        if self.game_path:
+        if self.game_path and not self._font_apply_active:
             self._load_token += 1
             self._reload_async(self._load_token)
 
-    def close(self):
-        self.set_visible(False)
-        self.canvas.unbind_all("<MouseWheel>")
+    def begin_apply(self):
+        self._font_apply_active = True
+        self._load_token += 1
+        if self._poll_after_id:
+            self.after_cancel(self._poll_after_id)
+            self._poll_after_id = None
+        self._release_private_fonts()
+
+    def finish_apply(self):
+        if not self._font_apply_active:
+            return
+        self._font_apply_active = False
+        self.refresh()
+        self._schedule_poll()
+
+    def _release_private_fonts(self):
         for path in list(self._registered_fonts):
             font_coverage.unregister_private_font(path)
         self._registered_fonts.clear()
 
+    def close(self):
+        self.set_visible(False)
+        self.canvas.unbind_all("<MouseWheel>")
+        self._release_private_fonts()
+
     def _reload_async(self, token):
-        if self._loading or not self.game_path:
+        if self._font_apply_active or self._loading or not self.game_path:
             return
         self._loading = True
         game_path = self.game_path
@@ -277,6 +298,7 @@ class WolfFontPanel(ttk.Frame):
 
     def _populate_choices(self):
         previous = [self._selection_descriptor(index) for index in range(4)]
+        saved = self.context["selected_slots"]
         self.candidate_by_label = {}
         labels = []
         for candidate in self.visible_candidates:
@@ -288,6 +310,32 @@ class WolfFontPanel(ttk.Frame):
                 suffix += 1
             self.candidate_by_label[label] = candidate
             labels.append(label)
+
+        available = {
+            (candidate["source"], candidate["family"])
+            for candidate in self.visible_candidates
+        }
+        saved_descriptors = [
+            (item.get("source"), item.get("family"))
+            if isinstance(item, dict) else None
+            for item in saved
+        ]
+        for descriptor in (*previous, *saved_descriptors):
+            if not descriptor or descriptor in available:
+                continue
+            source, family = descriptor
+            if source in ("current", "empty") or not family:
+                continue
+            label = f"[不可用] [{SOURCE_NAMES.get(source, source)}] {family}"
+            if label in self.candidate_by_label:
+                continue
+            self.candidate_by_label[label] = {
+                "source": source,
+                "family": family,
+                "files": [],
+                "unavailable": True,
+            }
+            labels.append(label)
         for index, combo in enumerate(self.combos):
             values = [KEEP_CURRENT]
             if index:
@@ -297,7 +345,6 @@ class WolfFontPanel(ttk.Frame):
 
         for index, family in enumerate(self.context["original_slots"]):
             self.original_family_vars[index].set(family or "未设置")
-        saved = self.context["selected_slots"]
         for index in range(4):
             descriptor = previous[index]
             if descriptor and self._set_descriptor(index, descriptor):
@@ -350,7 +397,7 @@ class WolfFontPanel(ttk.Frame):
             files = candidate["files"] if candidate and for_coverage else []
             return {"family": family, "source": "current", "files": files}
         candidate = self.candidate_by_label.get(value)
-        if not candidate:
+        if not candidate or candidate.get("unavailable"):
             return None
         return candidate
 
@@ -391,6 +438,8 @@ class WolfFontPanel(ttk.Frame):
         widget.configure(text=text, font=font)
 
     def _coverage_text(self, selection):
+        if not self.required_from_scripts:
+            return ""
         if not selection or not selection.get("family"):
             return "未设置"
         paths = [item["path"] for item in selection.get("files", []) if os.path.isfile(item.get("path", ""))]
@@ -461,7 +510,10 @@ class WolfFontPanel(ttk.Frame):
             return
 
         coverage_revision = [self._selection(index, for_coverage=True) for index in range(4)]
-        coverage = wolf.font_revision_missing_characters(coverage_revision, self.required_characters)
+        coverage = (
+            wolf.font_revision_missing_characters(coverage_revision, self.required_characters)
+            if self.required_from_scripts else []
+        )
         problems = [
             f"槽位 {item['slot']} {item['family']}：缺少 {len(item['missing'])} 字 "
             f"{''.join(sorted(item['missing']))[:20]}"
@@ -479,7 +531,7 @@ class WolfFontPanel(ttk.Frame):
         self.app.start_task("apply_wolf_fonts", mode="font", game_path=self.game_path, task_payload=revision)
 
     def _schedule_poll(self):
-        if not self._visible or self._poll_after_id:
+        if self._font_apply_active or not self._visible or self._poll_after_id:
             return
         self._poll_after_id = self.after(2000, self._poll_catalog)
 

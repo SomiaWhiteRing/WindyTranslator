@@ -206,7 +206,7 @@ def run_initialize(game_path, rtp_options, message_queue):
 
             message_queue.put(("log", ("normal", "检测到 WOLF RPG Editor：初始化 Data.wolf...")))
             manifest = wolf.initialize_game(game_path, message_queue)
-            message_queue.put(("success", f"初始化完成（WOLF，封包模式 {manifest['pack_mode']}）"))
+            message_queue.put(("success", f"初始化完成（WOLF，原始封包布局 {manifest['archive_layout']}）"))
             message_queue.put(("status", "初始化完成（WOLF）"))
             message_queue.put(("wolf_initialized", game_path))
             message_queue.put(("done", None))
