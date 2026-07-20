@@ -5,6 +5,8 @@ import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from core.utils import file_system
+
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +85,26 @@ def _validate_translation_json_schema(data, json_text):
             add_error(
                 "$",
                 f"文件名键必须是非空字符串，实际为{_json_type_name(source_file_name)}：{_short_repr(source_file_name)}",
+            )
+            if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
+                break
+            continue
+
+        normalized_file_name = os.path.normpath(
+            source_file_name.replace("/", os.sep)
+        )
+        if (
+            "\x00" in source_file_name
+            or os.path.isabs(normalized_file_name)
+            or os.path.splitdrive(normalized_file_name)[0]
+            or normalized_file_name in (os.curdir, os.pardir)
+            or normalized_file_name.startswith(os.pardir + os.sep)
+            or normalized_file_name != source_file_name.replace("/", os.sep)
+        ):
+            add_error(
+                file_path_label,
+                f"文件名必须是规范的 StringScripts 内相对路径：{source_file_name!r}",
+                key=source_file_name,
             )
             if len(errors) >= MAX_SCHEMA_ERRORS_TO_REPORT:
                 break
@@ -195,37 +217,12 @@ def _format_translated_line(original_line_no_nl, translated_text):
     return f"{leading}{translated_core}{trailing}\n"
 
 
-def _copy_file_pair(file_pair):
-    src_path, dst_path = file_pair
-    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    shutil.copy2(src_path, dst_path)
-
-
 def _restore_string_scripts_from_backup(backup_path, string_scripts_path):
-    file_pairs = []
-
-    for current_root, _, filenames in os.walk(backup_path):
-        relative_root = os.path.relpath(current_root, backup_path)
-        target_root = string_scripts_path if relative_root == "." else os.path.join(string_scripts_path, relative_root)
-        os.makedirs(target_root, exist_ok=True)
-
-        for filename in filenames:
-            src_path = os.path.join(current_root, filename)
-            dst_path = os.path.join(target_root, filename)
-            file_pairs.append((src_path, dst_path))
-
-    if not file_pairs:
-        return 0, 0
-
-    worker_count = min(DEFAULT_RELEASE_WORKERS, len(file_pairs))
-    if worker_count == 1:
-        for file_pair in file_pairs:
-            _copy_file_pair(file_pair)
-    else:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            list(executor.map(_copy_file_pair, file_pairs))
-
-    return len(file_pairs), worker_count
+    if os.path.exists(string_scripts_path):
+        shutil.rmtree(string_scripts_path)
+    shutil.copytree(backup_path, string_scripts_path)
+    file_count = sum(len(filenames) for _root, _dirs, filenames in os.walk(string_scripts_path))
+    return file_count, 1 if file_count else 0
 
 
 def _apply_translations_worker(task):
@@ -251,15 +248,8 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
     new_lines = []
     file_basename = os.path.basename(file_path)
 
-    try:
-        with open(file_path, "r", encoding="utf-8-sig", errors="replace") as file:
-            lines = file.readlines()
-    except FileNotFoundError:
-        log.error(f"读取文件失败 (文件: {file_basename}): {file_path} 未找到。")
-        return 0, 0
-    except Exception as e:
-        log.error(f"读取文件 {file_basename} 时出错: {e}")
-        return 0, 0
+    with open(file_path, "r", encoding="utf-8-sig") as file:
+        lines = file.readlines()
 
     i = 0
     while i < len(lines):
@@ -390,13 +380,18 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
         else:
             log.warning(f"在文件 {file_basename} 中，标记 #{original_marker_type}# 后面没有内容行。")
 
+    temporary_path = f"{file_path}.tmp"
     try:
-        with open(file_path, "w", encoding="utf-8") as file_out:
+        with open(temporary_path, "w", encoding="utf-8") as file_out:
             file_out.writelines(new_lines)
+            file_out.flush()
+            os.fsync(file_out.fileno())
+        os.replace(temporary_path, file_path)
         return applied_count, skipped_count
-    except Exception as e_write:
-        log.error(f"写入文件失败 (文件: {file_basename}): {file_path} - {e_write}")
-        return 0, skipped_count
+    except Exception:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+        raise
 
 
 def run_release_json(game_path, works_dir, selected_json_path, message_queue):
@@ -405,6 +400,7 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
     在应用翻译前，会先从 StringScripts_Origin 恢复 StringScripts。
     """
     release_start_time = time.perf_counter()
+    staging_scripts_path = None
 
     try:
         message_queue.put(("status", "准备应用翻译 (按文件)..."))
@@ -412,6 +408,13 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
 
         string_scripts_path = os.path.join(game_path, "StringScripts")
         backup_path = os.path.join(game_path, "StringScripts_Origin")
+        previous_scripts_path = f"{string_scripts_path}.release-previous"
+
+        if os.path.exists(previous_scripts_path):
+            if not os.path.exists(string_scripts_path):
+                os.replace(previous_scripts_path, string_scripts_path)
+            elif not file_system.safe_remove(previous_scripts_path):
+                raise OSError(f"无法清理上次发布的旧快照: {previous_scripts_path}")
 
         message_queue.put(("log", ("normal", "检查原始备份 StringScripts_Origin...")))
         if not os.path.isdir(backup_path):
@@ -494,9 +497,16 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
         message_queue.put(("log", ("normal", "找到备份目录 StringScripts_Origin，准备恢复...")))
         restore_start_time = time.perf_counter()
         try:
-            os.makedirs(string_scripts_path, exist_ok=True)
-            restored_files_count, restore_workers = _restore_string_scripts_from_backup(backup_path, string_scripts_path)
+            staging_scripts_path = f"{string_scripts_path}.release-staging"
+            restored_files_count, restore_workers = _restore_string_scripts_from_backup(
+                backup_path, staging_scripts_path
+            )
+            if restored_files_count == 0:
+                raise ValueError("StringScripts_Origin 为空，拒绝替换当前脚本")
         except Exception as restore_err:
+            if staging_scripts_path and os.path.exists(staging_scripts_path):
+                shutil.rmtree(staging_scripts_path, ignore_errors=True)
+                staging_scripts_path = None
             log.exception("从 StringScripts_Origin 恢复 StringScripts 失败。")
             message_queue.put(("error", f"错误：从 StringScripts_Origin 恢复时出错: {restore_err}"))
             message_queue.put(("status", "释放 JSON 失败 (恢复备份失败)"))
@@ -509,8 +519,8 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
         )
         message_queue.put(("log", ("success", "成功从 StringScripts_Origin 恢复 StringScripts 目录。")))
 
-        if not os.path.isdir(string_scripts_path):
-            message_queue.put(("error", f"严重错误：恢复 StringScripts 后目录仍不存在: {string_scripts_path}"))
+        if not os.path.isdir(staging_scripts_path):
+            message_queue.put(("error", f"严重错误：恢复 StringScripts 后目录仍不存在: {staging_scripts_path}"))
             message_queue.put(("status", "释放 JSON 失败 (恢复后目录丢失)"))
             message_queue.put(("done", None))
             return False
@@ -523,17 +533,15 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
         for source_file_name, translations_for_this_file in all_translations_per_file.items():
             backup_source_path = os.path.join(backup_path, source_file_name)
             if not os.path.exists(backup_source_path):
-                log.warning(
-                    f"翻译 JSON 中包含文件 '{source_file_name}' 的数据，但在 StringScripts_Origin 中未找到该文件 ({backup_source_path})。跳过此文件。"
+                raise FileNotFoundError(
+                    f"翻译 JSON 中的源文件不在 StringScripts_Origin 中: {source_file_name}"
                 )
-                continue
 
-            target_string_script_path = os.path.join(string_scripts_path, source_file_name)
+            target_string_script_path = os.path.join(staging_scripts_path, source_file_name)
             if not os.path.exists(target_string_script_path):
-                log.warning(
-                    f"翻译 JSON 中包含文件 '{source_file_name}' 的数据，但在恢复后的 StringScripts 目录中未找到该文件 ({target_string_script_path})。跳过此文件。"
+                raise FileNotFoundError(
+                    f"恢复后的 StringScripts 缺少源文件: {source_file_name}"
                 )
-                continue
 
             tasks_to_process.append((source_file_name, target_string_script_path, translations_for_this_file))
 
@@ -567,6 +575,26 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
         total_elapsed = time.perf_counter() - release_start_time
         log.debug(f"释放 JSON 应用阶段完成。线程数 {apply_workers}，耗时 {apply_elapsed:.2f} 秒，总耗时 {total_elapsed:.2f} 秒。")
 
+        had_previous = os.path.exists(string_scripts_path)
+        if had_previous:
+            os.replace(string_scripts_path, previous_scripts_path)
+        try:
+            os.replace(staging_scripts_path, string_scripts_path)
+            staging_scripts_path = None
+        except Exception:
+            if had_previous and os.path.exists(previous_scripts_path):
+                os.replace(previous_scripts_path, string_scripts_path)
+            raise
+        if os.path.exists(previous_scripts_path):
+            try:
+                shutil.rmtree(previous_scripts_path)
+            except OSError as cleanup_error:
+                log.warning("新脚本已生效，但旧发布快照清理失败: %s", cleanup_error)
+                message_queue.put((
+                    "log",
+                    ("warning", f"新脚本已生效，但旧发布快照清理失败: {cleanup_error}"),
+                ))
+
         message_queue.put(("log", ("success", f"所有文件处理完毕。共处理 {processed_source_files_count} 个源文件，总计应用了 {overall_applied_count} 个翻译条目，跳过了 {overall_skipped_count} 个。")))
         message_queue.put(("success", f"JSON 文件释放完成。总应用 {overall_applied_count} 翻译，总跳过 {overall_skipped_count}。"))
         message_queue.put(("status", "释放 JSON 完成"))
@@ -574,6 +602,8 @@ def run_release_json(game_path, works_dir, selected_json_path, message_queue):
         return True
 
     except Exception as main_release_err:
+        if staging_scripts_path and os.path.exists(staging_scripts_path):
+            shutil.rmtree(staging_scripts_path, ignore_errors=True)
         log.exception("释放 JSON 文件任务执行期间发生意外错误。")
         message_queue.put(("error", f"释放 JSON 文件过程中发生严重错误: {main_release_err}"))
         message_queue.put(("status", "释放 JSON 失败"))

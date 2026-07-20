@@ -1,0 +1,41 @@
+diff --git a/UberWolfLib/WolfRPG/CommonEvents.hpp b/UberWolfLib/WolfRPG/CommonEvents.hpp
+--- a/UberWolfLib/WolfRPG/CommonEvents.hpp
++++ b/UberWolfLib/WolfRPG/CommonEvents.hpp
+@@ -119,6 +119,12 @@ public:
+ 		j["id"]          = m_intId;
+ 		j["name"]        = ToUTF8(m_name);
+ 		j["description"] = ToUTF8(m_description);
++		j["activation"]["raw"]   = m_unknown1;
++		j["activation"]["extra"] = m_unknown2;
+ 		j["commands"]    = nlohmann::ordered_json::array();
++		j["arguments"]   = nlohmann::ordered_json::array();
++		for (std::size_t i = 0; i < 10; i++)
++			j["arguments"].push_back(
++				i < m_unknown3.size() ? ToUTF8(m_unknown3[i]) : std::string());
+ 
+ 		for (std::size_t i = 0; i < m_commands.size(); i++)
+@@ -146,7 +152,24 @@ public:
+ 
+ 		CHECK_JSON_KEY(j, "name", "CommonEvent");
+ 		CHECK_JSON_KEY(j, "description", "CommonEvent");
++		CHECK_JSON_KEY(j, "activation", "CommonEvent");
++		CHECK_JSON_KEY(j, "arguments", "CommonEvent");
+ 		CHECK_JSON_KEY(j, "commands", "CommonEvent");
+ 
++		CHECK_JSON_KEY(j["activation"], "raw", "CommonEvent::activation");
++		CHECK_JSON_KEY(j["activation"], "extra", "CommonEvent::activation");
++		if (j["activation"]["raw"].get<uint32_t>() != m_unknown1 ||
++			j["activation"]["extra"].get<Bytes>() != m_unknown2)
++			throw WolfRPGException(ERROR_TAG + "Activation metadata mismatch");
++
++		if (!j["arguments"].is_array() || j["arguments"].size() != 10)
++			throw WolfRPGException(ERROR_TAG + "CommonEvent arguments must contain 10 entries");
++		for (std::size_t i = 0; i < 10; i++)
++		{
++			const tString expected = i < m_unknown3.size() ? m_unknown3[i] : tString();
++			if (!j["arguments"][i].is_string() || ToUTF16(j["arguments"][i].get<std::string>()) != expected)
++				throw WolfRPGException(ERROR_TAG + "CommonEvent argument metadata mismatch at index " + std::to_string(i));
++		}
++
+ 		m_name        = ToUTF16(j["name"].get<std::string>());
+ 		m_description = ToUTF16(j["description"].get<std::string>());

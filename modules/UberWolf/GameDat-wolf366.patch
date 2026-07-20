@@ -19,7 +19,7 @@ diff --git a/UberWolfLib/WolfRPG/GameDat.hpp b/UberWolfLib/WolfRPG/GameDat.hpp
  		coder.WriteByteArray(m_decryptKey);
  		coder.WriteString(m_font);
  		for (const tString& font : m_subFonts)
-@@ -222,7 +222,7 @@ private:
+@@ -222,6 +222,6 @@ private:
  		size += m_unknown1.size() + 4;
  		size += sizeof(m_stringCount);
  		size += FileCoder::CalcStringSize(m_title) + 4;

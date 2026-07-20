@@ -3,7 +3,9 @@ import os
 import re
 import json
 import logging
+from core.engines import wolf as wolf_engine
 from core.utils import file_system, text_processing # 需要文件名清理
+from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +28,29 @@ RE_PAGE_SEPARATOR = re.compile(r"^(?:-{5,}Page\d+-{5,}|={5,}Page\d+={5,}|\*{5,}E
 
 def _is_multiline_block_marker(marker):
     return marker in MULTILINE_BLOCK_MARKERS or marker.startswith("PluginCommand_")
+
+
+def _store_extracted_string(
+    strings, original, translated, marker, speaker_id,
+    wolf_code=None, wolf_export_schema=None,
+):
+    metadata = strings.get(original)
+    if metadata is None:
+        metadata = {
+            "text_to_translate": translated,
+            "original_marker": marker,
+            "speaker_id": speaker_id,
+        }
+        strings[original] = metadata
+    if wolf_code:
+        codes = metadata.setdefault("wolf_codes", [])
+        if wolf_code not in codes:
+            codes.append(wolf_code)
+        if wolf_export_schema != wolf_engine.WOLF_EXPORT_SCHEMA:
+            raise ValueError("WOLF 导出版本无效，请重新导出翻译文本")
+        previous_schema = metadata.setdefault("wolf_export_schema", wolf_export_schema)
+        if previous_schema != wolf_export_schema:
+            raise ValueError("同一 WOLF 文本混入了不同版本的导出数据")
 
 
 def _parse_face_graphic_command_details(command_details_str):
@@ -73,7 +98,7 @@ def _parse_face_graphic_command_details(command_details_str):
     return None
 
 
-def _extract_strings_from_file(file_path):
+def _extract_strings_from_file(file_path, require_wolf_metadata=False):
     """
     从单个 StringScripts txt 文件中提取需要翻译的字符串及其元数据。
     (此函数逻辑基本保持你提供的已修复版本)
@@ -96,6 +121,10 @@ def _extract_strings_from_file(file_path):
     current_speaker_id = DEFAULT_SPEAKER_ID
     current_line_number_for_log = 0
     current_page_for_log = "Page_Unknown_Init" 
+    pending_wolf_code = None
+    pending_wolf_export_schema = None
+    pending_wolf_marker = None
+    saw_wolf_metadata = False
 
     log.debug(f"开始解析文件: '{os.path.basename(file_path)}', 初始 Speaker ID: '{current_speaker_id}'")
 
@@ -108,6 +137,24 @@ def _extract_strings_from_file(file_path):
             current_line_number_for_log = i + 1
             line_content = lines[i]
             line_content_stripped = line_content.strip()
+
+            if line_content.startswith("@WOLF "):
+                encoded = line_content[6:].strip()
+                try:
+                    metadata = wolf_engine._decode_metadata(encoded)
+                    if metadata.get("wolf_export_schema") != wolf_engine.WOLF_EXPORT_SCHEMA:
+                        raise ValueError("WOLF StringScripts 版本已过期，请重新导出翻译文本")
+                    expected_code = wolf_engine._translation_code(metadata)
+                    if metadata.get("wolf_code") != expected_code:
+                        raise ValueError("WOLF StringScripts 结构 Code 无效，请重新导出翻译文本")
+                    pending_wolf_code = expected_code
+                    pending_wolf_export_schema = metadata["wolf_export_schema"]
+                    pending_wolf_marker = metadata.get("marker", "Message")
+                    saw_wolf_metadata = True
+                except (ValueError, TypeError, json.JSONDecodeError) as error:
+                    raise ValueError(f"无效的 WOLF 条目元数据: {error}") from error
+                i += 1
+                continue
 
             # 1. 检查是否是Page分隔符
             page_match = RE_PAGE_SEPARATOR.match(line_content_stripped)
@@ -146,6 +193,20 @@ def _extract_strings_from_file(file_path):
             marker_match = RE_MARKER_LINE.match(line_content_stripped)
             if marker_match:
                 original_marker = marker_match.group(1)
+                if require_wolf_metadata and pending_wolf_code is None:
+                    raise ValueError(
+                        "WOLF StringScripts 缺少当前版本元数据，请重新导出翻译文本"
+                    )
+                if pending_wolf_code and original_marker != pending_wolf_marker:
+                    raise ValueError(
+                        f"WOLF 文本标记与元数据不一致: "
+                        f"{original_marker!r} != {pending_wolf_marker!r}"
+                    )
+                wolf_code = pending_wolf_code
+                wolf_export_schema = pending_wolf_export_schema
+                pending_wolf_code = None
+                pending_wolf_export_schema = None
+                pending_wolf_marker = None
                 # 对话、图文、滚动文本与插件指令参数按完整块处理；其他标记按单行处理。
                 speaker_id_for_this_entry = current_speaker_id if original_marker == 'Message' else SYSTEM_TEXT_SPEAKER_ID # Choice 文本也可能需要发言人ID，但RPG Maker 2000/2003的Choice通常不直接关联脸图，所以默认为SYSTEM
                 log.debug(f"  [L{current_line_number_for_log}, {current_page_for_log}] 处理标记 '#{original_marker}#'. 使用 Speaker ID: '{speaker_id_for_this_entry}' (基于 current_speaker_id='{current_speaker_id}').")
@@ -162,11 +223,15 @@ def _extract_strings_from_file(file_path):
                     
                     if message_key_as_original:
                         text_to_translate_val = text_processing.convert_half_to_full_katakana(message_key_as_original)
-                        strings_with_metadata[message_key_as_original] = {
-                            "text_to_translate": text_to_translate_val,
-                            "original_marker": original_marker,
-                            "speaker_id": speaker_id_for_this_entry if original_marker == 'Message' else SYSTEM_TEXT_SPEAKER_ID
-                        }
+                        _store_extracted_string(
+                            strings_with_metadata,
+                            message_key_as_original,
+                            text_to_translate_val,
+                            original_marker,
+                            speaker_id_for_this_entry if original_marker == 'Message' else SYSTEM_TEXT_SPEAKER_ID,
+                            wolf_code,
+                            wolf_export_schema,
+                        )
                         log.debug(f"    提取到 '{original_marker}' 块. 原文Key: '{message_key_as_original[:30].replace(chr(10),'/LF/') + ('...' if len(message_key_as_original)>30 else '')}'. Speaker: '{speaker_id_for_this_entry}'")
                         if message_key_as_original != text_to_translate_val:
                              log.debug(f"      半角假名已转换.")
@@ -192,11 +257,15 @@ def _extract_strings_from_file(file_path):
                         choice_line_key = choice_line.strip()
                         if choice_line_key:
                             text_to_translate_val = text_processing.convert_half_to_full_katakana(choice_line_key)
-                            strings_with_metadata[choice_line_key] = {
-                                "text_to_translate": text_to_translate_val,
-                                "original_marker": original_marker,
-                                "speaker_id": speaker_id_for_this_entry 
-                            }
+                            _store_extracted_string(
+                                strings_with_metadata,
+                                choice_line_key,
+                                text_to_translate_val,
+                                original_marker,
+                                speaker_id_for_this_entry,
+                                wolf_code,
+                                wolf_export_schema,
+                            )
                             log.debug(f"    提取到 Choice 标记 '{original_marker}'. 原文Key: '{choice_line_key[:30].replace(chr(10),'/LF/') + ('...' if len(choice_line_key)>30 else '')}'. Speaker: '{speaker_id_for_this_entry}' (内容来自 L{i+1})")
                             if choice_line_key != text_to_translate_val:
                                 log.debug(f"      半角假名已转换.")
@@ -209,11 +278,15 @@ def _extract_strings_from_file(file_path):
                         if single_line_key:
                             text_to_translate_val = text_processing.convert_half_to_full_katakana(single_line_key)
                             # 对于非Message类，speaker_id 固定为 SYSTEM_TEXT_SPEAKER_ID
-                            strings_with_metadata[single_line_key] = {
-                                "text_to_translate": text_to_translate_val,
-                                "original_marker": original_marker,
-                                "speaker_id": SYSTEM_TEXT_SPEAKER_ID 
-                            }
+                            _store_extracted_string(
+                                strings_with_metadata,
+                                single_line_key,
+                                text_to_translate_val,
+                                original_marker,
+                                SYSTEM_TEXT_SPEAKER_ID,
+                                wolf_code,
+                                wolf_export_schema,
+                            )
                             log.debug(f"    提取到单行标记 '{original_marker}'. 原文Key: '{single_line_key[:30].replace(chr(10),'/LF/') + ('...' if len(single_line_key)>30 else '')}'. Speaker: '{SYSTEM_TEXT_SPEAKER_ID}' (内容来自 L{i+1})")
                             if single_line_key != text_to_translate_val:
                                 log.debug(f"      半角假名已转换.")
@@ -225,15 +298,19 @@ def _extract_strings_from_file(file_path):
             else:
                 i += 1 
         
+        if pending_wolf_code is not None:
+            raise ValueError("WOLF 条目元数据后缺少文本标记")
+        if require_wolf_metadata and not saw_wolf_metadata:
+            raise ValueError("WOLF StringScripts 不含当前版本元数据，请重新导出翻译文本")
         log.debug(f"完成文件解析: '{os.path.basename(file_path)}'. 共提取 {len(strings_with_metadata)} 条数据.")
         return strings_with_metadata
 
     except FileNotFoundError:
         log.error(f"读取文件失败: {file_path} 未找到。")
-        return {}
+        raise
     except Exception as e:
         log.exception(f"处理文件 '{os.path.basename(file_path)}' (行 ~{current_line_number_for_log}) 时发生严重错误: {e}")
-        return {}
+        raise
 
 
 # --- 主任务函数 ---
@@ -251,6 +328,8 @@ def run_create_json(game_path, works_dir, message_queue):
             message_queue.put(("status", "创建 JSON 失败"))
             message_queue.put(("done", None))
             return
+        detected_game = detect_game_engine(game_path)
+        is_wolf_game = bool(detected_game and detected_game.engine == "wolf")
 
         game_folder_name = text_processing.sanitize_filename(os.path.basename(game_path))
         if not game_folder_name: game_folder_name = "UntitledGame"
@@ -261,6 +340,9 @@ def run_create_json(game_path, works_dir, message_queue):
             raise OSError(f"无法创建或访问游戏特定工作目录: {work_game_dir}")
         if not file_system.ensure_dir_exists(untranslated_dir): 
             raise OSError(f"无法创建或访问 untranslated 目录: {untranslated_dir}")
+        json_path = os.path.join(untranslated_dir, "translation.json")
+        if os.path.exists(json_path) and not file_system.safe_remove(json_path):
+            raise OSError(f"无法废弃旧版未翻译 JSON: {json_path}")
         
         message_queue.put(("log", ("normal", f"将在以下目录创建 JSON: {untranslated_dir}")))
 
@@ -282,7 +364,13 @@ def run_create_json(game_path, works_dir, message_queue):
                     message_queue.put(("log", ("debug", f"正在解析文件: {file_key_in_json}"))) 
                     
                     # 调用 _extract_strings_from_file 获取该文件的所有文本和元数据
-                    data_from_single_file = _extract_strings_from_file(file_path)
+                    data_from_single_file = _extract_strings_from_file(
+                        file_path,
+                        require_wolf_metadata=(
+                            is_wolf_game
+                            or bool(relative_parts and relative_parts[0].casefold() == "wolf")
+                        ),
+                    )
                     
                     if data_from_single_file: # 只有当文件中有数据时才添加
                         file_organized_data[file_key_in_json] = data_from_single_file
@@ -297,17 +385,21 @@ def run_create_json(game_path, works_dir, message_queue):
         if not file_organized_data: # 如果没有任何文件包含可翻译内容
             message_queue.put(("log", ("warning", "未从任何文件中提取到文本条目。生成的 JSON 文件将为空对象。")))
         
-        json_filename = "translation.json" # 输出文件名保持不变
-        json_path = os.path.join(untranslated_dir, json_filename)
         message_queue.put(("log", ("normal", f"正在将按文件组织的文本及元数据写入 JSON 文件: {json_path}")))
 
+        temporary_json_path = f"{json_path}.tmp"
         try:
-            with open(json_path, 'w', encoding='utf-8') as json_file:
+            with open(temporary_json_path, 'w', encoding='utf-8') as json_file:
                 json.dump(file_organized_data, json_file, ensure_ascii=False, indent=4) # 写入新的组织结构
+                json_file.flush()
+                os.fsync(json_file.fileno())
+            os.replace(temporary_json_path, json_path)
             message_queue.put(("success", f"按文件组织的未翻译 JSON 文件创建成功: {json_path}"))
             message_queue.put(("status", "创建 JSON 文件完成"))
             message_queue.put(("done", None))
         except Exception as write_err:
+            if os.path.exists(temporary_json_path):
+                file_system.safe_remove(temporary_json_path)
             log.exception(f"写入 JSON 文件失败: {json_path} - {write_err}")
             message_queue.put(("error", f"写入 JSON 文件失败: {write_err}"))
             message_queue.put(("status", "创建 JSON 失败"))

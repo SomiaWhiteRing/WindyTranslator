@@ -753,6 +753,16 @@ def _is_reusable_translation_result(result_obj, metadata_obj=None):
             and result_obj.get("original_marker") == "WOLFLogic"
             and metadata_obj.get("original_marker") != "WOLFLogic"
         )
+        and not (
+            isinstance(metadata_obj, dict)
+            and metadata_obj.get("wolf_codes")
+            and (
+                metadata_obj.get("wolf_export_schema") is None
+                or result_obj.get("wolf_export_schema")
+                != metadata_obj.get("wolf_export_schema")
+                or result_obj.get("wolf_codes") != metadata_obj.get("wolf_codes")
+            )
+        )
     )
 
 
@@ -762,11 +772,27 @@ def _reuse_translation_result(result_obj, metadata_obj):
     reused["failure_context"] = None
     reused["original_marker"] = metadata_obj.get("original_marker", reused.get("original_marker", "UnknownMarker"))
     reused["speaker_id"] = metadata_obj.get("speaker_id", reused.get("speaker_id"))
+    if metadata_obj.get("wolf_codes"):
+        reused["wolf_codes"] = list(metadata_obj["wolf_codes"])
+        reused["wolf_export_schema"] = metadata_obj["wolf_export_schema"]
     return reused
 
 
 def _save_translation_results_atomic(translated_json_path, untranslated_data, translated_data):
     """按原始顺序原子写入翻译结果，避免中途退出留下半截 JSON。"""
+    for file_name, source_entries in untranslated_data.items():
+        results = translated_data.get(file_name)
+        if not isinstance(source_entries, dict) or not isinstance(results, dict):
+            continue
+        for source_text, source_metadata in source_entries.items():
+            result = results.get(source_text)
+            if (
+                isinstance(source_metadata, dict)
+                and source_metadata.get("wolf_codes")
+                and isinstance(result, dict)
+            ):
+                result["wolf_codes"] = list(source_metadata["wolf_codes"])
+                result["wolf_export_schema"] = source_metadata["wolf_export_schema"]
     file_system.ensure_dir_exists(os.path.dirname(translated_json_path))
     reordered_results = _reorder_translation_results(untranslated_data, translated_data)
     tmp_path = f"{translated_json_path}.tmp"
@@ -776,6 +802,12 @@ def _save_translation_results_atomic(translated_json_path, untranslated_data, tr
         os.fsync(f_json_out.fileno())
     os.replace(tmp_path, translated_json_path)
     return reordered_results
+
+
+def _discard_stale_translation_outputs(paths):
+    for path in paths:
+        if os.path.exists(path) and not file_system.safe_remove(path):
+            raise OSError(f"无法废弃旧版翻译中间态: {path}")
 
 
 # --- 主任务函数 ---
@@ -800,6 +832,14 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         translated_json_path = os.path.join(translated_dir, "translation_translated.json")
         error_log_path = os.path.join(translated_dir, "translation_errors.log")
         fallback_csv_path = os.path.join(translated_dir, fallback_csv_filename)
+        from core.engines import wolf as wolf_engine
+        detected_game = detect_game_engine(game_path)
+        is_wolf_game = bool(detected_game and detected_game.engine == "wolf")
+        stale_wolf_outputs = (
+            translated_json_path,
+            f"{translated_json_path}.tmp",
+            fallback_csv_path,
+        )
         
         if not file_system.ensure_dir_exists(translated_dir): raise OSError(f"无法创建目录: {translated_dir}")
         if os.path.exists(error_log_path):
@@ -807,10 +847,50 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             file_system.safe_remove(error_log_path)
         
         if not os.path.exists(untranslated_json_path):
+            if is_wolf_game:
+                _discard_stale_translation_outputs(stale_wolf_outputs)
             raise FileNotFoundError(f"未找到未翻译的 JSON 文件: {untranslated_json_path}")
         message_queue.put(("log", ("normal", "加载按文件组织的未翻译 JSON 文件...")))
-        with open(untranslated_json_path, 'r', encoding='utf-8') as f_in:
-            untranslated_data_per_file = json.load(f_in)
+        try:
+            with open(untranslated_json_path, 'r', encoding='utf-8') as f_in:
+                untranslated_data_per_file = json.load(f_in)
+        except (OSError, json.JSONDecodeError):
+            if is_wolf_game:
+                _discard_stale_translation_outputs(stale_wolf_outputs)
+            raise
+        if not isinstance(untranslated_data_per_file, dict):
+            if is_wolf_game:
+                _discard_stale_translation_outputs(stale_wolf_outputs)
+            raise ValueError("未翻译 JSON 顶层结构无效")
+        if is_wolf_game and not untranslated_data_per_file:
+            _discard_stale_translation_outputs(stale_wolf_outputs)
+        for file_name, source_entries in untranslated_data_per_file.items():
+            if not isinstance(source_entries, dict):
+                if is_wolf_game:
+                    _discard_stale_translation_outputs(stale_wolf_outputs)
+                    raise ValueError(
+                        f"WOLF 未翻译 JSON 版本已过期，请重新创建 JSON: {file_name}"
+                    )
+                continue
+            for source_text, metadata in source_entries.items():
+                if (
+                    is_wolf_game
+                    and (
+                        not isinstance(metadata, dict)
+                        or metadata.get("wolf_export_schema") != wolf_engine.WOLF_EXPORT_SCHEMA
+                        or not isinstance(metadata.get("wolf_codes"), list)
+                        or not metadata["wolf_codes"]
+                        or not all(
+                            isinstance(code, str) and code
+                            for code in metadata["wolf_codes"]
+                        )
+                    )
+                ):
+                    _discard_stale_translation_outputs(stale_wolf_outputs)
+                    raise ValueError(
+                        f"WOLF 未翻译 JSON 版本已过期，请重新创建 JSON: "
+                        f"{file_name}: {source_text[:80]!r}"
+                    )
         
         if not untranslated_data_per_file:
             message_queue.put(("warning", "未翻译的 JSON 文件为空或无效，无需翻译。")); message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("done", None)); return
@@ -854,7 +934,6 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         # --- 获取翻译配置 ---
         current_translate_config = translate_config.copy()
-        detected_game = detect_game_engine(game_path)
         apply_gbk_compatibility = not detected_game or detected_game.engine == "rm200x"
         current_translate_config["_apply_gbk_compatibility_postprocess"] = apply_gbk_compatibility
         control_profile = control_tokens.profile_from_game(game_path)

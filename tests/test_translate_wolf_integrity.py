@@ -1,3 +1,4 @@
+import json
 import queue
 
 from core.tasks import apply_base_dictionary
@@ -9,6 +10,34 @@ from core.utils.text_processing import (
     has_japanese_letters,
     validate_translation,
 )
+
+
+def test_translation_checkpoint_preserves_wolf_structure_codes(tmp_path):
+    source = {
+        "WOLF/Binary/a.txt": {
+            "表示文": {
+                "text_to_translate": "表示文",
+                "original_marker": "WOLFText",
+                "speaker_id": "SYSTEM",
+                "wolf_export_schema": wolf.WOLF_EXPORT_SCHEMA,
+                "wolf_codes": ["JSON:a.json:[0]", "JSON:a.json:[1]"],
+            }
+        }
+    }
+    translated = {
+        "WOLF/Binary/a.txt": {
+            "表示文": {"text": "显示文本", "status": "success"}
+        }
+    }
+    output = tmp_path / "translation_translated.json"
+
+    translate._save_translation_results_atomic(str(output), source, translated)
+
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    assert saved["WOLF/Binary/a.txt"]["表示文"]["wolf_codes"] == source[
+        "WOLF/Binary/a.txt"
+    ]["表示文"]["wolf_codes"]
+    assert saved["WOLF/Binary/a.txt"]["表示文"]["wolf_export_schema"] == wolf.WOLF_EXPORT_SCHEMA
 
 
 def test_worker_fallback_uses_original_json_key(monkeypatch):
@@ -104,6 +133,93 @@ def test_wolf_logic_result_is_not_reused_after_display_promotion():
         {"text": "译文", "status": "success", "original_marker": "Message"},
         {"original_marker": "Message"},
     ) is True
+
+    current_source = {
+        "original_marker": "WOLFText",
+        "wolf_export_schema": wolf.WOLF_EXPORT_SCHEMA,
+        "wolf_codes": ["JSON:a.json:[0]"],
+    }
+    old_result = {
+        "text": "旧译文",
+        "status": "success",
+        "original_marker": "WOLFText",
+        "wolf_codes": ["JSON:a.json:[0]"],
+    }
+    assert translate._is_reusable_translation_result(old_result, current_source) is False
+
+
+def test_wolf_translation_rejects_old_source_and_removes_stale_result(tmp_path):
+    game_path = tmp_path / "Game"
+    game_path.mkdir()
+    (game_path / "Game.exe").write_bytes(b"")
+    (game_path / "Data.wolf").write_bytes(b"")
+    works = tmp_path / "Works"
+    untranslated = works / "Game" / "untranslated" / "translation.json"
+    translated = works / "Game" / "translated" / "translation_translated.json"
+    untranslated.parent.mkdir(parents=True)
+    translated.parent.mkdir(parents=True)
+    untranslated.write_text(
+        json.dumps({
+            "WOLF/Binary/old.txt": {
+                "旧数据": {
+                    "text_to_translate": "旧数据",
+                    "original_marker": "WOLFText",
+                    "speaker_id": "SYSTEM",
+                }
+            }
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    translated.write_text("{}", encoding="utf-8")
+    messages = queue.Queue()
+
+    translate.run_translate(str(game_path), str(works), {}, {}, messages)
+
+    assert not translated.exists()
+    assert any(
+        kind == "error" and "版本已过期" in payload
+        for kind, payload in list(messages.queue)
+    )
+
+
+def test_wolf_translation_discards_outputs_for_invalid_or_empty_source(tmp_path):
+    game_path = tmp_path / "Game"
+    game_path.mkdir()
+    (game_path / "Game.exe").write_bytes(b"")
+    (game_path / "Data.wolf").write_bytes(b"")
+    works = tmp_path / "Works"
+    untranslated = works / "Game" / "untranslated" / "translation.json"
+    translated_dir = works / "Game" / "translated"
+    translated = translated_dir / "translation_translated.json"
+    temporary = translated_dir / "translation_translated.json.tmp"
+    fallback = translated_dir / "fallback_corrections.csv"
+    untranslated.parent.mkdir(parents=True)
+    translated_dir.mkdir(parents=True)
+
+    for source in ([], {"bad.txt": "old"}, {}):
+        untranslated.write_text(json.dumps(source), encoding="utf-8")
+        for path in (translated, temporary, fallback):
+            path.write_text("stale", encoding="utf-8")
+
+        translate.run_translate(
+            str(game_path), str(works), {}, {}, queue.Queue()
+        )
+
+        assert not any(path.exists() for path in (translated, temporary, fallback))
+
+    for source_text in ("{", None):
+        if source_text is None:
+            untranslated.unlink()
+        else:
+            untranslated.write_text(source_text, encoding="utf-8")
+        for path in (translated, temporary, fallback):
+            path.write_text("stale", encoding="utf-8")
+
+        translate.run_translate(
+            str(game_path), str(works), {}, {}, queue.Queue()
+        )
+
+        assert not any(path.exists() for path in (translated, temporary, fallback))
 
 
 def test_wolf_transport_validator_rejects_api_result_before_checkpoint(tmp_path):

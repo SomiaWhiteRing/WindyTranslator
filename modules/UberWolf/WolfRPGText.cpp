@@ -1,6 +1,11 @@
 // Built against Sinflower/UberWolf v0.6.3 (commit 663dc2d) with the adjacent
-// GameDat-wolf366.patch applied. The patch accepts and preserves the empty
-// Game.dat magic string introduced by WOLF RPG Editor 3.660.
+// GameDat-wolf366.patch, Command-json-control-flow.patch, and
+// CommonEvent-json-arguments.patch applied. The patches preserve WOLF 3.660
+// Game.dat files and expose command control flow, call arguments, and raw
+// CommonEvent activation metadata.
+#define NOMINMAX
+#define _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
+
 #include <filesystem>
 #include <iostream>
 #include <string>

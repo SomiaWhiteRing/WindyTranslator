@@ -1,5 +1,5 @@
 import csv
-import json
+import json as _json
 import os
 import shutil
 import tempfile
@@ -8,6 +8,54 @@ import queue
 from core.engines import wolf
 from core.tasks import initialize, json_creation, json_release
 from core.utils.engine_detection import detect_game_engine
+
+
+def _with_control_metadata(value):
+    if isinstance(value, list):
+        result = [_with_control_metadata(item) for item in value]
+        if result and all(isinstance(item, dict) and "code" in item for item in result):
+            for index, item in enumerate(result):
+                item.setdefault("index", index)
+        return result
+    if not isinstance(value, dict):
+        return value
+    result = {key: _with_control_metadata(item) for key, item in value.items()}
+    if "code" in result:
+        result.setdefault("indent", 0)
+    if "commands" in result:
+        result.setdefault("id", 0)
+        result.setdefault("arguments", [""] * 10)
+        result.setdefault("activation", {"raw": 0x1E848023, "extra": [0] * 7})
+    return result
+
+
+class _FixtureJson:
+    load = staticmethod(_json.load)
+    loads = staticmethod(_json.loads)
+
+    @staticmethod
+    def dump(value, output, *args, **kwargs):
+        return _json.dump(_with_control_metadata(value), output, *args, **kwargs)
+
+    @staticmethod
+    def dumps(value, *args, **kwargs):
+        return _json.dumps(_with_control_metadata(value), *args, **kwargs)
+
+
+json = _FixtureJson()
+
+
+def _translated_entry(entries, source_text, translated_text, status="success"):
+    return {
+        "text": translated_text,
+        "status": status,
+        "wolf_export_schema": wolf.WOLF_EXPORT_SCHEMA,
+        "wolf_codes": [
+            metadata["wolf_code"]
+            for metadata, text in entries
+            if text == source_text and metadata.get("marker") != "WOLFLogic"
+        ],
+    }
 
 
 def test_wolf_csv_sniffer_does_not_treat_cr_as_a_delimiter():
@@ -115,33 +163,56 @@ def test_wolf_initialize_requests_font_context_refresh(tmp_path, monkeypatch):
 
 
 def test_wolf_command_roles_keep_logic_and_skip_identifier_parameters():
+    usage = {
+        "common_event_roles_by_name": {
+            "internal_id": {5: {"display"}, 6: {"logic"}},
+        }
+    }
     entries = []
     wolf._command_entries(
         {"code": 112, "stringArgs": ["ウソツキ"]},
         ["commands", 0],
         entries,
         "common/Common.json",
+        usage,
     )
     wolf._command_entries(
-        {"code": 300, "stringArgs": ["internal_id", "画面に表示します。", "short_id"]},
+        {
+            "code": 300,
+            "intArgs": [0, 0x3020, 0, 0],
+            "stringArgs": ["internal_id", "画面に表示します。", "short_id"],
+        },
         ["commands", 1],
         entries,
         "common/Common.json",
+        usage,
     )
 
     assert [(metadata["marker"], text) for metadata, text in entries] == [
         ("WOLFLogic", "ウソツキ"),
         ("WOLFText", "画面に表示します。"),
+        ("WOLFLogic", "short_id"),
     ]
 
 
-def test_wolf_display_common_event_includes_short_ui_parameters():
+def test_wolf_call_parameter_roles_include_short_ui_text():
+    usage = {
+        "common_event_roles_by_name": {
+            "■tipsメッセージ": {5: {"display"}, 6: {"display"}},
+            "■エネミーを見る": {5: {"display"}},
+        }
+    }
     entries = []
     wolf._command_entries(
-        {"code": 300, "stringArgs": ["■Tipsメッセージ", "内部", "安全な空間"]},
+        {
+            "code": 300,
+            "intArgs": [0, 0x3020, 0, 0],
+            "stringArgs": ["■Tipsメッセージ", "内部", "安全な空間"],
+        },
         ["commands", 0],
         entries,
         "common/Common.json",
+        usage,
     )
 
     assert [(metadata["path"][-1], text) for metadata, text in entries] == [
@@ -151,10 +222,15 @@ def test_wolf_display_common_event_includes_short_ui_parameters():
 
     entries = []
     wolf._command_entries(
-        {"code": 300, "stringArgs": ["■エネミーを見る", "† おまけ †"]},
+        {
+            "code": 300,
+            "intArgs": [0, 0x1010, 0],
+            "stringArgs": ["■エネミーを見る", "† おまけ †"],
+        },
         ["commands", 1],
         entries,
         "common/Common.json",
+        usage,
     )
     assert [text for _metadata, text in entries] == ["† おまけ †"]
 
@@ -183,8 +259,22 @@ def test_wolf_database_separates_identifiers_from_display_text(tmp_path):
         }, ensure_ascii=False),
         encoding="utf-8",
     )
+    maps = json_root / "maps"
+    maps.mkdir()
+    (maps / "Map001.json").write_text(
+        json.dumps({"events": [{"pages": [{"list": [
+            {
+                "code": 250,
+                    "intArgs": [0, 1, 1, 0x1200, 1600000],
+                "stringArgs": ["", "", "", "表示名"],
+            },
+            {"code": 101, "stringArgs": [r"\cself[0]"]},
+        ]}]}]}),
+        encoding="utf-8",
+    )
 
-    entries = wolf._json_entries(str(json_root), str(json_path))
+    usage = wolf._analyze_json_usage(str(json_root))
+    entries = wolf._json_entries(str(json_root), str(json_path), usage)
     roles = [(metadata["path"], metadata["marker"], text) for metadata, text in entries]
 
     assert not any(path == ["types", 0, "data", 0, "name"] for path, _marker, _text in roles)
@@ -224,15 +314,2369 @@ def test_wolf_database_first_string_data_id_stays_logic(tmp_path):
         }, ensure_ascii=False),
         encoding="utf-8",
     )
+    maps = json_root / "maps"
+    maps.mkdir()
+    (maps / "Map001.json").write_text(
+        json.dumps({"events": [{"pages": [{"list": [
+            {
+                "code": 250,
+                    "intArgs": [0, 0, 1, 0x1200, 1600000],
+                "stringArgs": ["", "", "", "説明"],
+            },
+            {"code": 101, "stringArgs": [r"\cself[0]"]},
+        ]}]}]}),
+        encoding="utf-8",
+    )
 
+    usage = wolf._analyze_json_usage(str(json_root))
     roles = {
         (tuple(metadata["path"]), text): metadata["marker"]
-        for metadata, text in wolf._json_entries(str(json_root), str(database_path))
+        for metadata, text in wolf._json_entries(
+            str(json_root), str(database_path), usage
+        )
     }
 
     assert roles[(("types", 0, "data", 0, "data", 0, "value"), "ハンドル")] == "WOLFLogic"
     assert roles[(("types", 0, "data", 0, "data", 1, "value"), "回転させる装置")] == "WOLFText"
-    assert roles[(("types", 0, "data", 1, "data", 0, "value"), "予備ハンドル")] == "WOLFText"
+    assert roles[(("types", 0, "data", 1, "data", 0, "value"), "予備ハンドル")] == "WOLFLogic"
+
+
+def test_wolf_visible_first_string_id_is_translatable_with_namespace(tmp_path):
+    json_root = tmp_path / "json"
+    databases = json_root / "databases"
+    common = json_root / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    database_path = databases / "DataBase.json"
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "武装 test",
+                "fields": [{"name": "名称"}],
+                "data": [{
+                    "name": "",
+                    "data": [{"name": "名称", "value": "ライフル"}],
+                }],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (common / "Display.json").write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600000],
+                    "stringArgs": ["", "武装 test", "", "名称"],
+                },
+                {"code": 150, "intArgs": [32], "stringArgs": [r"\cself[0]"]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x71200, 1600001],
+                    "stringArgs": ["", "武装 test", "ライフル", "名称"],
+                },
+            ]
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    entries = wolf._json_entries(str(json_root), str(database_path), usage)
+    metadata = next(metadata for metadata, text in entries if text == "ライフル")
+
+    assert ("database.json", 0, 0, 0) in usage["visible_database_records"]
+    assert metadata["marker"] == "WOLFText"
+    assert metadata["identifier_namespace"] == ["database.json", 0]
+    assert metadata["identifier_record"] == ["database.json", 0, 0]
+    assert "identifier_targets" not in metadata
+    assert metadata["identifier_references"] == [{
+        "file": "common/Display.json",
+        "path": ["commands", 2, "stringArgs", 2],
+        "target_data_indexes": [0],
+        "expected_original": "ライフル",
+        "reference_kind": "database_selector",
+    }]
+    assert wolf._first_string_database_marker(
+        "database.json",
+        0,
+        {"name": "名称", "value": "ライフル"},
+        {
+            "visible_database_fields": {("database.json", 0, 0)},
+            "nonselector_logic_database_fields": {("database.json", 0, 0)},
+        },
+    ) == "WOLFLogic"
+    assert wolf._first_string_database_marker(
+        "database.json",
+        0,
+        {"name": "名称", "value": "ライフル"},
+        {
+            "visible_database_fields": {("database.json", 0, 0)},
+            "nonselector_logic_database_fields": set(),
+            "comparison_literals": {"ライフル"},
+        },
+    ) == "WOLFLogic"
+
+
+def test_wolf_database_read_compared_by_code112_int_arg_stays_logic(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Compare.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir(parents=True)
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Actions",
+                "fields": [{"name": "Action"}],
+                "data": [{
+                    "name": "entry",
+                    "data": [{"name": "Action", "value": "OpenPanel"}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600009],
+                    "stringArgs": ["", "Actions", "", "Action"],
+                },
+                {
+                    "code": 112,
+                    "intArgs": [17, 1600009],
+                    "stringArgs": ["OpenPanel", "", "", ""],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    entries = wolf._json_entries(str(json_root), str(database_path), usage)
+    metadata = next(metadata for metadata, text in entries if text == "OpenPanel")
+
+    assert ("database.json", 0, 0, 0) in usage["logic_database_records"]
+    assert ("database.json", 0, 0, 0) in usage["nonselector_logic_database_records"]
+    assert metadata["marker"] == "WOLFLogic"
+
+
+def test_wolf_code300_output_stops_earlier_database_value_from_becoming_display(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Overwrite.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir(parents=True)
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "InternalActions",
+                "fields": [{"name": "Reference"}],
+                "data": [{
+                    "name": "entry",
+                    "data": [{"name": "Reference", "value": "InternalTarget"}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600009],
+                    "stringArgs": ["", "InternalActions", "", "Reference"],
+                },
+                {
+                    "code": 300,
+                    "intArgs": [0, 16789540, 151, 3, 0, 0, 0, 0, 1600009],
+                    "stringArgs": ["SystemFormatter", "Heading", "H2"],
+                },
+                {
+                    "code": 150,
+                    "intArgs": [32],
+                    "stringArgs": [r"\cself[9]"],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert ("database.json", 0, 0) not in usage["visible_database_fields"]
+    assert ("database.json", 0, 0) not in usage["display_database_fields"]
+    assert ("database.json", 0, 0, 0) not in usage["visible_database_records"]
+    assert ("database.json", 0, 0, 0) not in usage["display_database_records"]
+
+
+def test_wolf_control_flow_entry_stops_stale_database_value(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Flow.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir(parents=True)
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "InternalActions",
+                "fields": [{"name": "Reference"}],
+                "data": [{
+                    "name": "entry",
+                    "data": [{"name": "Reference", "value": "InternalTarget"}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600009],
+                    "stringArgs": ["", "InternalActions", "", "Reference"],
+                },
+                {"code": 213, "stringArgs": ["END"]},
+                {"code": 99, "intArgs": [0]},
+                {"code": 212, "stringArgs": ["cmd:601"]},
+                {
+                    "code": 300,
+                    "intArgs": [0, 16785444, 151, 2, 0, 0, 1600009, 0, 1600009],
+                    "stringArgs": ["◆[rb]システム管理", "", "H5"],
+                },
+                {"code": 150, "intArgs": [32], "stringArgs": [r"\cself[9]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert ("database.json", 0, 0) not in usage["visible_database_fields"]
+    assert ("database.json", 0, 0, 0) not in usage["visible_database_records"]
+
+
+def test_wolf_usage_rejects_commands_without_control_metadata(tmp_path):
+    common_path = tmp_path / "common" / "Legacy.json"
+    common_path.parent.mkdir()
+    common_path.write_text(
+        _json.dumps({
+            "id": 0,
+            "arguments": [""] * 10,
+            "activation": {"raw": 0x1E848023, "extra": [0] * 7},
+            "commands": [{"code": 101, "stringArgs": ["legacy"]}],
+        }),
+        encoding="utf-8",
+    )
+
+    try:
+        wolf._analyze_json_usage(str(tmp_path))
+    except wolf.WolfEngineError as error:
+        assert "控制流元数据" in str(error)
+    else:
+        raise AssertionError("legacy WOLF command dumps must be rejected")
+
+
+def test_wolf_usage_rejects_common_event_without_id(tmp_path):
+    common_path = tmp_path / "common" / "MissingId.json"
+    common_path.parent.mkdir()
+    common_path.write_text(
+        _json.dumps({
+            "arguments": [""] * 10,
+            "activation": {"raw": 0x1E848023, "extra": [0] * 7},
+            "commands": [{"index": 0, "indent": 0, "code": 0}],
+        }),
+        encoding="utf-8",
+    )
+
+    try:
+        wolf._analyze_json_usage(str(tmp_path))
+    except wolf.WolfEngineError as error:
+        assert "编号无效" in str(error)
+    else:
+        raise AssertionError("missing CommonEvent id must be rejected")
+
+
+def test_wolf_automatic_root_reaches_call_only_child(tmp_path):
+    json_root = tmp_path / "json"
+    common = json_root / "common"
+    databases = json_root / "databases"
+    common.mkdir(parents=True)
+    databases.mkdir(parents=True)
+    (databases / "DataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "Labels",
+                "fields": [{"name": "Text"}],
+                "data": [{"data": [{"name": "Text", "value": "Visible"}]}],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Auto.json").write_text(
+        json.dumps({
+            "id": 1,
+            "activation": {"raw": 0x1E848023, "extra": [0] * 7},
+            "commands": [{
+                "code": 210,
+                "intArgs": [500002, 0],
+                "stringArgs": [""],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    child_path = common / "Child.json"
+    child_path.write_text(
+        json.dumps({
+            "id": 2,
+            "activation": {"raw": 0x1E848020, "extra": [0] * 7},
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600000],
+                    "stringArgs": ["", "Labels", "", "Text"],
+                },
+                {"code": 101, "stringArgs": [r"\cself[0]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert "common/Auto.json" in usage["active_common_event_files"]
+    assert "common/Child.json" in usage["active_common_event_files"]
+    assert ("database.json", 0, 0, 0) in usage["display_database_records"]
+    child_entries = wolf._json_entries(str(json_root), str(child_path), usage)
+    assert next(
+        metadata["marker"]
+        for metadata, text in child_entries
+        if text == r"\cself[0]"
+    ) == "Message"
+
+
+def test_wolf_unknown_activation_protects_event_without_polluting_database(tmp_path):
+    json_root = tmp_path / "json"
+    common = json_root / "common"
+    databases = json_root / "databases"
+    common.mkdir(parents=True)
+    databases.mkdir()
+    (databases / "DataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "Labels",
+                "fields": [{"name": "Text"}],
+                "data": [{"data": [{"name": "Text", "value": "Maybe"}]}],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    unknown_path = common / "Unknown.json"
+    unknown_path.write_text(
+        json.dumps({
+            "id": 7,
+            "activation": {"raw": 0x1E848022, "extra": [0] * 7},
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600000],
+                    "stringArgs": ["", "Labels", "", "Text"],
+                },
+                {"code": 101, "stringArgs": [r"\cself[0]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    entries = wolf._json_entries(str(json_root), str(unknown_path), usage)
+
+    assert "common/Unknown.json" in usage["protected_unknown_common_files"]
+    assert ("database.json", 0, 0) not in usage["unknown_database_fields"]
+    assert all(metadata["marker"] == "WOLFLogic" for metadata, _text in entries)
+    assert usage["analysis_diagnostics"] == [{
+        "reason": "unknown_common_event_activation",
+        "file": "common/Unknown.json",
+        "path": ["activation"],
+        "effect": "protected",
+        "details": {"raw": 0x1E848022, "mode": 0x22, "extra": [0] * 7},
+    }]
+
+    payload = wolf._write_analysis_diagnostics(str(tmp_path), usage)
+    saved = _json.loads(
+        (tmp_path / wolf.STATE_DIRNAME / wolf.ANALYSIS_DIAGNOSTICS_FILENAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert saved == payload
+    assert saved["summary"] == {
+        "protected": 1,
+        "reasons": {"unknown_common_event_activation": 1},
+    }
+
+
+def test_wolf_common_call_flags_distinguish_inputs_outputs_and_self_calls():
+    event = {"id": 7, "name": "Display"}
+    by_id = {7: event}
+    by_name = {"display": event}
+    literal = wolf._decode_common_call(
+        {
+            "code": 300,
+            "intArgs": [0, 0x1010, 0],
+            "stringArgs": ["Display", "label"],
+        },
+        by_id,
+        by_name,
+    )
+    assert literal["event"] is event
+    assert literal["string_inputs"] == ((5, "literal", "label"),)
+    assert literal["output"] is None
+
+    with_output = wolf._decode_common_call(
+        {
+            "code": 210,
+            "intArgs": [500007, 0x01000010, 1600005, 1600009],
+            "stringArgs": [""],
+        },
+        by_id,
+        by_name,
+    )
+    assert with_output["event"] is event
+    assert with_output["string_inputs"] == ((5, "variable", 1600005),)
+    assert with_output["output"] == 1600009
+
+    self_call = wolf._decode_common_call(
+        {"code": 210, "intArgs": [600100, 0], "stringArgs": [""]},
+        by_id,
+        by_name,
+        current_event_id=7,
+    )
+    assert self_call["event"] is event
+    assert wolf._decode_common_call(
+        {"code": 210, "intArgs": [500007, 0x02000000], "stringArgs": [""]},
+        by_id,
+        by_name,
+    ) is None
+
+
+def test_wolf_cfg_keeps_nested_loop_break_and_continue_targets():
+    commands = [
+        {"index": 0, "indent": 0, "code": 179},
+        {"index": 1, "indent": 1, "code": 179},
+        {"index": 2, "indent": 2, "code": 176},
+        {"index": 3, "indent": 2, "code": 171},
+        {"index": 4, "indent": 1, "code": 498},
+        {"index": 5, "indent": 1, "code": 171},
+        {"index": 6, "indent": 0, "code": 498},
+        {"index": 7, "indent": 0, "code": 101, "stringArgs": ["done"]},
+    ]
+
+    successors = wolf._command_successors(commands)
+
+    assert successors[0] == (1, 7)
+    assert successors[1] == (2, 5)
+    assert successors[2] == (4,)
+    assert successors[3] == (5,)
+    assert successors[5] == (7,)
+    assert successors[6] == (1, 7)
+
+
+def test_wolf_cfg_specializes_cmd_argument_dynamic_jump():
+    commands = [
+        {
+            "index": 0,
+            "indent": 0,
+            "code": 122,
+            "intArgs": [3000001, 0],
+            "stringArgs": [r"cmd:\cself[0]"],
+        },
+        {"index": 1, "indent": 0, "code": 213, "stringArgs": [r"\s[1]"]},
+        {"index": 2, "indent": 0, "code": 212, "stringArgs": ["cmd:1"]},
+        {"index": 3, "indent": 0, "code": 101, "stringArgs": [r"\cself[5]"]},
+        {"index": 4, "indent": 0, "code": 213, "stringArgs": ["END"]},
+        {"index": 5, "indent": 0, "code": 212, "stringArgs": ["cmd:2"]},
+        {"index": 6, "indent": 0, "code": 112, "stringArgs": [r"\cself[5]"]},
+        {"index": 7, "indent": 0, "code": 213, "stringArgs": ["END"]},
+    ]
+
+    aggregate = wolf._command_successors(commands)
+    display = wolf._command_successors(commands, {0: 1})
+    logic = wolf._command_successors(commands, {0: 2})
+
+    assert aggregate[1] == (2, 5)
+    assert display[1] == (2,)
+    assert logic[1] == (5,)
+    display_role = wolf._trace_string_variable_usage(
+        commands, None, 1600005, {}, {}, {}, {}, display
+    )
+    logic_role = wolf._trace_string_variable_usage(
+        commands, None, 1600005, {}, {}, {}, {}, logic
+    )
+    assert display_role["display"] is True and display_role["logic"] is False
+    assert logic_role["display"] is False and logic_role["logic"] is True
+
+
+def test_wolf_cfg_missing_jump_label_falls_through_and_real_end_label_wins():
+    missing = [
+        {"index": 0, "indent": 0, "code": 213, "stringArgs": ["missing"]},
+        {"index": 1, "indent": 0, "code": 101, "stringArgs": ["visible"]},
+    ]
+    named_end = [
+        {"index": 0, "indent": 0, "code": 213, "stringArgs": ["END"]},
+        {"index": 1, "indent": 0, "code": 101, "stringArgs": ["skipped"]},
+        {"index": 2, "indent": 0, "code": 212, "stringArgs": ["END"]},
+    ]
+
+    assert wolf._command_successors(missing)[0] == (1,)
+    assert wolf._command_successors(named_end)[0] == (2,)
+
+
+def test_wolf_cfg_does_not_specialize_branch_local_dispatch_assignment():
+    commands = [
+        {"index": 0, "indent": 0, "code": 111},
+        {"index": 1, "indent": 0, "code": 401},
+        {
+            "index": 2,
+            "indent": 1,
+            "code": 122,
+            "intArgs": [3000001, 0],
+            "stringArgs": [r"cmd:\cself[0]"],
+        },
+        {"index": 3, "indent": 0, "code": 420},
+        {
+            "index": 4,
+            "indent": 1,
+            "code": 122,
+            "intArgs": [3000001, 0],
+            "stringArgs": [r"alt:\cself[0]"],
+        },
+        {"index": 5, "indent": 0, "code": 499},
+        {"index": 6, "indent": 0, "code": 213, "stringArgs": [r"\s[1]"]},
+        {"index": 7, "indent": 0, "code": 212, "stringArgs": ["cmd:1"]},
+        {"index": 8, "indent": 0, "code": 213, "stringArgs": ["END"]},
+        {"index": 9, "indent": 0, "code": 212, "stringArgs": ["alt:1"]},
+        {"index": 10, "indent": 0, "code": 213, "stringArgs": ["END"]},
+    ]
+
+    successors = wolf._command_successors(commands, {0: 1})
+
+    assert successors[6] == (7, 9)
+
+
+def test_wolf_resource_template_assignment_is_logic_use():
+    commands = [
+        {
+            "index": 0,
+            "indent": 0,
+            "code": 250,
+            "intArgs": [0, 0, 0, 0x51200, 1600005],
+            "stringArgs": ["", "Names", "", "Name"],
+        },
+        {
+            "index": 1,
+            "indent": 0,
+            "code": 122,
+            "intArgs": [1600006, 0],
+            "stringArgs": [r"Picture_UI/\cself[5].png"],
+        },
+    ]
+    successors = wolf._command_successors(commands)
+
+    role = wolf._trace_string_variable_usage(
+        commands, 0, 1600005, {}, {}, {}, {}, successors
+    )
+
+    assert role["logic"] is True
+
+
+def test_wolf_cmd_context_does_not_mix_dead_return_branch_into_database_use(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common = json_root / "common"
+    database_path.parent.mkdir(parents=True)
+    common.mkdir()
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Weapons",
+                "fields": [{"name": "Name"}],
+                "data": [{
+                    "name": "weapon",
+                    "data": [{"name": "Name", "value": "Rifle"}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Dispatcher.json").write_text(
+        json.dumps({
+            "id": 13,
+            "name": "Dispatcher",
+            "activation": {"raw": 0x1E848020, "extra": [0] * 7},
+            "commands": [
+                {
+                    "code": 122,
+                    "intArgs": [3000001, 0],
+                    "stringArgs": [r"cmd:\cself[0]"],
+                },
+                {"code": 213, "stringArgs": [r"\s[1]"]},
+                {"code": 212, "stringArgs": ["cmd:101"]},
+                {"code": 122, "intArgs": [1600005, 0], "stringArgs": ["Internal"]},
+                {"code": 213, "stringArgs": ["END"]},
+                {"code": 212, "stringArgs": ["cmd:801"]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600005],
+                    "stringArgs": ["", "Weapons", "", "Name"],
+                },
+                {"code": 213, "stringArgs": ["END"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Caller.json").write_text(
+        json.dumps({
+            "id": 20,
+            "name": "Caller",
+            "commands": [
+                {
+                    "code": 210,
+                    "intArgs": [500013, 0x01000001, 101, 3000001],
+                    "stringArgs": [""],
+                },
+                {"code": 112, "intArgs": [0, 3000001], "stringArgs": ["used"]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 1600000, 0, 0x51200, 3000002],
+                    "stringArgs": ["", "Weapons", "", "Name"],
+                },
+                {"code": 101, "stringArgs": [r"\s[2]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    key = ("database.json", 0, 0)
+    contexts = usage["common_event_contexts_by_id"][13]
+
+    assert contexts["return_roles"][101] == {"logic"}
+    assert contexts["return_roles"][801] == set()
+    assert key in usage["display_database_fields"]
+    assert key not in usage["logic_database_fields"]
+    entries = wolf._json_entries(str(json_root), str(database_path), usage)
+    rifle = next(metadata for metadata, text in entries if text == "Rifle")
+    assert rifle["marker"] == "WOLFText"
+
+
+def test_wolf_database_callback_seeds_exact_cmd_context(tmp_path):
+    json_root = tmp_path / "json"
+    databases = json_root / "databases"
+    common = json_root / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    target_path = databases / "DataBase.json"
+    target_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Names",
+                "fields": [{"name": "Name"}],
+                "data": [{
+                    "name": "entry",
+                    "data": [{"name": "Name", "value": "Callback text"}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (databases / "CDataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "Buttons bk",
+                "fields": [
+                    {"name": "実行コモン"},
+                    {"name": "└ 引数1_1_Open"},
+                    {"name": "└ 引数1_2"},
+                    {"name": "└ 引数1_3"},
+                ],
+                "data": [{
+                    "name": "button",
+                    "data": [
+                        {"name": "実行コモン", "value": "Dispatcher"},
+                        {"name": "└ 引数1_1_Open", "value": 2},
+                        {"name": "└ 引数1_2", "value": 0},
+                        {"name": "└ 引数1_3", "value": 0},
+                    ],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Dispatcher.json").write_text(
+        json.dumps({
+            "id": 13,
+            "name": "Dispatcher",
+            "activation": {"raw": 0x1E848020, "extra": [0] * 7},
+            "commands": [
+                {
+                    "code": 122,
+                    "intArgs": [3000001, 0],
+                    "stringArgs": [r"cmd:\cself[0]"],
+                },
+                {"code": 213, "stringArgs": [r"\s[1]"]},
+                {"code": 212, "stringArgs": ["cmd:1"]},
+                {"code": 112, "stringArgs": ["internal"]},
+                {"code": 213, "stringArgs": ["END"]},
+                {"code": 212, "stringArgs": ["cmd:2"]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 1600000, 0, 0x51200, 1600005],
+                    "stringArgs": ["", "Names", "", "Name"],
+                },
+                {"code": 101, "stringArgs": [r"\cself[5]"]},
+                {"code": 213, "stringArgs": ["END"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (common / "CallbackReader.json").write_text(
+        json.dumps({
+            "id": 1,
+            "name": "CallbackReader",
+            "activation": {"raw": 0x1E848023, "extra": [0] * 7},
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51000, 1600000],
+                        "stringArgs": ["", "Buttons bk", "", "実行コモン"],
+                },
+                {
+                    "code": 300,
+                    "intArgs": [0, 0x100],
+                    "stringArgs": [r"\cself[0]"],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert (
+        "common/Dispatcher.json", ("commands", 6)
+    ) in usage["reachable_command_paths"]
+    assert (
+        "common/Dispatcher.json", ("commands", 3)
+    ) not in usage["reachable_command_paths"]
+    assert ("database.json", 0, 0) in usage["display_database_fields"]
+
+
+def test_wolf_forwarded_dispatch_argument_keeps_nested_context(tmp_path):
+    json_root = tmp_path / "json"
+    common = json_root / "common"
+    maps = json_root / "maps"
+    common.mkdir(parents=True)
+    maps.mkdir()
+    (common / "Callee.json").write_text(
+        json.dumps({
+            "id": 2,
+            "name": "Callee",
+            "activation": {"raw": 0x1E848020, "extra": [0] * 7},
+            "commands": [
+                {"code": 122, "intArgs": [3000001, 0], "stringArgs": [r"cmd:\cself[0]"]},
+                {"code": 213, "stringArgs": [r"\s[1]"]},
+                {"code": 212, "stringArgs": ["cmd:1"]},
+                {"code": 101, "stringArgs": [r"\cself[5]"]},
+                {"code": 213, "stringArgs": ["END"]},
+                {"code": 212, "stringArgs": ["cmd:2"]},
+                {"code": 112, "stringArgs": [r"\cself[5]"]},
+                {"code": 213, "stringArgs": ["END"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    caller_path = common / "Caller.json"
+    caller_path.write_text(
+        json.dumps({
+            "id": 1,
+            "name": "Caller",
+            "activation": {"raw": 0x1E848020, "extra": [0] * 7},
+            "commands": [
+                {"code": 122, "intArgs": [3000001, 0], "stringArgs": [r"cmd:\cself[0]"]},
+                {"code": 213, "stringArgs": [r"\s[1]"]},
+                {"code": 212, "stringArgs": ["cmd:1"]},
+                {
+                    "code": 210,
+                    "intArgs": [500002, 0x1011, 1600000, 0],
+                    "stringArgs": ["", "Visible"],
+                },
+                {"code": 213, "stringArgs": ["END"]},
+                {"code": 212, "stringArgs": ["cmd:2"]},
+                {"code": 172},
+                {"code": 213, "stringArgs": ["END"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (maps / "Map001.json").write_text(
+        json.dumps({
+            "events": [{"pages": [{"list": [{
+                "code": 210,
+                "intArgs": [500001, 0x0001, 1],
+                "stringArgs": [""],
+            }]}]}],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root), {"Map001.json"})
+    entries = wolf._json_entries(str(json_root), str(caller_path), usage)
+    visible = next(metadata for metadata, text in entries if text == "Visible")
+
+    assert ("common/Callee.json", ("commands", 3)) in usage["reachable_command_paths"]
+    assert ("common/Callee.json", ("commands", 6)) not in usage["reachable_command_paths"]
+    assert visible["marker"] == "WOLFText"
+
+
+def test_wolf_forwarded_dispatch_uses_reassigned_parent_argument():
+    target = {
+        "id": 2,
+        "dispatch_slot": 0,
+        "dispatch_contexts": {1: [], 2: []},
+    }
+    commands = [
+        {"code": 121, "intArgs": [1600000, 2, 0, 0]},
+        {"code": 210, "intArgs": [500002, 0x0001, 1600000], "stringArgs": [""]},
+    ]
+    numeric_values = wolf._numeric_values_by_command(
+        commands, [(1,), ()], {1600000: 1}
+    )
+    call = wolf._decode_common_call(commands[1], {2: target}, {})
+
+    assert numeric_values[1] == {1600000: 2}
+    assert wolf._common_call_role_key(call, numeric_values[1]) == (2, 2)
+
+    database_write = [
+        {"code": 250, "intArgs": [0, 0, 0, 0x51200, 1600000]},
+        commands[1],
+    ]
+    killed_values = wolf._numeric_values_by_command(
+        database_write, [(1,), ()], {1600000: 1}
+    )
+    assert killed_values[1] == {}
+    assert wolf._common_call_role_key(call, killed_values[1]) == (2, None)
+
+
+def test_wolf_numeric_dataflow_tracks_fresh_direct_assignment():
+    commands = [
+        {"code": 121, "intArgs": [1600001, 2, 0, 0]},
+        {"code": 210, "intArgs": [500002, 0x0001, 1600001], "stringArgs": [""]},
+    ]
+
+    values = wolf._numeric_values_by_command(commands, [(1,), ()])
+
+    assert values[1] == {1600001: 2}
+
+
+def test_wolf_empty_string_trace_is_safe():
+    assert wolf._trace_string_variable_usage(
+        [], None, 1600000, {}, {}, {}, {}, []
+    ) == {
+        "display": False,
+        "logic": False,
+        "dynamic_target": False,
+        "opaque": False,
+        "unknown": False,
+        "return": False,
+        "logic_codes": set(),
+        "selector_targets": set(),
+        "database_writes": set(),
+    }
+
+
+def test_wolf_database_display_flow_crosses_exact_database_write(tmp_path):
+    databases = tmp_path / "databases"
+    common = tmp_path / "common"
+    databases.mkdir()
+    common.mkdir()
+    source_path = databases / "DataBase.json"
+    source_path.write_text(
+        json.dumps({"types": [{
+            "name": "Characters",
+            "fields": [{"name": "Name"}],
+            "data": [{"data": [{"name": "Name", "value": "Will"}]}],
+        }]}),
+        encoding="utf-8",
+    )
+    (databases / "CDataBase.json").write_text(
+        json.dumps({"types": [{
+            "name": "Log",
+            "fields": [{"name": "Name"}],
+            "data": [{"data": [{"name": "Name", "value": ""}]}],
+        }]}),
+        encoding="utf-8",
+    )
+    (common / "Read.json").write_text(
+        json.dumps({
+            "id": 1,
+            "activation": {"raw": 0x1E848023, "extra": [0] * 7},
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600000],
+                    "stringArgs": ["", "Characters", "", "Name"],
+                },
+                {
+                    "code": 210,
+                    "intArgs": [500002, 0x10, 1600000],
+                    "stringArgs": [""],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Write.json").write_text(
+        json.dumps({
+            "id": 2,
+            "activation": {"raw": 0x1E848020, "extra": [0] * 7},
+            "commands": [{
+                "code": 250,
+                "intArgs": [0, 0, 0, 0x50000, 1600005],
+                "stringArgs": ["", "Log", "", "Name"],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Display.json").write_text(
+        json.dumps({
+            "id": 3,
+            "activation": {"raw": 0x1E848023, "extra": [0] * 7},
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51000, 1600000],
+                    "stringArgs": ["", "Log", "", "Name"],
+                },
+                {"code": 101, "stringArgs": [r"\cself[0]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(tmp_path))
+    entries = wolf._json_entries(str(tmp_path), str(source_path), usage)
+
+    assert ("database.json", 0, 0, 0) in usage["display_database_records"]
+    assert next(metadata["marker"] for metadata, text in entries if text == "Will") == "WOLFText"
+
+
+def test_wolf_cfg_stops_specializing_after_dispatch_argument_write():
+    commands = [
+        {
+            "index": 0,
+            "indent": 0,
+            "code": 122,
+            "intArgs": [3000001, 0],
+            "stringArgs": [r"cmd:\cself[0]"],
+        },
+        {"index": 1, "indent": 0, "code": 213, "stringArgs": [r"\s[1]"]},
+        {"index": 2, "indent": 0, "code": 212, "stringArgs": ["cmd:500"]},
+        {"index": 3, "indent": 0, "code": 121, "intArgs": [1600000, 1600001, 1, 0]},
+        {
+            "index": 4,
+            "indent": 0,
+            "code": 122,
+            "intArgs": [3000001, 0],
+            "stringArgs": [r"cmd:\cself[0]"],
+        },
+        {"index": 5, "indent": 0, "code": 213, "stringArgs": [r"\s[1]"]},
+        {"index": 6, "indent": 0, "code": 212, "stringArgs": ["cmd:501"]},
+        {"index": 7, "indent": 0, "code": 213, "stringArgs": ["END"]},
+    ]
+
+    successors = wolf._command_successors(commands, {0: 500})
+
+    assert successors[1] == (2,)
+    assert successors[5] == (2, 6)
+
+
+def test_wolf_cfg_specializes_dispatch_after_known_numeric_branch():
+    commands = [
+        {
+            "index": 0,
+            "indent": 0,
+            "code": 111,
+            "intArgs": [1, 1600000, 0, 2],
+        },
+        {"index": 1, "indent": 0, "code": 401, "intArgs": [1]},
+        {
+            "index": 2,
+            "indent": 1,
+            "code": 121,
+            "intArgs": [1600000, 3, 0, 0],
+        },
+        {"index": 3, "indent": 1, "code": 0},
+        {"index": 4, "indent": 0, "code": 499},
+        {
+            "index": 5,
+            "indent": 0,
+            "code": 122,
+            "intArgs": [3000001, 0],
+            "stringArgs": [r"cmd:\cself[0]"],
+        },
+        {"index": 6, "indent": 0, "code": 213, "stringArgs": [r"\s[1]"]},
+        {"index": 7, "indent": 0, "code": 212, "stringArgs": ["cmd:3"]},
+        {"index": 8, "indent": 0, "code": 213, "stringArgs": ["END"]},
+        {"index": 9, "indent": 0, "code": 212, "stringArgs": ["cmd:52"]},
+        {"index": 10, "indent": 0, "code": 213, "stringArgs": ["END"]},
+    ]
+
+    unchanged = wolf._command_successors(commands, {0: 52})
+    normalized = wolf._command_successors(commands, {0: 2})
+
+    assert unchanged[0] == (5,)
+    assert unchanged[6] == (9,)
+    assert normalized[0] == (1,)
+    assert normalized[6] == (7,)
+
+
+def test_wolf_database_type_reference_does_not_widen_exact_target_callbacks(tmp_path):
+    json_root = tmp_path / "json"
+    databases = json_root / "databases"
+    common = json_root / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    (databases / "DataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "◆[rb]TargetDefs",
+                "fields": [{"name": "実行コモン"}, {"name": "引数1"}],
+                "data": [{
+                    "data": [
+                        {"name": "実行コモン", "value": "Dispatcher"},
+                        {"name": "引数1", "value": 2},
+                    ],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (databases / "CDataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "Links",
+                "fields": [{"name": "実行コモン"}],
+                "data": [{
+                    "data": [{
+                        "name": "実行コモン",
+                        "value": "（UDB TargetDefsにて定義）",
+                    }],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Dispatcher.json").write_text(
+        json.dumps({
+            "id": 13,
+            "name": "Dispatcher",
+            "activation": {"raw": 0x1E848020, "extra": [0] * 7},
+            "commands": [
+                {"code": 122, "intArgs": [3000001, 0], "stringArgs": [r"cmd:\cself[0]"]},
+                {"code": 213, "stringArgs": [r"\s[1]"]},
+                {"code": 212, "stringArgs": ["cmd:1"]},
+                {"code": 112, "stringArgs": ["logic"]},
+                {"code": 213, "stringArgs": ["END"]},
+                {"code": 212, "stringArgs": ["cmd:2"]},
+                {"code": 101, "stringArgs": ["visible"]},
+                {"code": 213, "stringArgs": ["END"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert not usage["reachable_command_paths"]
+    assert not usage["unresolved_database_callbacks"]
+
+
+def test_wolf_unreferenced_common_does_not_pollute_database_role(tmp_path):
+    json_root = tmp_path / "json"
+    databases = json_root / "databases"
+    common = json_root / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    (databases / "DataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "Labels",
+                "fields": [{"name": "Text"}],
+                "data": [{"data": [{"name": "Text", "value": "Visible"}]}],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    read = {
+        "code": 250,
+        "intArgs": [0, 0, 0, 0x51200, 1600000],
+        "stringArgs": ["", "Labels", "", "Text"],
+    }
+    (common / "Production.json").write_text(
+        json.dumps({
+            "id": 1,
+            "name": "Production",
+            "activation": {"raw": 0x1E848023, "extra": [0] * 7},
+            "commands": [read, {"code": 101, "stringArgs": [r"\cself[0]"]}],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Uncalled.json").write_text(
+        json.dumps({
+            "id": 2,
+            "name": "Uncalled",
+            "activation": {"raw": 0x1E848020, "extra": [0] * 7},
+            "commands": [read, {"code": 112, "stringArgs": [r"\cself[0]"]}],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    key = ("database.json", 0, 0)
+    record_key = ("database.json", 0, 0, 0)
+
+    assert record_key in usage["display_database_records"]
+    assert key not in usage["logic_database_fields"]
+    assert record_key not in usage["logic_database_records"]
+    assert "common/Uncalled.json" not in usage["active_common_event_files"]
+
+
+def test_wolf_analysis_ignores_calls_from_unreferenced_maps(tmp_path):
+    json_root = tmp_path / "json"
+    common = json_root / "common"
+    maps = json_root / "maps"
+    common.mkdir(parents=True)
+    maps.mkdir()
+    (common / "Dispatcher.json").write_text(
+        json.dumps({
+            "id": 13,
+            "name": "Dispatcher",
+            "activation": {"raw": 0x1E848020, "extra": [0] * 7},
+            "commands": [
+                {"code": 122, "intArgs": [3000001, 0], "stringArgs": [r"cmd:\cself[0]"]},
+                {"code": 213, "stringArgs": [r"\s[1]"]},
+                {"code": 212, "stringArgs": ["cmd:1"]},
+                {"code": 112, "stringArgs": ["logic"]},
+                {"code": 213, "stringArgs": ["END"]},
+                {"code": 212, "stringArgs": ["cmd:2"]},
+                {"code": 101, "stringArgs": ["visible"]},
+                {"code": 213, "stringArgs": ["END"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    for filename, context in (("Live.json", 2), ("Sample.json", 1)):
+        (maps / filename).write_text(
+            json.dumps({
+                "events": [{"pages": [{"list": [{
+                    "code": 210,
+                    "intArgs": [500013, 0x0001, context],
+                    "stringArgs": [""],
+                }]}]}],
+            }),
+            encoding="utf-8",
+        )
+
+    usage = wolf._analyze_json_usage(str(json_root), {"Live.json"})
+
+    assert ("common/Dispatcher.json", ("commands", 6)) in usage["reachable_command_paths"]
+    assert ("common/Dispatcher.json", ("commands", 3)) not in usage["reachable_command_paths"]
+
+
+def test_wolf_literal_call_argument_follows_return_output_logic(tmp_path):
+    json_root = tmp_path / "json"
+    common = json_root / "common"
+    common.mkdir(parents=True)
+    callee_path = common / "Callee.json"
+    caller_path = common / "Caller.json"
+    callee_path.write_text(
+        json.dumps({
+            "id": 30,
+            "name": "Callee",
+            "commands": [
+                {"code": 101, "stringArgs": [r"\cself[5]"]},
+                {"code": 213, "stringArgs": ["END"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    caller_path.write_text(
+        json.dumps({
+            "id": 40,
+            "name": "Caller",
+            "commands": [
+                {
+                    "code": 210,
+                    "intArgs": [500030, 0x1010, 0],
+                    "stringArgs": ["", "Visible"],
+                },
+                {
+                    "code": 210,
+                    "intArgs": [500030, 0x01001010, 0, 3000001],
+                    "stringArgs": ["", "Label"],
+                },
+                {"code": 112, "intArgs": [0, 3000001], "stringArgs": ["used"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    entries = wolf._json_entries(str(json_root), str(caller_path), usage)
+    label = next(metadata for metadata, text in entries if text == "Label")
+    visible = next(metadata for metadata, text in entries if text == "Visible")
+
+    assert usage["common_event_roles_by_id"][30][5] >= {"display", "return"}
+    assert usage["common_event_return_roles_by_id"][30] == {"logic"}
+    assert label["marker"] == "WOLFLogic"
+    assert visible["marker"] == "WOLFText"
+
+
+def test_wolf_cfg_propagates_alias_through_conditional_exit_and_common_call(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Display.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir()
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Characters",
+                "fields": [{"name": "Name"}],
+                "data": [{
+                    "name": "entry",
+                    "data": [{"name": "Name", "value": "Visible name"}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "id": 1,
+            "name": "Display",
+            "commands": [
+                {
+                    "code": 250,
+                    "indent": 0,
+                    "intArgs": [0, 0, 0, 0x51200, 1600007],
+                    "stringArgs": ["", "Characters", "", "Name"],
+                },
+                {"code": 112, "indent": 0, "intArgs": [1, 1600005], "stringArgs": ["", "", "", ""]},
+                {"code": 401, "indent": 0, "intArgs": [1]},
+                {"code": 213, "indent": 1, "stringArgs": ["END"]},
+                {"code": 0, "indent": 1},
+                {"code": 499, "indent": 0},
+                {"code": 122, "indent": 0, "intArgs": [1600008, 2561, 1600007]},
+                {
+                    "code": 300,
+                    "indent": 0,
+                    "intArgs": [0, 0, 0, 0, 0, 0, 1600008, 0, 1600008],
+                    "stringArgs": ["Formatter"],
+                },
+                {"code": 150, "indent": 0, "intArgs": [32], "stringArgs": [r"\cself[8]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert ("database.json", 0, 0, 0) in usage["display_database_records"]
+    assert ("database.json", 0, 0, 0) not in usage["logic_database_records"]
+
+
+def test_wolf_display_schema_does_not_override_opaque_callback(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Glossary.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir()
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Glossary",
+                "fields": [{"name": "Name"}, {"name": "Description"}],
+                "data": [{
+                    "name": "",
+                    "data": [
+                        {"name": "Name", "value": "Term"},
+                        {"name": "Description", "value": "Visible explanation."},
+                    ],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "id": 1,
+            "name": "Glossary",
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600007],
+                    "stringArgs": ["", "Glossary", "", "Name"],
+                },
+                {"code": 210, "intArgs": [600099, 0x10, 1600007]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 1, 0x51200, 1600008],
+                    "stringArgs": ["", "Glossary", "", "Description"],
+                },
+                {"code": 210, "intArgs": [600099, 0x10, 1600008]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    entries = wolf._json_entries(str(json_root), str(database_path), usage)
+    roles = {text: metadata["marker"] for metadata, text in entries}
+
+    assert roles["Term"] == "WOLFLogic"
+    assert roles["Visible explanation."] == "WOLFLogic"
+
+
+def test_wolf_database_count_query_is_not_a_string_field_read(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Count.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir()
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Credits",
+                "fields": [{"name": "Text"}],
+                "data": [{"name": "row", "data": [{"name": "Text", "value": "Credit"}]}],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "id": 1,
+            "name": "Count",
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0xFFFFFFFF, 0, 0x11200, 1600081],
+                    "stringArgs": ["", "Credits", "", ""],
+                },
+                {"code": 150, "intArgs": [32], "stringArgs": [r"\cself[81]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert ("database.json", 0, 0) not in usage["visible_database_fields"]
+    assert ("database.json", 0, 0, 0) not in usage["visible_database_records"]
+
+
+def test_wolf_same_path_code300_inout_keeps_database_value_visible(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Display.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir(parents=True)
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Labels",
+                "fields": [{"name": "Text"}],
+                "data": [{
+                    "name": "entry",
+                    "data": [{"name": "Text", "value": "Visible label"}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "id": 1,
+            "name": "Caller",
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600009],
+                    "stringArgs": ["", "Labels", "", "Text"],
+                },
+                {
+                    "code": 300,
+                    "intArgs": [0, 16785444, 151, 2, 0, 0, 1600009, 0, 1600009],
+                    "stringArgs": ["◆[rb]システム管理", "", "H5"],
+                },
+                {"code": 150, "intArgs": [32], "stringArgs": [r"\cself[9]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (common_path.parent / "Formatter.json").write_text(
+        json.dumps({
+            "id": 8,
+            "name": "◆[rb]システム管理",
+            "arguments": ["", "", "", "", "", "source", "style", "", "", ""],
+            "commands": [{"code": 172}],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert ("database.json", 0, 0, 0) in usage["visible_database_records"]
+    assert ("database.json", 0, 0, 0) in usage["display_database_records"]
+
+
+def test_wolf_identifier_completeness_is_not_inherited_from_another_record(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    common_path = json_root / "common" / "Lookup.json"
+    database_path.parent.mkdir(parents=True)
+    common_path.parent.mkdir(parents=True)
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Labels",
+                "fields": [{"name": "Name"}],
+                "data": [
+                    {"name": "", "data": [{"name": "Name", "value": "Alpha"}]},
+                    {"name": "", "data": [{"name": "Name", "value": "Beta"}]},
+                ],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    common_path.write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600000],
+                    "stringArgs": ["", "Labels", "", "Name"],
+                },
+                {"code": 150, "intArgs": [32], "stringArgs": [r"\cself[0]"]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x71200, 1600001],
+                    "stringArgs": ["", "Labels", "Alpha", "Name"],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    entries = wolf._json_entries(str(json_root), str(database_path), usage)
+    beta = next(metadata for metadata, text in entries if text == "Beta")
+
+    assert usage["identifier_reference_paths"].get(("database.json", 0, "Beta"), set()) == set()
+    assert beta["marker"] == "WOLFLogic"
+    assert beta["identifier_reference_complete"] is False
+
+
+def test_wolf_symbol_references_are_synchronized_without_touching_display_aliases(tmp_path):
+    original = tmp_path / "original"
+    databases = original / "databases"
+    common = original / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    database_path = databases / "DataBase.json"
+    database_path.write_text(
+        json.dumps({
+            "types": [
+                {
+                    "name": "Symbols",
+                    "fields": [{"name": "Name"}],
+                    "data": [
+                        {"name": "", "data": [{"name": "Name", "value": "Alpha"}]},
+                        {"name": "", "data": [{"name": "Name", "value": "Beta"}]},
+                    ],
+                },
+                {
+                    "name": "Links",
+                    "fields": [{"name": "NextSymbol"}],
+                    "data": [{
+                        "name": "link",
+                        "data": [{"name": "NextSymbol", "value": "<NEXT>|Alpha"}],
+                    }],
+                },
+                {
+                    "name": "Labels",
+                    "fields": [{"name": "Text"}],
+                    "data": [{
+                        "name": "label",
+                        "data": [{"name": "Text", "value": "Alpha"}],
+                    }],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Use.json").write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 1600073, 0, 0x51200, 1600000],
+                    "stringArgs": ["", "Symbols", "", "Name"],
+                },
+                {"code": 150, "intArgs": [32], "stringArgs": [r"\cself[0]"]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x71200, 1600001],
+                    "stringArgs": ["", "Symbols", "Alpha", "Name"],
+                },
+                {
+                    "code": 250,
+                    "intArgs": [1, 0, 0, 0x51200, 1600003],
+                    "stringArgs": ["", "Links", "", "NextSymbol"],
+                },
+                {
+                    "code": 250,
+                    "intArgs": [0, 1600003, 0, 0x51200, 1600004],
+                    "stringArgs": ["", "Symbols", "", "Name"],
+                },
+                {
+                    "code": 250,
+                    "intArgs": [2, 0, 0, 0x51200, 1600002],
+                    "stringArgs": ["", "Labels", "", "Text"],
+                },
+                {"code": 150, "intArgs": [32], "stringArgs": [r"\cself[2]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(original))
+    entries = wolf._json_entries(str(original), str(database_path), usage)
+    alpha = next(
+        metadata
+        for metadata, text in entries
+        if text == "Alpha" and metadata.get("identifier_record") == ["database.json", 0, 0]
+    )
+    roles = {
+        tuple(metadata["path"]): metadata["marker"]
+        for metadata, _text in entries
+    }
+    link_path = ("types", 1, "data", 0, "data", 0, "value")
+    label_path = ("types", 2, "data", 0, "data", 0, "value")
+
+    assert roles[link_path] == "WOLFLogic"
+    assert roles[label_path] == "WOLFText"
+    assert any(
+        reference["file"].casefold() == "databases/database.json"
+        and tuple(reference["path"]) == link_path
+        for reference in alpha["identifier_references"]
+    )
+
+    patched = tmp_path / "patched"
+    shutil.copytree(original, patched)
+    patched_database = json.loads(
+        (patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    patched_database["types"][0]["data"][0]["data"][0]["value"] = "甲"
+    (patched / "databases" / "DataBase.json").write_text(
+        json.dumps(patched_database), encoding="utf-8"
+    )
+
+    wolf._synchronize_database_identifiers(
+        str(original),
+        str(patched),
+        [
+            (
+                ["database.json", 0],
+                "Alpha",
+                "甲",
+                "name_referenced",
+                alpha["identifier_references"],
+                "name_closed",
+                alpha["identifier_missing_names"],
+            )
+        ],
+    )
+
+    synchronized = json.loads(
+        (patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    synchronized_common = json.loads(
+        (patched / "common" / "Use.json").read_text(encoding="utf-8")
+    )
+    assert synchronized["types"][1]["data"][0]["data"][0]["value"] == "<NEXT>|甲"
+    assert synchronized["types"][2]["data"][0]["data"][0]["value"] == "Alpha"
+    assert synchronized_common["commands"][2]["stringArgs"][2] == "甲"
+
+
+def test_wolf_reference_like_field_name_cannot_authorize_identifier_sync(tmp_path):
+    databases = tmp_path / "databases"
+    common = tmp_path / "common"
+    databases.mkdir()
+    common.mkdir()
+    database_path = databases / "DataBase.json"
+    database_path.write_text(
+        json.dumps({"types": [
+            {
+                "name": "Symbols",
+                "fields": [{"name": "Name"}],
+                "data": [{
+                    "name": "",
+                    "data": [{"name": "Name", "value": "Alpha"}],
+                }],
+            },
+            {
+                "name": "Links",
+                "fields": [{"name": "NextSymbol"}],
+                "data": [{
+                    "name": "link",
+                    "data": [{"name": "NextSymbol", "value": "Alpha"}],
+                }],
+            },
+        ]}),
+        encoding="utf-8",
+    )
+    (common / "Display.json").write_text(
+        json.dumps({
+            "id": 1,
+            "activation": {"raw": 0x1E848023, "extra": [0] * 7},
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600000],
+                    "stringArgs": ["", "Symbols", "", "Name"],
+                },
+                {"code": 101, "stringArgs": [r"\cself[0]"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(tmp_path))
+    entries = wolf._json_entries(str(tmp_path), str(database_path), usage)
+    alpha = next(
+        metadata
+        for metadata, text in entries
+        if text == "Alpha"
+        and metadata.get("identifier_namespace") == ["database.json", 0]
+    )
+
+    assert alpha["marker"] == "WOLFText"
+    assert alpha["identifier_translation_policy"] == "numeric_only"
+    assert alpha["identifier_references"] == []
+    assert ("database.json", 1, 0) not in usage["symbol_reference_database_fields"]
+
+
+def test_wolf_equal_first_string_names_in_independent_types_are_type_scoped(tmp_path):
+    original = tmp_path / "original"
+    databases = original / "databases"
+    common = original / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    database_path = databases / "DataBase.json"
+    database_path.write_text(
+        json.dumps({
+            "types": [
+                {
+                    "name": "Weapons",
+                    "fields": [{"name": "Name"}],
+                    "data": [{
+                        "name": "",
+                        "data": [{"name": "Name", "value": "ライフル"}],
+                    }],
+                },
+                {
+                    "name": "RuntimeAliases",
+                    "fields": [{"name": "Name"}],
+                    "data": [{
+                        "name": "",
+                        "data": [{"name": "Name", "value": "ライフル"}],
+                    }],
+                },
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (common / "Use.json").write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x71200, 1600000],
+                    "stringArgs": ["", "Weapons", "ライフル", "Name"],
+                },
+                {"code": 101, "stringArgs": [r"\cself[0]"]},
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(original))
+    entries = wolf._json_entries(str(original), str(database_path), usage)
+    metadata = next(
+        metadata
+        for metadata, text in entries
+        if text == "ライフル"
+        and metadata.get("identifier_namespace") == ["database.json", 0]
+    )
+
+    assert ("database.json", 0, "ライフル") not in usage["incomplete_identifier_symbols"]
+    assert metadata["marker"] == "WOLFText"
+    assert metadata["identifier_reference_complete"] is True
+
+    patched = tmp_path / "patched"
+    shutil.copytree(original, patched)
+    patched_database = json.loads(
+        (patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    patched_database["types"][0]["data"][0]["data"][0]["value"] = "步枪"
+    (patched / "databases" / "DataBase.json").write_text(
+        json.dumps(patched_database, ensure_ascii=False), encoding="utf-8"
+    )
+    wolf._synchronize_database_identifiers(
+        str(original),
+        str(patched),
+        [
+            (
+                ["database.json", 0],
+                "ライフル",
+                "步枪",
+                "name_referenced",
+                metadata["identifier_references"],
+                "name_closed",
+                [],
+            )
+        ],
+    )
+    patched_database = json.loads(
+        (patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    patched_common = json.loads(
+        (patched / "common" / "Use.json").read_text(encoding="utf-8")
+    )
+    assert patched_database["types"][1]["data"][0]["data"][0]["value"] == "ライフル"
+    assert patched_common["commands"][0]["stringArgs"][2] == "步枪"
+
+
+def test_wolf_unique_same_type_runtime_database_alias_is_synchronized(tmp_path):
+    original = tmp_path / "original"
+    databases = original / "databases"
+    common = original / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    database_path = databases / "DataBase.json"
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "Weapons",
+                "fields": [{"name": "Name"}],
+                "data": [{
+                    "name": "",
+                    "data": [{"name": "Name", "value": "装填レバー"}],
+                }],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (databases / "CDataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "RuntimeWeapons",
+                "fields": [{"name": "Name"}],
+                "data": [{
+                    "name": "",
+                    "data": [{"name": "Name", "value": ""}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Use.json").write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x71200, 1600000],
+                    "stringArgs": ["", "Weapons", "装填レバー", "Name"],
+                },
+                {"code": 101, "stringArgs": [r"\cself[0]"]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x71000, 1600001],
+                    "stringArgs": ["", "RuntimeWeapons", "装填レバー", "Name"],
+                },
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(original))
+    entries = wolf._json_entries(str(original), str(database_path), usage)
+    metadata = next(metadata for metadata, text in entries if text == "装填レバー")
+
+    assert ("database.json", 0, "装填レバー") not in usage["incomplete_identifier_symbols"]
+    assert metadata["marker"] == "WOLFText"
+    assert metadata["identifier_reference_complete"] is True
+    assert [reference["reference_kind"] for reference in metadata["identifier_references"]] == [
+        "database_selector",
+        "runtime_database_alias",
+    ]
+
+    patched = tmp_path / "patched"
+    shutil.copytree(original, patched)
+    patched_database = json.loads(
+        (patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    patched_database["types"][0]["data"][0]["data"][0]["value"] = "装填杆"
+    (patched / "databases" / "DataBase.json").write_text(
+        json.dumps(patched_database, ensure_ascii=False), encoding="utf-8"
+    )
+    wolf._synchronize_database_identifiers(
+        str(original),
+        str(patched),
+        [
+            (
+                ["database.json", 0],
+                "装填レバー",
+                "装填杆",
+                "name_referenced",
+                metadata["identifier_references"],
+                "name_closed",
+                metadata["identifier_missing_names"],
+            )
+        ],
+    )
+    patched_common = json.loads(
+        (patched / "common" / "Use.json").read_text(encoding="utf-8")
+    )
+    assert patched_common["commands"][0]["stringArgs"][2] == "装填杆"
+    assert patched_common["commands"][2]["stringArgs"][2] == "装填杆"
+
+
+def test_wolf_runtime_database_alias_with_multiple_aligned_sources_stays_protected(tmp_path):
+    databases = tmp_path / "databases"
+    common = tmp_path / "common"
+    databases.mkdir()
+    common.mkdir()
+    source_type = {
+        "name": "Names",
+        "fields": [{"name": "Name"}],
+        "data": [{
+            "name": "",
+            "data": [{"name": "Name", "value": "Shared"}],
+        }],
+    }
+    for filename in ("DataBase.json", "SysDatabase.json"):
+        (databases / filename).write_text(
+            json.dumps({"types": [source_type]}), encoding="utf-8"
+        )
+    (databases / "CDataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "RuntimeNames",
+                "fields": [{"name": "Name"}],
+                "data": [{
+                    "name": "",
+                    "data": [{"name": "Name", "value": ""}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Use.json").write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x71200, 1600000],
+                    "stringArgs": ["", "Names", "Shared", "Name"],
+                },
+                {"code": 101, "stringArgs": [r"\cself[0]"]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x71000, 1600001],
+                    "stringArgs": ["", "RuntimeNames", "Shared", "Name"],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(tmp_path))
+
+    assert ("database.json", 0, "shared") in usage["incomplete_identifier_symbols"]
+    assert ("sysdatabase.json", 0, "shared") in usage["incomplete_identifier_symbols"]
+    assert any(
+        item["reason"] == "unresolved_runtime_database_alias"
+        for item in usage["analysis_diagnostics"]
+    )
+
+
+def test_wolf_closed_identifier_graph_synchronizes_database_references(tmp_path):
+    original = tmp_path / "original"
+    databases = original / "databases"
+    common = original / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    (databases / "DataBase.json").write_text(
+        json.dumps({
+            "types": [
+                {
+                    "name": "武装",
+                    "fields": [{"name": "名称"}],
+                    "data": [
+                        {"name": "", "data": [{"name": "名称", "value": "A"}]},
+                        {"name": "", "data": [{"name": "名称", "value": "B"}]},
+                        {"name": "", "data": [{"name": "名称", "value": "A"}]},
+                    ],
+                },
+                {
+                    "name": "装备",
+                    "fields": [{"name": "武装名"}],
+                    "data": [{"name": "slot", "data": [{"name": "武装名", "value": "A"}]}],
+                },
+            ]
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (common / "Lookup.json").write_text(
+        json.dumps({
+            "commands": [
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x51200, 1600000],
+                    "stringArgs": ["", "武装", "", "名称"],
+                },
+                {"code": 150, "intArgs": [32], "stringArgs": [r"\cself[0]"]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 0, 0, 0x71200, 1600001],
+                    "stringArgs": ["", "武装", "a", "名称"],
+                },
+                {"code": 101, "stringArgs": ["A"]},
+            ]
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(original))
+    entries = wolf._json_entries(
+        str(original), str(databases / "DataBase.json"), usage
+    )
+    metadata = next(metadata for metadata, text in entries if text == "A")
+
+    assert usage["database_identifier_translation_policy"][("database.json", 0)] == "name_closed"
+    assert metadata["marker"] == "WOLFText"
+    assert metadata["identifier_reference_complete"] is True
+    assert metadata["identifier_references"] == [{
+        "file": "common/Lookup.json",
+        "path": ["commands", 2, "stringArgs", 2],
+        "target_data_indexes": [0, 2],
+        "expected_original": "a",
+        "reference_kind": "database_selector",
+    }]
+
+    patched = tmp_path / "patched"
+    shutil.copytree(original, patched)
+    patched_database = json.loads(
+        (patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    patched_database["types"][0]["data"][0]["data"][0]["value"] = "甲"
+    patched_database["types"][0]["data"][2]["data"][0]["value"] = "甲"
+    (patched / "databases" / "DataBase.json").write_text(
+        json.dumps(patched_database, ensure_ascii=False), encoding="utf-8"
+    )
+
+    references = metadata["identifier_references"]
+    allowed = wolf._synchronize_database_identifiers(
+        str(original),
+        str(patched),
+        [(["database.json", 0], "A", "甲", "name_referenced", references, "name_closed", [])],
+    )
+
+    synchronized = json.loads(
+        (patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    synchronized_common = json.loads(
+        (patched / "common" / "Lookup.json").read_text(encoding="utf-8")
+    )
+    assert synchronized["types"][1]["data"][0]["data"][0]["value"] == "A"
+    assert synchronized_common["commands"][2]["stringArgs"][2] == "甲"
+    assert synchronized_common["commands"][3]["stringArgs"][0] == "A"
+    assert (
+        "common/Lookup.json",
+        ("commands", 2, "stringArgs", 2),
+    ) in allowed
+    wolf._verify_logic_json_unchanged(str(original), str(patched), allowed)
+
+    incomplete = tmp_path / "incomplete"
+    shutil.copytree(original, incomplete)
+    incomplete_database = json.loads(
+        (incomplete / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    incomplete_database["types"][0]["data"][0]["data"][0]["value"] = "乙"
+    (incomplete / "databases" / "DataBase.json").write_text(
+        json.dumps(incomplete_database, ensure_ascii=False), encoding="utf-8"
+    )
+    try:
+        wolf._synchronize_database_identifiers(
+            str(original),
+            str(incomplete),
+            [(["database.json", 0], "A", "甲", "name_referenced", [], "name_closed", [])],
+        )
+    except wolf.WolfEngineError as error:
+        assert "名称解析目标改变" in str(error)
+    else:
+        raise AssertionError("a changed identifier target must fail closed")
+
+
+def test_wolf_identifier_collision_policy_follows_record_selector_sources(tmp_path):
+    json_root = tmp_path / "json"
+    databases = json_root / "databases"
+    common = json_root / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    (databases / "DataBase.json").write_text(
+        json.dumps({
+            "types": [
+                {"name": "数字", "data": [{"name": "", "data": [{"name": "名称", "value": "A"}]}]},
+                {"name": "名称", "data": [{"name": "", "data": [{"name": "名称", "value": "B"}]}]},
+                {"name": "不明", "data": [{"name": "", "data": [{"name": "名称", "value": "C"}]}]},
+            ]
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (common / "Selectors.json").write_text(
+        json.dumps({
+            "commands": [
+                {"code": 121, "intArgs": [1600001, 2, 0, 0]},
+                {
+                    "code": 250,
+                    "intArgs": [0, 1600001, 0, 0x51200, 1600002],
+                    "stringArgs": ["", "数字", "", "名称"],
+                },
+                {
+                    "code": 250,
+                    "intArgs": [1, 0, 0, 0x71200, 1600003],
+                    "stringArgs": ["", "名称", "B", "名称"],
+                },
+            ]
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+
+    assert wolf._database_identifier_collision_policy(
+        usage, ("database.json", 0)
+    ) == "numeric_only"
+    assert wolf._database_identifier_collision_policy(
+        usage, ("database.json", 1)
+    ) == "name_referenced"
+    assert wolf._database_identifier_collision_policy(
+        usage, ("database.json", 2)
+    ) == "unknown"
+    assert usage["database_identifier_translation_policy"] == {
+        ("database.json", 0): "numeric_only",
+        ("database.json", 1): "name_closed",
+        ("database.json", 2): "unsafe",
+    }
+
+
+def test_wolf_identifier_references_include_cfg_unreachable_commands(tmp_path):
+    databases = tmp_path / "databases"
+    common = tmp_path / "common"
+    databases.mkdir()
+    common.mkdir()
+    (databases / "DataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "Names",
+                "data": [{
+                    "name": "",
+                    "data": [{"name": "Name", "value": "Alpha"}],
+                }],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (common / "Selector.json").write_text(
+        json.dumps({
+            "id": 1,
+            "name": "Selector",
+            "activation": {"raw": 0x1E848023, "extra": [0] * 7},
+            "commands": [
+                {"code": 213, "stringArgs": ["END"]},
+                {
+                    "code": 250,
+                    "intArgs": [1, 0, 0, 0x71200, 1600000],
+                    "stringArgs": ["", "Names", "Alpha", "Name"],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(tmp_path))
+    key = ("database.json", 0, "alpha")
+
+    assert ("common/Selector.json", ("commands", 1)) not in usage["reachable_command_paths"]
+    assert usage["identifier_reference_paths"][key] == {
+        (
+            "common/Selector.json",
+            ("commands", 1, "stringArgs", 2),
+            (0,),
+            "Alpha",
+            "database_selector",
+        )
+    }
+
+
+def test_wolf_missing_name_lookup_guards_only_that_future_name(tmp_path):
+    original = tmp_path / "original"
+    patched = tmp_path / "patched"
+    databases = original / "databases"
+    databases.mkdir(parents=True)
+    (databases / "DataBase.json").write_text(
+        json.dumps({"types": [{
+            "name": "Names",
+            "fields": [{"name": "Name"}],
+            "data": [{"name": "", "data": [{"name": "Name", "value": "A"}]}],
+        }]}),
+        encoding="utf-8",
+    )
+    shutil.copytree(original, patched)
+    patched_data = json.loads(
+        (patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    patched_data["types"][0]["data"][0]["data"][0]["value"] = "Ghost"
+    (patched / "databases" / "DataBase.json").write_text(
+        json.dumps(patched_data), encoding="utf-8"
+    )
+
+    try:
+        wolf._synchronize_database_identifiers(
+            str(original),
+            str(patched),
+            [(["database.json", 0], "A", "Ghost", "numeric_only", [], "numeric_only", ["ghost"])],
+        )
+    except wolf.WolfEngineError as error:
+        assert "激活原本不存在的名称" in str(error)
+    else:
+        raise AssertionError("a translated identifier must not capture a missing lookup")
+
+
+def test_wolf_database_instruction_flags_define_selector_and_direction():
+    schemas = {
+        "database.json": {
+            "types": {"武装": 0},
+            "fields": {0: {"名称": 0}},
+        }
+    }
+    identifiers = {("database.json", 0): {"a": {0}, r"\cself[5]": {1}}}
+    numeric_read = {
+        "code": 250,
+        "intArgs": [0, 1600001, 0, 0x51200, 1600002],
+        "stringArgs": ["", "武装", "", "名称"],
+    }
+    name_read = {
+        "code": 250,
+        "intArgs": [0, 0, 0, 0x71200, 1600002],
+        "stringArgs": ["", "武装", "A", "名称"],
+    }
+    literal_control_name = {
+        **name_read,
+        "stringArgs": ["", "武装", r"\cself[5]", "名称"],
+    }
+    database_write = {
+        "code": 250,
+        "intArgs": [0, 0, 0, 0x50200, 1600002],
+        "stringArgs": ["", "武装", "", "名称"],
+    }
+
+    assert wolf._database_read_descriptor(numeric_read, schemas) == (
+        ("database.json", 0, 0),
+        1600002,
+    )
+    assert wolf._record_selector_access(numeric_read, schemas, identifiers) == (
+        ("database.json", 0),
+        "numeric",
+        None,
+    )
+    assert wolf._record_selector_access(name_read, schemas, identifiers) == (
+        ("database.json", 0),
+        "name",
+        (0,),
+    )
+    assert wolf._record_selector_access(literal_control_name, schemas, identifiers) == (
+        ("database.json", 0),
+        "name",
+        (1,),
+    )
+    assert wolf._database_read_descriptor(database_write, schemas) is None
+    assert wolf._command_database_selector_role(numeric_read, 1600001) == "data"
+    assert wolf._command_database_selector_role(
+        {**numeric_read, "intArgs": [1600001, 0, 0, 0x41200, 1600002]},
+        1600001,
+    ) == "type"
+    assert wolf._record_selector_access(
+        {**numeric_read, "intArgs": [1600001, 0, 0, 0x41200, 1600002]},
+        schemas,
+        identifiers,
+    ) == (("database.json", None), "numeric", None)
+    assert wolf._command_database_selector_role(
+        {**numeric_read, "intArgs": [0, 0, 1600001, 0x11200, 1600002]},
+        1600001,
+    ) == "field"
+
+
+def test_wolf_identifier_sync_is_type_scoped_and_rejects_collisions(tmp_path):
+    original = tmp_path / "original"
+    patched = tmp_path / "patched"
+    databases = original / "databases"
+    common = original / "common"
+    databases.mkdir(parents=True)
+    common.mkdir()
+    (databases / "DataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "武装",
+                "data": [
+                    {"name": "", "data": [{"name": "名称", "value": "ライフル"}]},
+                    {"name": "", "data": [{"name": "名称", "value": "シールド"}]},
+                ],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (databases / "CDataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "参照先",
+                "data": [{
+                    "name": "ライフル",
+                    "data": [{"name": "名称", "value": "ライフル"}],
+                }],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (common / "Lookup.json").write_text(
+        json.dumps({
+            "commands": [{
+                "code": 250,
+                "intArgs": [0, 0, 0, 0x71200, 1600000],
+                "stringArgs": ["", "武装", "ライフル", "名称"],
+            }]
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    shutil.copytree(original, patched)
+    patched_database = json.loads((patched / "databases" / "DataBase.json").read_text(encoding="utf-8"))
+    patched_database["types"][0]["data"][0]["data"][0]["value"] = "步枪"
+    (patched / "databases" / "DataBase.json").write_text(
+        json.dumps(patched_database, ensure_ascii=False), encoding="utf-8"
+    )
+
+    reference = {
+        "file": "common/Lookup.json",
+        "path": ["commands", 0, "stringArgs", 2],
+        "target_data_indexes": [0],
+        "expected_original": "ライフル",
+        "reference_kind": "database_selector",
+    }
+    allowed = wolf._synchronize_database_identifiers(
+        str(original),
+        str(patched),
+        [
+            (
+                ["database.json", 0],
+                "ライフル",
+                "步枪",
+                "name_referenced",
+                [reference],
+                "name_closed",
+                [],
+            )
+        ],
+    )
+
+    patched_cdb = json.loads((patched / "databases" / "CDataBase.json").read_text(encoding="utf-8"))
+    patched_common = json.loads((patched / "common" / "Lookup.json").read_text(encoding="utf-8"))
+    assert patched_cdb["types"][0]["data"][0]["name"] == "ライフル"
+    assert patched_cdb["types"][0]["data"][0]["data"][0]["value"] == "ライフル"
+    assert patched_common["commands"][0]["stringArgs"][2] == "步枪"
+    assert ("common/Lookup.json", ("commands", 0, "stringArgs", 2)) in allowed
+    assert {path.name for path in (patched / "databases").iterdir()} == {
+        "CDataBase.json",
+        "DataBase.json",
+    }
+
+    try:
+        wolf._synchronize_database_identifiers(
+            str(original),
+            str(patched),
+            [
+                (
+                    ["database.json", 0],
+                    "ライフル",
+                    "シールド",
+                    "name_referenced",
+                    [],
+                    "name_closed",
+                    [],
+                )
+            ],
+        )
+    except wolf.WolfEngineError as error:
+        assert "译名碰撞" in str(error)
+    else:
+        raise AssertionError("same-type identifier collision must be rejected")
+
+    numeric_original = tmp_path / "numeric_original"
+    numeric_patched = tmp_path / "numeric_patched"
+    (numeric_original / "databases").mkdir(parents=True)
+    (numeric_original / "databases" / "DataBase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "数字读取",
+                "data": [
+                    {"name": "", "data": [{"name": "名称", "value": "A"}]},
+                    {"name": "", "data": [{"name": "名称", "value": "B"}]},
+                ],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    shutil.copytree(numeric_original, numeric_patched)
+    numeric_data = json.loads(
+        (numeric_patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
+    )
+    numeric_data["types"][0]["data"][0]["data"][0]["value"] = "B"
+    (numeric_patched / "databases" / "DataBase.json").write_text(
+        json.dumps(numeric_data, ensure_ascii=False), encoding="utf-8"
+    )
+
+    wolf._synchronize_database_identifiers(
+        str(numeric_original),
+        str(numeric_patched),
+        [(["database.json", 0], "A", "B", "numeric_only", [], "numeric_only", [])],
+    )
 
 
 def test_wolf_database_identifier_roles_follow_runtime_usage(tmp_path):
@@ -245,6 +2689,7 @@ def test_wolf_database_identifier_roles_follow_runtime_usage(tmp_path):
         json.dumps({
             "types": [
                 {
+                    "name": "装備",
                     "data": [
                         {
                             "name": "鉄の斧",
@@ -257,12 +2702,14 @@ def test_wolf_database_identifier_roles_follow_runtime_usage(tmp_path):
                     ]
                 },
                 {
+                    "name": "ルビ",
                     "data": [{
                         "name": "内部キー",
                         "data": [{"name": "識別名", "value": "内部キー"}],
                     }]
                 },
                 {
+                    "name": "未使用",
                     "data": [{
                         "name": "未使用キー",
                         "data": [{"name": "識別名", "value": "未使用キー"}],
@@ -286,6 +2733,11 @@ def test_wolf_database_identifier_roles_follow_runtime_usage(tmp_path):
                     "codeStr": "SetString",
                     "stringArgs": [r"装備：\s[1]"],
                     "intArgs": [3000000, 0, 0],
+                },
+                {
+                    "code": 101,
+                    "codeStr": "Message",
+                    "stringArgs": [r"\s[0]"],
                 },
                 {
                     "code": 250,
@@ -317,22 +2769,22 @@ def test_wolf_database_identifier_roles_follow_runtime_usage(tmp_path):
         for metadata, text in entries
     }
 
-    assert ("database.json", 0, 0) in usage["display_database_fields"]
-    assert ("database.json", 1, 0) in usage["logic_database_fields"]
-    assert roles[(("types", 0, "data", 0, "name"), "鉄の斧")] == "WOLFLogic"
-    assert roles[(("types", 0, "data", 0, "data", 0, "value"), "鉄の斧")] == "WOLFLogic"
+    assert ("database.json", 0, 0, 0) in usage["display_database_records"]
+    assert ("database.json", 1, 0, 0) in usage["logic_database_records"]
+    assert (("types", 0, "data", 0, "name"), "鉄の斧") not in roles
+    assert roles[(("types", 0, "data", 0, "data", 0, "value"), "鉄の斧")] == "WOLFText"
     assert roles[(("types", 0, "data", 1, "name"), "ソフィア")] == "WOLFLogic"
     assert roles[(("types", 1, "data", 0, "data", 0, "value"), "内部キー")] == "WOLFLogic"
     assert roles[(("types", 2, "data", 0, "data", 0, "value"), "未使用キー")] == "WOLFLogic"
     common_entries = wolf._json_entries(str(json_root), str(common_path), usage)
     command_logic = next(
         metadata for metadata, text in common_entries
-        if metadata["path"] == ["commands", 4, "stringArgs", 0] and text == "ソフィア"
+        if metadata["path"] == ["commands", 5, "stringArgs", 0] and text == "ソフィア"
     )
     assert command_logic["marker"] == "WOLFLogic"
 
 
-def test_wolf_database_record_name_used_cross_database_by_code250_stays_logic(tmp_path):
+def test_wolf_database_record_name_call_is_scoped_to_its_database_type(tmp_path):
     json_root = tmp_path / "json"
     database_path = json_root / "databases" / "DataBase.json"
     common_path = json_root / "common" / "Common.json"
@@ -358,17 +2810,17 @@ def test_wolf_database_record_name_used_cross_database_by_code250_stays_logic(tm
         json.dumps({
             "types": [{
                 "name": "クリア状況",
-                "data": [{"name": "", "data": []}],
+                "data": [{"name": "Ayaは元気？", "data": []}],
             }]
         }, ensure_ascii=False),
         encoding="utf-8",
     )
     common_path.write_text(
         json.dumps({
-            "commands": [{
-                "code": 250,
-                "stringArgs": ["", "クリア状況", "Ayaは元気？", "0=まだ/1=済"],
-                "intArgs": [9, 0, 0, 0x51200, 3000000],
+                "commands": [{
+                    "code": 250,
+                    "stringArgs": ["", "クリア状況", "Ayaは元気？", "0=まだ/1=済"],
+                    "intArgs": [0, 0, 0, 0x71000, 3000000],
             }]
         }, ensure_ascii=False),
         encoding="utf-8",
@@ -377,10 +2829,14 @@ def test_wolf_database_record_name_used_cross_database_by_code250_stays_logic(tm
     usage = wolf._analyze_json_usage(str(json_root))
     entries = wolf._json_entries(str(json_root), str(database_path), usage)
 
-    assert "Ayaは元気？".casefold() in usage["logic_database_record_literals"]
-    assert any(
-        metadata["marker"] == "WOLFLogic" and text == "Ayaは元気？"
-        for metadata, text in entries
+    assert (
+        "cdatabase.json",
+        0,
+        "Ayaは元気？".casefold(),
+    ) in usage["named_database_record_references"]
+    assert not any(
+        metadata["path"] == ["types", 0, "data", 0, "name"]
+        for metadata, _text in entries
     )
     assert any(
         metadata["path"] == ["types", 0, "data", 1, "data", 0, "value"]
@@ -468,7 +2924,7 @@ def test_wolf_database_value_used_as_sound_resource_stays_logic(tmp_path):
 
     usage = wolf._analyze_json_usage(str(json_root))
 
-    assert ("database.json", 0, 0) in usage["logic_database_fields"]
+    assert ("database.json", 0, 0, 0) in usage["logic_database_records"]
 
 
 def test_wolf_closed_jump_label_group_stays_logic(tmp_path):
@@ -545,10 +3001,16 @@ def test_wolf_dynamic_database_selector_protects_reference_pair(tmp_path):
         json.dumps({
             "types": [{
                 "name": "汎用リソース管理",
-                "data": [{
-                    "name": "戦_バリア",
-                    "data": [{"name": "name", "value": "戦_バリア"}],
-                }],
+                "data": [
+                    {
+                        "name": "戦_バリア",
+                        "data": [{"name": "name", "value": "戦_バリア"}],
+                    },
+                    {
+                        "name": "表示用",
+                        "data": [{"name": "説明", "value": "戦_バリア"}],
+                    },
+                ],
             }],
         }, ensure_ascii=False),
         encoding="utf-8",
@@ -561,10 +3023,10 @@ def test_wolf_dynamic_database_selector_protects_reference_pair(tmp_path):
                     "intArgs": [0, 0, 0, 0x51200, 1600096],
                     "stringArgs": ["", "操作盤名", "", "リソース名1"],
                 },
-                {
-                    "code": 250,
-                    "intArgs": [0, 0, 1600096, 0x51000, 1600009],
-                    "stringArgs": ["", "汎用リソース管理", "", "name"],
+                    {
+                        "code": 250,
+                        "intArgs": [0, 0, 1600096, 0x11000, 1600009],
+                        "stringArgs": ["", "汎用リソース管理", "", ""],
                 },
             ],
         }, ensure_ascii=False),
@@ -583,12 +3045,18 @@ def test_wolf_dynamic_database_selector_protects_reference_pair(tmp_path):
         for metadata, text in c_database_entries
     }
 
-    assert ("database.json", 0, 0) in usage["logic_database_fields"]
-    assert ("database.json", 0, 1) in usage["logic_database_fields"]
-    assert "戦_バリア".casefold() in usage["logic_database_literals"]
+    assert ("database.json", 0, 0, 0) in usage["logic_database_records"]
+    assert ("database.json", 0, 0, 1) in usage["logic_database_records"]
     assert database_roles[(("types", 0, "data", 0, "data", 0, "value"), "戦_バリア")] == "WOLFLogic"
-    assert c_database_roles[(("types", 0, "data", 0, "name"), "戦_バリア")] == "WOLFLogic"
-    assert c_database_roles[(("types", 0, "data", 0, "data", 0, "value"), "戦_バリア")] == "WOLFLogic"
+    assert c_database_roles[
+        (("types", 0, "data", 0, "name"), "戦_バリア")
+    ] == "WOLFLogic"
+    assert c_database_roles[
+        (("types", 0, "data", 0, "data", 0, "value"), "戦_バリア")
+    ] == "WOLFLogic"
+    assert c_database_roles[
+        (("types", 0, "data", 1, "data", 0, "value"), "戦_バリア")
+    ] == "WOLFLogic"
 
     patched_root = tmp_path / "patched"
     shutil.copytree(json_root, patched_root)
@@ -612,7 +3080,59 @@ def test_wolf_resource_detection_handles_multiline_parameters():
     assert wolf._looks_like_resource("Data/textfile/01_scenario.md") is True
 
 
-def test_wolf_internal_memo_fields_stay_protected_unless_displayed():
+def test_wolf_database_resource_schema_protects_extensionless_file_reference(tmp_path):
+    json_root = tmp_path / "json"
+    database_path = json_root / "databases" / "DataBase.json"
+    database_path.parent.mkdir(parents=True)
+    database_path.write_text(
+        json.dumps({
+            "types": [{
+                "name": "画像一覧",
+                "fields": [
+                    {"name": "画像", "stringArgs": ["Picture_UI"]},
+                    {"name": "表示名"},
+                ],
+                "data": [{
+                    "name": "entry",
+                    "data": [
+                        {"name": "画像", "value": "button_attack"},
+                        {"name": "表示名", "value": "攻撃"},
+                    ],
+                }],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    maps = json_root / "maps"
+    maps.mkdir()
+    (maps / "Map001.json").write_text(
+        json.dumps({"events": [{"pages": [{"list": [
+            {
+                "code": 250,
+                "intArgs": [0, 0, 1, 0x51200, 1600000],
+                "stringArgs": ["", "画像一覧", "", "表示名"],
+            },
+            {"code": 101, "stringArgs": [r"\cself[0]"]},
+        ]}]}]}),
+        encoding="utf-8",
+    )
+
+    usage = wolf._analyze_json_usage(str(json_root))
+    roles = {
+        (tuple(metadata["path"]), text): (metadata["marker"], metadata.get("logic_role"))
+        for metadata, text in wolf._json_entries(
+            str(json_root), str(database_path), usage
+        )
+    }
+
+    assert roles[(("types", 0, "data", 0, "data", 0, "value"), "button_attack")] == (
+        "WOLFLogic",
+        "resource",
+    )
+    assert roles[(("types", 0, "data", 0, "data", 1, "value"), "攻撃")][0] == "WOLFText"
+
+
+def test_wolf_database_fields_require_display_evidence_and_hash_values_stay_protected():
     field = {"name": "【メモ】", "value": "内部調整値"}
     usage = {
         "display_database_fields": set(),
@@ -623,18 +3143,11 @@ def test_wolf_internal_memo_fields_stay_protected_unless_displayed():
     assert wolf._database_value_marker("database.json", 2, 3, field, usage) == "WOLFLogic"
     usage["display_database_fields"].add(("database.json", 2, 3))
     assert wolf._database_value_marker("database.json", 2, 3, field, usage) == "WOLFText"
-    assert wolf._database_field_marker("簡単な説明（作中には使わない）") == "WOLFLogic"
-    assert wolf._database_field_marker("Runコモン") == "WOLFLogic"
-    assert wolf._database_field_marker("名称") == "WOLFText"
-    assert wolf._database_value_marker(
-        "database.json", 2, 4, {"name": "説明", "value": "旧説明"}, usage, "武装一覧bk"
-    ) == "WOLFLogic"
     assert wolf._database_value_marker(
         "database.json", 2, 5, {"name": "名前", "value": "# 未使用区切り"}, usage
     ) == "WOLFLogic"
-    assert wolf._DEVELOPMENT_NAME_RE.search("bk└ 制御子")
 
-    name_field = {"name": "名称", "value": "画面表示名"}
+    name_field = {"name": "名称", "value": "test"}
     display_usage = dict(usage)
     display_usage["display_database_fields"] = {("database.json", 4, 0)}
     assert wolf._database_value_marker(
@@ -664,6 +3177,10 @@ def test_wolf_string_assignment_is_exposed_only_when_locally_displayed(tmp_path)
     )
 
     usage = wolf._analyze_json_usage(str(tmp_path))
+    usage["display_database_fields"].update({
+        ("database.json", 0, 0),
+        ("cdatabase.json", 0, 0),
+    })
     entries = wolf._json_entries(str(tmp_path), str(path), usage)
     roles = {text: metadata["marker"] for metadata, text in entries}
 
@@ -676,7 +3193,15 @@ def test_wolf_string_assignment_is_exposed_only_when_locally_displayed(tmp_path)
         0,
         {"name": "名前", "value": "サーマルガード"},
         usage,
-    ) == "WOLFLogic"
+    ) == "WOLFText"
+    assert wolf._database_value_marker(
+        "cdatabase.json",
+        0,
+        0,
+        {"name": "名前", "value": "サーマルガード"},
+        usage,
+        datum_name="サーマルガード",
+    ) == "WOLFText"
 
 
 def test_wolf_string_assignment_keeps_runtime_identifiers_as_logic():
@@ -710,7 +3235,14 @@ def test_wolf_database_value_used_as_dynamic_common_target_stays_logic(tmp_path)
         json.dumps({
             "types": [{
                 "name": "Calls",
-                "data": [{"name": "", "data": [{"name": "Runコモン", "value": "Target"}]}],
+                "fields": [{"name": "Runコモン"}, {"name": "引数1"}],
+                "data": [{
+                    "name": "",
+                    "data": [
+                        {"name": "Runコモン", "value": "Target"},
+                        {"name": "引数1", "value": "Runtime key"},
+                    ],
+                }],
             }]
         }),
         encoding="utf-8",
@@ -723,7 +3255,7 @@ def test_wolf_database_value_used_as_dynamic_common_target_stays_logic(tmp_path)
                     "intArgs": [0, 0, 0, 0x51200, 1600000],
                     "stringArgs": ["", "Calls", "", "Runコモン"],
                 },
-                {"code": 300, "stringArgs": [r"\cself[0]"]},
+                {"code": 300, "intArgs": [0, 0x100], "stringArgs": [r"\cself[0]"]},
             ]
         }),
         encoding="utf-8",
@@ -731,7 +3263,9 @@ def test_wolf_database_value_used_as_dynamic_common_target_stays_logic(tmp_path)
 
     usage = wolf._analyze_json_usage(str(tmp_path))
 
-    assert ("database.json", 0, 0) in usage["logic_database_fields"]
+    assert ("database.json", 0, 0, 0) in usage["logic_database_records"]
+    assert ("database.json", 0, 0, 1) in usage["opaque_database_records"]
+    assert usage["unresolved_database_callbacks"][0]["candidate_contexts"] == ()
 
 
 def test_wolf_transport_residue_scan_crosses_chunk_boundary(tmp_path):
@@ -938,8 +3472,47 @@ def test_wolf_optional_transport_tags_come_from_export_metadata(tmp_path):
     _script_rel, metadata, _text = next(wolf._iter_released_entries(str(origin)))
     tokens = metadata["wolf_transport"]["tokens"]
 
+    assert metadata["wolf_export_schema"] == wolf.WOLF_EXPORT_SCHEMA
     assert wolf.get_optional_transport_tags(str(tmp_path)) == (tokens[1][0],)
     assert tokens[0][0] not in wolf.get_optional_transport_tags(str(tmp_path))
+
+
+def test_wolf_rejects_string_scripts_without_current_export_schema(tmp_path):
+    scripts = tmp_path / wolf.STRING_SCRIPTS_ORIGIN_DIRNAME
+    scripts.mkdir()
+    metadata = {
+        "kind": "json",
+        "file": "common/Old.json",
+        "path": ["commands", 0, "stringArgs", 0],
+        "marker": "Message",
+        "wolf_code": "JSON:common/Old.json:[commands,0,stringArgs,0]",
+    }
+    (scripts / "old.txt").write_text(
+        f"@WOLF {wolf._encode_metadata(metadata)}\n#Message#\n旧数据\n##\n",
+        encoding="utf-8",
+    )
+
+    try:
+        list(wolf._iter_released_entries(str(scripts)))
+    except wolf.WolfEngineError as error:
+        assert "版本已过期" in str(error)
+    else:
+        raise AssertionError("old WOLF StringScripts must be rejected")
+
+
+def test_wolf_rejects_string_scripts_without_metadata_header(tmp_path):
+    scripts = tmp_path / wolf.STRING_SCRIPTS_ORIGIN_DIRNAME
+    scripts.mkdir()
+    (scripts / "old.txt").write_text(
+        "#Message#\n旧数据\n##\n", encoding="utf-8"
+    )
+
+    try:
+        list(wolf._iter_released_entries(str(scripts)))
+    except wolf.WolfEngineError as error:
+        assert "缺少当前版本元数据" in str(error)
+    else:
+        raise AssertionError("metadata-free WOLF StringScripts must be rejected")
 
 
 def test_wolf_control_transport_protects_message_structure():
@@ -1013,10 +3586,11 @@ def test_wolf_export_discovers_runtime_resource_directory_without_dev_exports(tm
     file_count, entry_count = wolf.export_to_string_scripts(str(game_path))
 
     resources = game_path / wolf.STRING_SCRIPTS_DIRNAME / "WOLF" / "Resources"
-    assert file_count == 2
-    assert entry_count == 2
+    assert file_count == 3
+    assert entry_count == 3
     assert (resources / "contents" / "page1.txt.strings.txt").is_file()
     assert (resources / "contents" / "page2.txt.strings.txt").is_file()
+    assert (game_path / wolf.STRING_SCRIPTS_DIRNAME / "WOLF" / "Logic" / "common" / "Reader.json.txt").is_file()
     assert not (resources / "work_temp").exists()
 
 
@@ -1026,12 +3600,48 @@ def test_wolf_referenced_maps_exclude_unregistered_sample_maps():
     assert wolf._referenced_map_json_names(references) == {"titlemap.json", "field01.json"}
 
 
+def test_wolf_runtime_maps_exclude_blank_sysdb_test_play_slot(tmp_path):
+    databases = tmp_path / "databases"
+    maps = tmp_path / "maps"
+    databases.mkdir()
+    maps.mkdir()
+    for filename in ("TitleMap.json", "Dungeon.json", "SampleMapA.json", "TestMap.json"):
+        (maps / filename).write_text("{}", encoding="utf-8")
+    (databases / "SysDatabase.json").write_text(
+        json.dumps({
+            "types": [{
+                "name": "マップ設定",
+                "fields": [{"name": "マップファイル名"}],
+                "data": [
+                    {
+                        "name": "タイトル",
+                        "data": [{"name": "マップファイル名", "value": "MapData/TitleMap.mps"}],
+                    },
+                    {
+                        "name": "",
+                        "data": [{"name": "マップファイル名", "value": "MapData/TestMap.mps"}],
+                    },
+                ],
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    assert wolf._runtime_map_json_names(
+        str(tmp_path), ["MapData/TitleMap.mps", "MapData/TestMap.mps"]
+    ) == {"titlemap.json"}
+    assert wolf._runtime_map_json_names(
+        str(tmp_path), ["MapData/TitleMap.mps", "MapData/TestMap.mps", r"MapData/\s[1].mps"]
+    ) == {"titlemap.json", "dungeon.json", "samplemapa.json"}
+
+
 def test_wolf_logic_files_stay_out_of_translation_json(tmp_path):
     game_path = tmp_path / "Game"
     scripts = game_path / wolf.STRING_SCRIPTS_DIRNAME / "WOLF"
     display_entries = []
     logic_entries = []
     wolf._add_entry(display_entries, {"kind": "json", "file": "a.json", "path": [0]}, "表示文")
+    wolf._add_entry(display_entries, {"kind": "json", "file": "a.json", "path": [2]}, "表示文")
     wolf._add_entry(
         logic_entries,
         {"kind": "json", "file": "a.json", "path": [1], "marker": "WOLFLogic"},
@@ -1045,7 +3655,35 @@ def test_wolf_logic_files_stay_out_of_translation_json(tmp_path):
         (tmp_path / "Works" / "Game" / "untranslated" / "translation.json").read_text(encoding="utf-8")
     )
 
-    assert list(output) == [os.path.join("WOLF", "Binary", "a.txt")]
+    file_key = os.path.join("WOLF", "Binary", "a.txt")
+    assert list(output) == [file_key]
+    assert output[file_key]["表示文"]["wolf_codes"] == [
+        display_entries[0][0]["wolf_code"],
+        display_entries[1][0]["wolf_code"],
+    ]
+    assert output[file_key]["表示文"]["wolf_export_schema"] == wolf.WOLF_EXPORT_SCHEMA
+
+
+def test_wolf_json_creation_rejects_old_string_scripts_without_output(tmp_path):
+    game_path = tmp_path / "Game"
+    scripts = game_path / wolf.STRING_SCRIPTS_DIRNAME / "WOLF"
+    scripts.mkdir(parents=True)
+    metadata = {
+        "kind": "json",
+        "file": "common/Old.json",
+        "path": ["commands", 0, "stringArgs", 0],
+        "marker": "Message",
+        "wolf_code": "JSON:common/Old.json:[commands,0,stringArgs,0]",
+    }
+    (scripts / "old.txt").write_text(
+        f"@WOLF {wolf._encode_metadata(metadata)}\n#Message#\n旧数据\n##\n",
+        encoding="utf-8",
+    )
+    works = tmp_path / "Works"
+
+    json_creation.run_create_json(str(game_path), str(works), queue.Queue())
+
+    assert not (works / "Game" / "untranslated" / "translation.json").exists()
 
 
 def test_wolf_line_scenario_extracts_only_display_text_and_preserves_prefixes(tmp_path):
@@ -1360,19 +3998,31 @@ def test_wolf_import_writes_loose_data_without_repacking(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     (snapshot_path / "maps" / "a.json").write_text(
-        json.dumps([{"text": "原文です"}], ensure_ascii=False),
+        json.dumps([
+            {"text": "原文です"},
+            {"text": "一\r\n二"},
+        ], ensure_ascii=False),
         encoding="utf-8",
     )
     script = origin_path / "sample.txt"
-    wolf._write_string_script(
-        str(script),
-        [({"kind": "json", "file": "maps/a.json", "path": [0, "text"], "marker": "Message"}, "原文です")],
+    entries = []
+    wolf._add_entry(
+        entries,
+        {"kind": "json", "file": "maps/a.json", "path": [0, "text"], "marker": "Message"},
+        "原文です",
     )
+    wolf._add_entry(
+        entries,
+        {"kind": "json", "file": "maps/a.json", "path": [1, "text"], "marker": "Message"},
+        "一\r\n二",
+    )
+    wolf._write_string_script(str(script), entries)
     shutil.copytree(origin_path, scripts_path)
     translated_script = scripts_path / "sample.txt"
-    translated_script.write_text(
-        translated_script.read_text(encoding="utf-8").replace("原文です", "中文"),
-        encoding="utf-8",
+    translated_script.write_bytes(
+        translated_script.read_bytes().replace(
+            "原文です".encode(), "中文".encode()
+        )
     )
     wolf._write_json_atomic(
         str(state_path / wolf.MANIFEST_FILENAME),
@@ -1386,7 +4036,9 @@ def test_wolf_import_writes_loose_data_without_repacking(tmp_path, monkeypatch):
 
     def fake_apply(_data, json_root, output_data):
         with open(os.path.join(json_root, "maps", "a.json"), encoding="utf-8") as source:
-            translated = json.load(source)[0]["text"]
+            patched = json.load(source)
+        translated = patched[0]["text"]
+        assert patched[1]["text"] == "一\r\n二"
         with open(os.path.join(output_data, "BasicData", "Game.dat"), "w", encoding="utf-8") as output:
             output.write(translated)
 
@@ -1398,7 +4050,10 @@ def test_wolf_import_writes_loose_data_without_repacking(tmp_path, monkeypatch):
         with open(os.path.join(_data, "BasicData", "Game.dat"), encoding="utf-8") as source:
             translated = source.read()
         with open(os.path.join(json_root, "maps", "a.json"), "w", encoding="utf-8") as output:
-            json.dump([{"text": translated}], output, ensure_ascii=False)
+            json.dump([
+                {"text": translated},
+                {"text": "一\r\n二"},
+            ], output, ensure_ascii=False)
 
     monkeypatch.setattr(wolf.uberwolf, "apply_text", fake_apply)
     monkeypatch.setattr(wolf.uberwolf, "dump_text", fake_dump)
@@ -1468,7 +4123,7 @@ def test_wolf_logic_literal_can_also_be_displayed_unchanged(tmp_path):
 
     errors, _warnings, _stats = wolf.validate_translation_release(
         str(game_path),
-        {script_rel: {"タスケテ": {"text": "タスケテ", "status": "success"}}},
+        {script_rel: {"タスケテ": _translated_entry(entries, "タスケテ", "タスケテ")}},
     )
 
     assert errors == []
@@ -1497,7 +4152,7 @@ def test_wolf_release_validation_allows_omitted_logic_files(tmp_path):
 
     errors, _warnings, stats = wolf.validate_translation_release(
         str(game_path),
-        {display_rel: {"表示文": {"text": "显示文本", "status": "success"}}},
+        {display_rel: {"表示文": _translated_entry(display_entries, "表示文", "显示文本")}},
     )
 
     assert errors == []
@@ -1533,7 +4188,9 @@ def test_wolf_identifier_logic_does_not_protect_display_names(tmp_path):
         {
             script_rel: {
                 "ソフィア": {"text": "ソフィア", "status": "success"},
-                "彼女は「ソフィア」です。": {"text": "她是索菲娅。", "status": "success"},
+                "彼女は「ソフィア」です。": _translated_entry(
+                    entries, "彼女は「ソフィア」です。", "她是索菲娅。"
+                ),
             }
         },
     )
@@ -1571,10 +4228,190 @@ def test_wolf_release_validation_accepts_kana_block_punctuation(tmp_path):
 
     errors, _warnings, _stats = wolf.validate_translation_release(
         str(game_path),
-        {script_rel: {"・マラソン大会": {"text": "・马拉松大会", "status": "success"}}},
+        {script_rel: {"・マラソン大会": _translated_entry(entries, "・マラソン大会", "・马拉松大会")}},
     )
 
     assert errors == []
+
+
+def test_wolf_release_validation_rejects_stale_structure_code(tmp_path):
+    game_path = tmp_path / "Game"
+    origin_path = game_path / wolf.STRING_SCRIPTS_ORIGIN_DIRNAME
+    entries = []
+    wolf._add_entry(entries, {"kind": "json", "file": "a.json", "path": [0]}, "表示文")
+    script_path = origin_path / "WOLF" / "Binary" / "a.txt"
+    wolf._write_string_script(str(script_path), entries)
+    script_rel = os.path.relpath(script_path, origin_path)
+
+    errors, _warnings, _stats = wolf.validate_translation_release(
+        str(game_path),
+        {
+            script_rel: {
+                "表示文": {
+                    "text": "显示文本",
+                    "status": "success",
+                    "wolf_export_schema": wolf.WOLF_EXPORT_SCHEMA,
+                    "wolf_codes": ["JSON:a.json:[99]"],
+                }
+            }
+        },
+    )
+
+    assert any("结构 Code 不匹配" in error for error in errors)
+
+
+def test_wolf_release_validation_rejects_stale_export_schema(tmp_path):
+    game_path = tmp_path / "Game"
+    origin_path = game_path / wolf.STRING_SCRIPTS_ORIGIN_DIRNAME
+    entries = []
+    wolf._add_entry(entries, {"kind": "json", "file": "a.json", "path": [0]}, "表示文")
+    script_path = origin_path / "WOLF" / "Binary" / "a.txt"
+    wolf._write_string_script(str(script_path), entries)
+    script_rel = os.path.relpath(script_path, origin_path)
+    translated = _translated_entry(entries, "表示文", "显示文本")
+    translated.pop("wolf_export_schema")
+
+    errors, _warnings, _stats = wolf.validate_translation_release(
+        str(game_path), {script_rel: {"表示文": translated}}
+    )
+
+    assert any("导出版本不匹配" in error for error in errors)
+
+
+def test_wolf_release_validation_rejects_same_type_identifier_collision(tmp_path):
+    game_path = tmp_path / "Game"
+    origin_path = game_path / wolf.STRING_SCRIPTS_ORIGIN_DIRNAME
+    entries = []
+    wolf._add_entry(
+        entries,
+        {
+            "kind": "json",
+            "file": "databases/DataBase.json",
+            "path": ["types", 0, "data", 0, "data", 0, "value"],
+                "marker": "WOLFText",
+                "identifier_namespace": ["database.json", 0],
+                "identifier_collision_policy": "name_referenced",
+                "identifier_translation_policy": "name_closed",
+                "identifier_reference_complete": True,
+                "identifier_references": [],
+                "identifier_missing_names": [],
+        },
+        "ライフル",
+    )
+    wolf._add_entry(
+        entries,
+        {
+            "kind": "json",
+            "file": "databases/DataBase.json",
+            "path": ["types", 0, "data", 1, "data", 0, "value"],
+                "marker": "WOLFText",
+                "identifier_namespace": ["database.json", 0],
+                "identifier_collision_policy": "name_referenced",
+                "identifier_translation_policy": "name_closed",
+                "identifier_reference_complete": True,
+                "identifier_references": [],
+                "identifier_missing_names": [],
+        },
+        "マスケット",
+    )
+    script_path = origin_path / "WOLF" / "Binary" / "database.txt"
+    wolf._write_string_script(str(script_path), entries)
+    script_rel = os.path.relpath(script_path, origin_path)
+
+    errors, _warnings, _stats = wolf.validate_translation_release(
+        str(game_path),
+        {
+            script_rel: {
+                "ライフル": _translated_entry(entries, "ライフル", "步枪"),
+                "マスケット": _translated_entry(entries, "マスケット", "步枪"),
+            }
+        },
+    )
+
+    assert any("数据库译名碰撞" in error for error in errors)
+
+    for metadata, _text in entries:
+        metadata["identifier_collision_policy"] = "numeric_only"
+        metadata["identifier_translation_policy"] = "numeric_only"
+    wolf._write_string_script(str(script_path), entries)
+    errors, warnings, _stats = wolf.validate_translation_release(
+        str(game_path),
+        {
+            script_rel: {
+                "ライフル": _translated_entry(entries, "ライフル", "步枪"),
+                "マスケット": _translated_entry(entries, "マスケット", "步枪"),
+            }
+        },
+    )
+    assert not any("数据库译名碰撞" in error for error in errors)
+    assert any("仅按数字 ID 读取，已允许" in warning for warning in warnings)
+
+
+def test_wolf_identifier_collision_checks_only_reject_new_casefold_groups(tmp_path):
+    game_path = tmp_path / "Game"
+    origin_path = game_path / wolf.STRING_SCRIPTS_ORIGIN_DIRNAME
+    entries = []
+    for index, text in enumerate(("▲END", "▲end")):
+        wolf._add_entry(
+            entries,
+            {
+                "kind": "json",
+                "file": "databases/DataBase.json",
+                "path": ["types", 18, "data", index, "data", 0, "value"],
+                "marker": "WOLFLogic",
+                "identifier_namespace": ["database.json", 18],
+                "identifier_collision_policy": "name_referenced",
+                "identifier_translation_policy": "name_closed",
+                "identifier_reference_complete": False,
+                "identifier_references": [],
+                "identifier_missing_names": [],
+            },
+            text,
+        )
+    script_path = origin_path / "WOLF" / "Logic" / "database.txt"
+    wolf._write_string_script(str(script_path), entries)
+
+    errors, _warnings, _stats = wolf.validate_translation_release(str(game_path), {})
+
+    assert not any("数据库译名碰撞" in error for error in errors)
+
+    original = tmp_path / "original"
+    patched = tmp_path / "patched"
+    (original / "databases").mkdir(parents=True)
+    database = {
+        "types": [{
+            "name": "名称读取",
+            "data": [
+                {"name": "", "data": [{"name": "名称", "value": "▲END"}]},
+                {"name": "", "data": [{"name": "名称", "value": "▲end"}]},
+                {"name": "", "data": [{"name": "名称", "value": "変更前"}]},
+            ],
+        }],
+    }
+    (original / "databases" / "DataBase.json").write_text(
+        json.dumps(database, ensure_ascii=False), encoding="utf-8"
+    )
+    shutil.copytree(original, patched)
+    database["types"][0]["data"][2]["data"][0]["value"] = "変更後"
+    (patched / "databases" / "DataBase.json").write_text(
+        json.dumps(database, ensure_ascii=False), encoding="utf-8"
+    )
+
+    wolf._synchronize_database_identifiers(
+        str(original),
+        str(patched),
+        [
+            (
+                ["database.json", 0],
+                "変更前",
+                "変更後",
+                "name_referenced",
+                [],
+                "name_closed",
+                [],
+            )
+        ],
+    )
 
 
 def test_font_required_characters_waits_for_released_translation(tmp_path):

@@ -26,6 +26,15 @@ def test_validate_translation_json_schema_reports_file_mapping_type_error():
     assert '"原文": { "text": "译文"' in message
 
 
+def test_validate_translation_json_schema_rejects_path_traversal():
+    data = {"../outside.txt": {"原文": {"text": "译文"}}}
+
+    errors = _validate_translation_json_schema(data, '{"../outside.txt": {}}')
+
+    assert len(errors) == 1
+    assert "StringScripts 内相对路径" in errors[0]["message"]
+
+
 def test_validate_translation_json_schema_skips_line_lookup_for_valid_data(monkeypatch):
     def fail_if_called(*args, **kwargs):
         raise AssertionError("valid schema should not search json text for line numbers")
@@ -110,6 +119,47 @@ def test_run_release_json_returns_true_on_success(tmp_path):
     assert (string_scripts_path / "Map001.txt").read_text(encoding="utf-8") == "#Name#\n译文\n"
 
 
+def test_run_release_json_rejects_empty_backup_without_replacing_current(tmp_path):
+    game_path = tmp_path / "Game"
+    backup_path = game_path / "StringScripts_Origin"
+    current_path = game_path / "StringScripts"
+    translated_json_path = tmp_path / "translation_translated.json"
+    backup_path.mkdir(parents=True)
+    current_path.mkdir()
+    (current_path / "keep.txt").write_text("keep", encoding="utf-8")
+    translated_json_path.write_text("{}", encoding="utf-8")
+
+    result = run_release_json(
+        str(game_path), str(tmp_path), str(translated_json_path), queue.Queue()
+    )
+
+    assert result is False
+    assert (current_path / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert not (game_path / "StringScripts.release-staging").exists()
+
+
+def test_run_release_json_recovers_previous_snapshot_before_validation(tmp_path):
+    game_path = tmp_path / "Game"
+    backup_path = game_path / "StringScripts_Origin"
+    previous_path = game_path / "StringScripts.release-previous"
+    translated_json_path = tmp_path / "translation_translated.json"
+    backup_path.mkdir(parents=True)
+    (backup_path / "Map001.txt").write_text("backup", encoding="utf-8")
+    previous_path.mkdir()
+    (previous_path / "keep.txt").write_text("recovered", encoding="utf-8")
+    translated_json_path.write_text("not json", encoding="utf-8")
+
+    result = run_release_json(
+        str(game_path), str(tmp_path), str(translated_json_path), queue.Queue()
+    )
+
+    assert result is False
+    assert (game_path / "StringScripts" / "keep.txt").read_text(
+        encoding="utf-8"
+    ) == "recovered"
+    assert not previous_path.exists()
+
+
 def test_apply_translations_counts_missing_keys(tmp_path):
     script_path = tmp_path / "Map001.txt"
     script_path.write_text("#Message#\n第一行\n第二行\n##\n#Name#\n名字\n", encoding="utf-8")
@@ -118,6 +168,44 @@ def test_apply_translations_counts_missing_keys(tmp_path):
 
     assert (applied, skipped) == (0, 2)
     assert script_path.read_text(encoding="utf-8") == "#Message#\n第一行\n第二行\n##\n#Name#\n名字\n"
+
+
+def test_restore_string_scripts_removes_stale_files(tmp_path):
+    backup = tmp_path / "origin"
+    target = tmp_path / "current"
+    backup.mkdir()
+    target.mkdir()
+    (backup / "current.txt").write_text("current", encoding="utf-8")
+    (target / "stale.txt").write_text("stale", encoding="utf-8")
+
+    count, _workers = json_release._restore_string_scripts_from_backup(
+        str(backup), str(target)
+    )
+
+    assert count == 1
+    assert {path.name for path in target.iterdir()} == {"current.txt"}
+
+
+def test_apply_translations_write_failure_keeps_original(tmp_path, monkeypatch):
+    script_path = tmp_path / "Map001.txt"
+    original = "#Message#\n原文\n##\n"
+    script_path.write_text(original, encoding="utf-8")
+
+    def fail_replace(*_args):
+        raise OSError("locked")
+
+    monkeypatch.setattr(json_release.os, "replace", fail_replace)
+    try:
+        _apply_translations_to_file(
+            str(script_path), {"原文": {"text": "译文"}}
+        )
+    except OSError as error:
+        assert "locked" in str(error)
+    else:
+        raise AssertionError("write failure must propagate")
+
+    assert script_path.read_text(encoding="utf-8") == original
+    assert not (tmp_path / "Map001.txt.tmp").exists()
 
 
 def test_wolf_release_validation_stops_before_restore(tmp_path):

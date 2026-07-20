@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections import deque
 
 from core.external import uberwolf
 from core.utils import control_tokens, file_system, font_coverage, text_processing
@@ -20,6 +21,8 @@ STATE_DIRNAME = ".windy_wolf"
 JSON_SNAPSHOT_DIRNAME = "original_json"
 MANIFEST_FILENAME = "manifest.json"
 DISABLED_ARCHIVES_DIRNAME = "disabled_archives"
+WOLF_EXPORT_SCHEMA = 7
+ANALYSIS_DIAGNOSTICS_FILENAME = "analysis_diagnostics.json"
 FUSION_FONT_FILENAME = "fusion-pixel-12px-proportional-zh_hans.ttf"
 FUSION_FONT_FAMILY = "Fusion Pixel 12px Prop zh_hans"
 TRANSLATION_TRANSPORT_INSTRUCTION = """
@@ -38,6 +41,11 @@ _RESOURCE_RE = re.compile(
     r"(?:^|[/\\])[^\r\n]+\.(?:png|jpe?g|bmp|gif|webp|ogg|mp3|wav|mid|midi|txt|csv|md|dat|mps|sav)$",
     re.IGNORECASE,
 )
+_RESOURCE_DIRECTORY_RE = re.compile(
+    r"(?:^|[/\\_])(?:picture(?:_ui)?|bgm|bgs|sound|se|charachip|mapdata|"
+    r"fog(?:_background)?|battleeffect|face|movie)(?:$|[/\\_])",
+    re.IGNORECASE,
+)
 _TEXT_RESOURCE_EXTENSIONS = {".txt", ".csv", ".md"}
 _SCENE_END_RE = re.compile(r"^\s*---END_SCENE---", re.MULTILINE)
 _SCENE_SEPARATOR_RE = re.compile(r"^\s*---\s*$")
@@ -52,31 +60,40 @@ _WOLF_DIRECTIVE_RE = re.compile(r"^[ \t\u3000]*@\d+[ \t\u3000]*$", re.MULTILINE)
 _WOLF_ALIGNMENT_RE = re.compile(r"<(?:C|L|R)>", re.IGNORECASE)
 _WOLF_EMOTICON_MARKS = frozenset("ゝゞヽヾ")
 _WOLF_EMOTICON_HINTS = frozenset("ωдД▽∀ﾟ・")
-_INTERNAL_DATABASE_FIELD_RE = re.compile(
-    r"(?:識別|识别|ファイル(?:名|パス)?|file\s*path|コモン|"
-    r"アドレス|参照(?:名|先)|読み込み先|読込先|作中には使わない|"
-    r"(?:^|[_#【\s])メモ(?:$|[】\d_\s]))",
+_DISPLAY_STRING_FORMAT_RE = re.compile(
+    r"(?:\\i\[[^\]\r\n]*\]|<GRADY-[^>\r\n]*>\|\$)",
+    re.IGNORECASE,
+)
+_COMMON_EVENT_CALLBACK_FIELD_RE = re.compile(
+    r"(?:コモン|common\s*(?:event|ev)?)", re.IGNORECASE
+)
+_COMMON_EVENT_ARGUMENT_FIELD_RE = re.compile(
+    r"(?:引数|arg(?:ument)?)(.*)", re.IGNORECASE
+)
+_COMMON_EVENT_NUMERIC_ID_FIELD_RE = re.compile(
+    r"(?:コモン.*(?:ID|番号)|common.*id)", re.IGNORECASE
+)
+_COMMON_EVENT_WRAPPER_RES = (
+    re.compile(r"^<動的定義>(.+?)\s*-\s*cmd\[([+-]?\d+)\]$"),
+    re.compile(r"^<コモン内定義:\s*(.+?)\.([+-]?\d+)>$"),
+)
+_COMMON_EVENT_TYPE_REFERENCE_RE = re.compile(
+    r"(?:[（(]\s*)?(UDB|CDB|SDB)\s*(.+?)\s*にて定義(?:\s*[）)])?",
     re.IGNORECASE,
 )
 _SCENARIO_FIELD_RE = re.compile(r"(?:シナリオ|scenario).*(?:id|ＩＤ)?", re.IGNORECASE)
 _MAP_REFERENCE_RE = re.compile(r"(?:^|[/\\])([^/\\\r\n]+)\.mps(?:$|[\r\n])", re.IGNORECASE)
+_MAP_FILE_FIELD_RE = re.compile(r"(?:マップ|map).*(?:ファイル|file)", re.IGNORECASE)
 _DATABASE_JSON_BY_KIND = {
     0: "cdatabase.json",
     1: "sysdatabase.json",
     2: "database.json",
 }
-_DISPLAY_COMMON_EVENT_RE = re.compile(
-    r"(?:文章|メッセージ|ログ|文字|テキスト|tips?|ボタン|説明|攻略|"
-    r"エフェクト|オブジェ生成|おまけ|見る)",
-    re.IGNORECASE,
-)
-_DEVELOPMENT_NAME_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:bk\d*|backup|old|test|sample)(?![A-Za-z0-9])|"
-    r"(?:サンプル|デバッグ|検証用|案\d+$|一時専用)",
-    re.IGNORECASE,
-)
-
-
+_DATABASE_READ_FLAG = 0x00001000
+_DATABASE_TYPE_NAME_FLAG = 0x00010000
+_DATABASE_DATA_NAME_FLAG = 0x00020000
+_DATABASE_FIELD_NAME_FLAG = 0x00040000
+_COMMON_CALL_ALLOWED_FLAGS = 0x0101F1FF
 class WolfEngineError(RuntimeError):
     pass
 
@@ -441,6 +458,21 @@ def _decode_metadata(encoded):
     return json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
 
 
+def _translation_code(metadata):
+    kind = str(metadata.get("kind") or "unknown").upper()
+    relative = str(metadata.get("file") or "")
+    if kind == "JSON":
+        location = metadata.get("path")
+    elif kind == "TXT":
+        location = [metadata.get("start"), metadata.get("end")]
+    elif kind == "CSV":
+        location = [metadata.get("row"), metadata.get("column")]
+    else:
+        location = None
+    encoded_location = json.dumps(location, ensure_ascii=False, separators=(",", ":"))
+    return f"{kind}:{relative}:{encoded_location}"
+
+
 def _split_text_format(text):
     newline = "\r\n" if "\r\n" in text else ("\r" if "\r" in text else "\n")
     suffix = ""
@@ -470,37 +502,30 @@ def _looks_like_resource(text):
     )
 
 
-def _database_field_marker(field_name):
-    if isinstance(field_name, str) and _INTERNAL_DATABASE_FIELD_RE.search(field_name):
-        return "WOLFLogic"
-    return "WOLFText"
-
-
 def _is_explicit_internal_database_text(value):
-    return isinstance(value, str) and (
-        value.lstrip().startswith("#")
-        or _DEVELOPMENT_NAME_RE.search(value)
-    )
+    return isinstance(value, str) and value.lstrip().startswith("#")
 
 
-def _common_event_displays_text(name):
-    return isinstance(name, str) and bool(_DISPLAY_COMMON_EVENT_RE.search(name))
-
-
-def _add_entry(entries, metadata, text):
-    if not isinstance(text, str) or not text.strip() or _looks_like_resource(text):
+def _add_entry(entries, metadata, text, protect_resource=False):
+    if not isinstance(text, str) or not text.strip():
         return
+    metadata = dict(metadata)
+    if _looks_like_resource(text):
+        if not protect_resource:
+            return
+        metadata["marker"] = "WOLFLogic"
+        metadata["logic_role"] = "resource"
     core, newline, suffix = _split_text_format(text)
     # ponytail: StringScripts uses ## as a block terminator; a sidecar format is the upgrade path.
     if any(line.strip() == "##" for line in core.splitlines()):
         raise WolfEngineError("WOLF 文本包含独立的 ## 行，无法安全写入 StringScripts")
-    metadata = dict(metadata)
+    metadata.setdefault("wolf_code", _translation_code(metadata))
     metadata["newline"] = newline
     metadata["suffix"] = suffix
     entries.append((metadata, core))
 
 
-def _command_entries(command, base_path, entries, json_rel, usage=None):
+def _command_entries(command, base_path, entries, json_rel, usage=None, owner_event_id=None):
     try:
         code = int(command.get("code", -1))
     except (TypeError, ValueError):
@@ -510,6 +535,13 @@ def _command_entries(command, base_path, entries, json_rel, usage=None):
         return
     marker = "Message"
     indexes = range(len(string_args))
+    call_argument_roles = {}
+    call_return_roles = set()
+    reachable_paths = usage.get("reachable_command_paths") if usage else None
+    command_reachable = (
+        not isinstance(reachable_paths, set)
+        or (json_rel, tuple(base_path)) in reachable_paths
+    )
     if code == 112:
         marker = "WOLFLogic"
     elif code == 150:
@@ -517,21 +549,78 @@ def _command_entries(command, base_path, entries, json_rel, usage=None):
         if not int_args or ((int(int_args[0]) >> 4) & 0x07) != 2:
             return
         marker = "StringPicture"
-    elif code == 300:
-        # ponytail: WOLF's dump has no common-event argument schema. This conservative
-        # sentence heuristic skips identifier-like arguments; expose argument roles in
-        # WolfRPGText before translating every code-300 parameter.
-        display_event = bool(string_args) and _common_event_displays_text(string_args[0])
-        indexes = [
-            index for index, text in enumerate(string_args[1:], start=1)
-            if display_event or _looks_like_display_parameter(text)
-        ]
+    elif code in (210, 300):
+        call = _decode_common_call(command, current_event_id=owner_event_id)
+        call_roles = None
+        if call and usage and call["target_key"] is not None:
+            role_index = (
+                usage.get("common_event_roles_by_name", {})
+                if code == 300
+                else usage.get("common_event_roles_by_id", {})
+            )
+            call_roles = role_index.get(call["target_key"])
+            return_index = (
+                usage.get("common_event_return_roles_by_name", {})
+                if code == 300
+                else usage.get("common_event_return_roles_by_id", {})
+            )
+            call_return_roles = set(return_index.get(call["target_key"], set()))
+            context_index = (
+                usage.get("common_event_contexts_by_name", {})
+                if code == 300
+                else usage.get("common_event_contexts_by_id", {})
+            )
+            context = context_index.get(call["target_key"])
+            if context and context["slot"] < len(call["numeric_inputs"]):
+                value = _common_dispatch_context(
+                    context["roles"], call["numeric_inputs"][context["slot"]]
+                )
+                if value in context["roles"]:
+                    call_roles = context["roles"][value]
+                    call_return_roles = set(context["return_roles"][value])
+        if call:
+            command_key = (json_rel, tuple(base_path))
+            if usage and command_key in usage.get("reachable_call_return_roles", {}):
+                call_return_roles = set(
+                    usage["reachable_call_return_roles"][command_key]
+                )
+            indexes = []
+            for slot, source_kind, _source in call["string_inputs"]:
+                if source_kind != "literal":
+                    continue
+                index = 1 + slot - 5
+                indexes.append(index)
+                argument_key = (json_rel, tuple(base_path), index)
+                call_argument_roles[index] = (
+                    usage["reachable_call_argument_roles"][argument_key]
+                    if usage
+                    and argument_key in usage.get("reachable_call_argument_roles", {})
+                    else (call_roles or {}).get(slot, set())
+                )
+        else:
+            indexes = range(1, len(string_args))
     elif code not in _NORMAL_COMMAND_CODES:
         return
 
     for index in indexes:
         text = string_args[index]
         entry_marker = marker
+        if code in (210, 300):
+            role = set(call_argument_roles.get(index, set()))
+            if (
+                "return" in role
+                and call
+                and _string_variable_token(call["output"])
+            ):
+                role.update(call_return_roles)
+            entry_marker = (
+                "WOLFText"
+                if "display" in role
+                and not ({"logic", "opaque", "unknown"} & set(role))
+                else "WOLFLogic"
+            )
+        if not command_reachable:
+            entry_marker = "WOLFLogic"
         if (
             code == 122
             and usage
@@ -547,24 +636,22 @@ def _command_entries(command, base_path, entries, json_rel, usage=None):
                 "kind": "json",
                 "file": json_rel,
                 "path": [*base_path, "stringArgs", index],
-                "marker": "WOLFText" if code == 300 else entry_marker,
+                "marker": entry_marker,
                 **(
-                    {"logic_role": "comparison"}
+                    {
+                        "logic_role": (
+                            "unreachable"
+                            if not command_reachable
+                            else "comparison" if code in (112, 122) else "call_argument"
+                        )
+                    }
                     if entry_marker == "WOLFLogic"
                     else {}
                 ),
             },
             text,
+            protect_resource=True,
         )
-
-
-def _looks_like_display_parameter(text):
-    if not isinstance(text, str) or not text.strip() or _looks_like_resource(text):
-        return False
-    stripped = text.strip()
-    if "\n" in stripped or "\r" in stripped:
-        return True
-    return bool(re.search(r"(?:[。！？…]|・・・|ました|ません|ください|下さい|です|ます)$", stripped))
 
 
 def _looks_like_logic_assignment(text):
@@ -592,83 +679,1498 @@ def _string_variable_token(variable_id):
     return None
 
 
-def _database_read(command, schemas=None):
+def _database_field_access_descriptor(command, schemas=None, read=True):
     try:
         code = int(command.get("code", -1))
         int_args = command.get("intArgs") or []
         string_args = command.get("stringArgs") or []
         if code != 250 or len(int_args) < 5 or len(string_args) < 4:
             return None
-        database_name = _DATABASE_JSON_BY_KIND.get((int(int_args[3]) >> 8) & 0x0F)
+        flags = int(int_args[3])
+        if bool(flags & _DATABASE_READ_FLAG) != read:
+            return None
+        if (
+            not flags & _DATABASE_DATA_NAME_FLAG
+            and int(int_args[1]) in (0xFFFFFFFF, 0xFFFFFFFE)
+        ):
+            return None
+        database_name = _DATABASE_JSON_BY_KIND.get((flags >> 8) & 0x0F)
         schema = (schemas or {}).get(database_name, {})
         type_name = string_args[1].strip() if isinstance(string_args[1], str) else ""
-        type_index = schema.get("types", {}).get(type_name.casefold(), int(int_args[0]))
+        type_index = (
+            schema.get("types", {}).get(type_name.casefold())
+            if flags & _DATABASE_TYPE_NAME_FLAG
+            else int(int_args[0])
+        )
         field_name = string_args[3].strip() if isinstance(string_args[3], str) else ""
         field_index = (
-            schema.get("fields", {}).get(type_index, {}).get(field_name.casefold(), int(int_args[2]))
-            if field_name
+            schema.get("fields", {}).get(type_index, {}).get(field_name.casefold())
+            if flags & _DATABASE_FIELD_NAME_FLAG
             else int(int_args[2])
         )
         destination = int(int_args[4])
     except (TypeError, ValueError, IndexError):
         return None
-    if database_name is None or type_index < 0 or field_index < 0:
+    if database_name is None or type_index is None or field_index is None:
+        return None
+    if type_index < 0 or field_index < 0:
         return None
     if schema and (
         type_index not in schema.get("fields", {})
         or field_index not in schema["fields"][type_index].values()
     ):
         return None
+    return (database_name, type_index, field_index), destination
+
+
+def _database_read_descriptor(command, schemas=None):
+    return _database_field_access_descriptor(command, schemas, read=True)
+
+
+def _database_read(command, schemas=None):
+    descriptor = _database_read_descriptor(command, schemas)
+    if descriptor is None:
+        return None
+    key, destination = descriptor
     token = _string_variable_token(destination)
     if token is None:
         return None
-    return (database_name, type_index, field_index), destination, token
+    return key, destination, token
 
 
-def _command_overwrites_string(command, destination, token):
+def _database_write(command, schemas=None):
+    descriptor = _database_field_access_descriptor(command, schemas, read=False)
+    if descriptor is None:
+        return None
+    key, source = descriptor
+    token = _string_variable_token(source)
+    if token is None:
+        return None
     try:
-        code = int(command.get("code", -1))
         int_args = command.get("intArgs") or []
-    except (TypeError, ValueError):
-        return False
-    if code not in (122, 250) or not int_args:
-        return False
-    try:
-        target = int(int_args[4] if code == 250 and len(int_args) >= 5 else int_args[0])
+        flags = int(int_args[3])
+        data_index = int(int_args[1])
     except (TypeError, ValueError, IndexError):
+        data_index = -1
+        flags = _DATABASE_DATA_NAME_FLAG
+    target = (
+        (*key[:2], data_index, key[2])
+        if not flags & _DATABASE_DATA_NAME_FLAG and 0 <= data_index < 1_000_000
+        else key
+    )
+    return target, source, token
+
+
+def _database_target_is_displayed(usage, target):
+    return target in usage[
+        "display_database_records"
+        if len(target) == 4
+        else "display_database_fields"
+    ]
+
+
+def _database_read_record_indexes(command, schemas, record_indexes, record_counts):
+    target = _database_target(command, schemas)
+    if target is None:
+        return None
+    try:
+        int_args = command.get("intArgs") or []
+        string_args = command.get("stringArgs") or []
+        flags = int(int_args[3])
+        namespace = target[:2]
+        if flags & _DATABASE_DATA_NAME_FLAG:
+            selector = string_args[2].strip().casefold()
+            indexes = record_indexes.get(namespace, {}).get(selector)
+            return tuple(sorted(indexes)) if indexes else None
+        selector = int(int_args[1])
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return None
+    count = record_counts.get(namespace, 0)
+    return (selector,) if 0 <= selector < count else None
+
+
+def _database_target(command, schemas=None):
+    try:
+        if int(command.get("code", -1)) != 250:
+            return None
+        int_args = command.get("intArgs") or []
+        string_args = command.get("stringArgs") or []
+        if len(int_args) < 4 or len(string_args) < 3:
+            return None
+        flags = int(int_args[3])
+        database_name = _DATABASE_JSON_BY_KIND.get((flags >> 8) & 0x0F)
+        schema = (schemas or {}).get(database_name, {})
+        type_name = string_args[1].strip() if isinstance(string_args[1], str) else ""
+        type_index = (
+            schema.get("types", {}).get(type_name.casefold())
+            if flags & _DATABASE_TYPE_NAME_FLAG
+            else int(int_args[0])
+        )
+        datum_name = (
+            string_args[2].strip()
+            if flags & _DATABASE_DATA_NAME_FLAG and isinstance(string_args[2], str)
+            else ""
+        )
+    except (TypeError, ValueError, IndexError):
+        return None
+    if database_name is None or type_index is None or type_index < 0:
+        return None
+    return database_name, type_index, datum_name
+
+
+def _database_schema_field_is_resource(field):
+    if not isinstance(field, dict):
         return False
-    if target != destination:
-        return False
-    return not any(
-        isinstance(text, str) and token in text
-        for text in (command.get("stringArgs") or [])
+    return any(
+        isinstance(argument, str) and bool(_RESOURCE_DIRECTORY_RE.search(argument.strip()))
+        for argument in (field.get("stringArgs") or [])
     )
 
 
-def _command_uses_database_selector(command, variable_id):
+def _command_uses_string_variable(command, destination, token):
+    strings = command.get("stringArgs") or []
+    if any(isinstance(text, str) and token in text for text in strings):
+        return True
     try:
-        if int(command.get("code", -1)) != 250:
+        code = int(command.get("code", -1))
+        int_args = command.get("intArgs") or []
+        if code in (112, 122):
+            inputs = int_args[1:]
+        else:
             return False
-        selectors = command.get("intArgs") or []
-        return any(int(value) == variable_id for value in selectors[:3])
+        return any(int(value) == destination for value in inputs)
     except (TypeError, ValueError):
         return False
 
 
-def _analyze_json_usage(json_root):
+def _command_string_destination(command):
+    try:
+        code = int(command.get("code", -1))
+        int_args = command.get("intArgs") or []
+        if code == 122:
+            destination = int(int_args[0])
+        elif code == 250:
+            flags = int(int_args[3])
+            if len(int_args) < 5 or not flags & _DATABASE_READ_FLAG:
+                return None
+            destination = int(int_args[4])
+        elif code in (210, 300):
+            call = _decode_common_call(command)
+            if not call or call["output"] is None:
+                return None
+            destination = call["output"]
+        else:
+            return None
+    except (TypeError, ValueError, IndexError):
+        return None
+    return destination if _string_variable_token(destination) else None
+
+
+def _decode_common_call(
+    command,
+    common_events_by_id=None,
+    common_events_by_name=None,
+    current_event_id=None,
+):
+    common_events_by_id = common_events_by_id or {}
+    common_events_by_name = common_events_by_name or {}
+    try:
+        code = int(command.get("code", -1))
+        if code not in (210, 300):
+            return None
+        int_args = [int(value) for value in (command.get("intArgs") or [])]
+        strings = command.get("stringArgs") or []
+        if len(int_args) < 2:
+            return None
+        encoded_target, flags = int_args[:2]
+        numeric_count = flags & 0x0F
+        string_count = (flags >> 4) & 0x0F
+        literal_mask = (flags >> 12) & 0x03FF
+        has_output = bool(flags & 0x01000000)
+    except (TypeError, ValueError):
+        return None
+    if (
+        flags & ~_COMMON_CALL_ALLOWED_FLAGS
+        or numeric_count > 5
+        or string_count > 5
+        or literal_mask >> string_count
+        or len(int_args) != 2 + numeric_count + string_count + int(has_output)
+    ):
+        return None
+    values = int_args[2:2 + numeric_count + string_count]
+    event = None
+    target_expression = ""
+    target_key = None
+    if code == 300:
+        target_expression = strings[0] if strings and isinstance(strings[0], str) else ""
+        if not flags & 0x0100 and target_expression:
+            target_key = target_expression.strip().casefold()
+            event = common_events_by_name.get(target_key)
+    elif 500_000 <= encoded_target < 600_000:
+        target_key = encoded_target - 500_000
+        event = common_events_by_id.get(target_key)
+    elif encoded_target == 600_100 and current_event_id is not None:
+        target_key = current_event_id
+        event = common_events_by_id.get(target_key)
+    slots = []
+    for offset in range(string_count):
+        if literal_mask & (1 << offset):
+            string_index = 1 + offset
+            if string_index >= len(strings) or not isinstance(strings[string_index], str):
+                return None
+            slots.append((offset + 5, "literal", strings[string_index]))
+        else:
+            slots.append((offset + 5, "variable", values[numeric_count + offset]))
+    return {
+        "code": code,
+        "event": event,
+        "target_key": target_key,
+        "target_expression": target_expression,
+        "numeric_inputs": tuple(values[:numeric_count]),
+        "string_inputs": tuple(slots),
+        "output": int_args[-1] if has_output else None,
+    }
+
+
+def _string_condition_is_presence_check(command, variable_id):
+    try:
+        if int(command.get("code", -1)) != 112:
+            return False
+        if any(str(value) for value in (command.get("stringArgs") or [])):
+            return False
+        variables = {
+            int(value)
+            for value in (command.get("intArgs") or [])[1:]
+            if _string_variable_token(value)
+        }
+    except (TypeError, ValueError):
+        return False
+    return variables == {variable_id}
+
+
+def _dynamic_jump_dispatches(commands, labels):
+    dispatches = {}
+    for jump_index, command in enumerate(commands):
+        try:
+            if int(command.get("code", -1)) != 213:
+                continue
+        except (TypeError, ValueError):
+            continue
+        strings = command.get("stringArgs") or []
+        target = strings[0] if strings and isinstance(strings[0], str) else ""
+        variable_match = re.fullmatch(r"\\s\[(\d+)\]", target)
+        if not variable_match:
+            continue
+        destination = 3_000_000 + int(variable_match.group(1))
+        if jump_index == 0:
+            continue
+        assignment_index = jump_index - 1
+        while assignment_index >= 0:
+            try:
+                if int(commands[assignment_index].get("code", -1)) not in (0, 99, 103):
+                    break
+            except (TypeError, ValueError):
+                break
+            assignment_index -= 1
+        if assignment_index < 0:
+            continue
+        assignment = commands[assignment_index]
+        try:
+            int_args = assignment.get("intArgs") or []
+            if (
+                int(assignment.get("code", -1)) != 122
+                or len(int_args) < 2
+                or int(int_args[0]) != destination
+                or int(int_args[1]) != 0
+            ):
+                continue
+        except (TypeError, ValueError):
+            continue
+        templates = assignment.get("stringArgs") or []
+        template = templates[0] if templates and isinstance(templates[0], str) else ""
+        argument_match = re.fullmatch(r"(.*)\\cself\[(\d+)\](.*)", template)
+        if not argument_match:
+            continue
+        prefix, slot, suffix = argument_match.groups()
+        pattern = re.compile(
+            rf"{re.escape(prefix)}([+-]?\d+){re.escape(suffix)}"
+        )
+        targets = {}
+        for label, label_index in labels.items():
+            label_match = pattern.fullmatch(label)
+            if label_match:
+                targets[int(label_match.group(1))] = label_index
+        if targets:
+            dispatches[jump_index] = (int(slot), targets)
+    return dispatches
+
+
+def _command_successors(commands, numeric_arguments=None):
+    if not all(isinstance(command, dict) for command in commands):
+        raise WolfEngineError("WOLF 命令控制流结构无效")
+    count = len(commands)
+    successors = [tuple([index + 1]) if index + 1 < count else tuple() for index in range(count)]
+    if not all("indent" in command and "index" in command for command in commands):
+        raise WolfEngineError("WOLF 命令缺少控制流元数据；请用当前版本重新导出翻译文本")
+    try:
+        indexes = [int(command["index"]) for command in commands]
+        codes = [int(command.get("code", -1)) for command in commands]
+        indents = [int(command["indent"]) for command in commands]
+    except (TypeError, ValueError) as error:
+        raise WolfEngineError("WOLF 命令控制流元数据无效；请重新导出翻译文本") from error
+    if indexes != list(range(count)):
+        raise WolfEngineError("WOLF 命令结构不完整；请用当前版本重新导出翻译文本")
+
+    labels = {}
+    for index, command in enumerate(commands):
+        if codes[index] != 212:
+            continue
+        strings = command.get("stringArgs") or []
+        if strings and isinstance(strings[0], str):
+            labels.setdefault(strings[0], index)
+    dynamic_dispatches = _dynamic_jump_dispatches(commands, labels)
+
+    for index, command in enumerate(commands):
+        code = codes[index]
+        if code == 213:
+            strings = command.get("stringArgs") or []
+            target = strings[0] if strings and isinstance(strings[0], str) else ""
+            label_index = labels.get(target)
+            if label_index is not None:
+                successors[index] = (label_index,)
+            elif target.strip().upper() == "END":
+                successors[index] = tuple()
+            elif index in dynamic_dispatches:
+                _slot, targets = dynamic_dispatches[index]
+                successors[index] = tuple(sorted({
+                    *targets.values(), *successors[index]
+                }))
+            elif re.fullmatch(r"\\(?:s|cself)\[\d+\]", target):
+                successors[index] = tuple(sorted({*labels.values(), *successors[index]}))
+        elif code in (172, 174, 175):
+            successors[index] = tuple()
+
+    case_codes = {401, 402, 420, 421}
+    case_exits = []
+    numeric_branches = []
+    for index, command in enumerate(commands):
+        code = codes[index]
+        indent = indents[index]
+        if code not in (102, 111, 112):
+            continue
+        branch_end = next(
+            (
+                candidate
+                for candidate in range(index + 1, count)
+                if codes[candidate] == 499 and indents[candidate] == indent
+            ),
+            None,
+        )
+        if branch_end is None:
+            continue
+        cases = [
+            candidate
+            for candidate in range(index + 1, branch_end)
+            if codes[candidate] in case_codes and indents[candidate] == indent
+        ]
+        if not cases:
+            continue
+        after_branch = branch_end + 1
+        branch_targets = list(cases)
+        if not any(codes[candidate] in (420, 421) for candidate in cases):
+            if after_branch < count:
+                branch_targets.append(after_branch)
+        successors[index] = tuple(branch_targets)
+        numeric_branches.append((index, cases, after_branch))
+        boundaries = [*cases[1:], branch_end]
+        for case_index, boundary in zip(cases, boundaries):
+            body_start = case_index + 1
+            if body_start >= boundary:
+                successors[case_index] = (
+                    (after_branch,) if after_branch < count else tuple()
+                )
+                continue
+            successors[case_index] = (body_start,)
+            case_exits.append((body_start, boundary, after_branch))
+
+    loop_headers = {}
+    for index, code in enumerate(codes):
+        if code not in (170, 179):
+            continue
+        indent = indents[index]
+        loop_end = next(
+            (
+                candidate
+                for candidate in range(index + 1, count)
+                if codes[candidate] == 498 and indents[candidate] == indent
+            ),
+            None,
+        )
+        if loop_end is None:
+            raise WolfEngineError("WOLF 循环缺少结束命令；请重新导出翻译文本")
+        loop_headers[index] = loop_end
+        targets = [index + 1] if index + 1 < count else []
+        if code == 179 and loop_end + 1 < count:
+            targets.append(loop_end + 1)
+        successors[index] = tuple(targets)
+        successors[loop_end] = tuple(targets)
+
+    for index, code in enumerate(codes):
+        if code not in (171, 176):
+            continue
+        indent = indents[index]
+        enclosing = [
+            (header, loop_end)
+            for header, loop_end in loop_headers.items()
+            if header < index < loop_end
+            and indents[header] < indent
+        ]
+        if not enclosing:
+            raise WolfEngineError("WOLF 循环控制命令缺少所属循环；请重新导出翻译文本")
+        _header, loop_end = max(enclosing)
+        target = loop_end + 1 if code == 171 else loop_end
+        successors[index] = (target,) if target < count else tuple()
+
+    for source, targets in enumerate(successors):
+        normalized = []
+        for target in targets:
+            while True:
+                replacement = next(
+                    (
+                        after_branch
+                        for body_start, boundary, after_branch in case_exits
+                        if body_start <= source < boundary and target == boundary
+                    ),
+                    None,
+                )
+                if replacement is None:
+                    break
+                target = replacement
+            if target < count and target not in normalized:
+                normalized.append(target)
+        successors[source] = tuple(normalized)
+
+    if isinstance(numeric_arguments, dict):
+        initial_values = {
+            1_600_000 + int(slot): value
+            for slot, value in numeric_arguments.items()
+            if isinstance(slot, int) and isinstance(value, int)
+        }
+        while True:
+            numeric_values = _numeric_values_by_command(
+                commands, successors, initial_values
+            )
+            changed = False
+            for branch_index, cases, after_branch in numeric_branches:
+                if len(successors[branch_index]) <= 1:
+                    continue
+                int_args = commands[branch_index].get("intArgs") or []
+                if (
+                    codes[branch_index] != 111
+                    or len(cases) != 1
+                    or codes[cases[0]] != 401
+                    or len(int_args) < 4
+                ):
+                    continue
+                try:
+                    condition_count = int(int_args[0])
+                    variable = int(int_args[1])
+                    operator = int(int_args[2])
+                    operand = int(int_args[3])
+                except (TypeError, ValueError):
+                    continue
+                value = numeric_values[branch_index].get(variable)
+                if condition_count != 1 or operator != 0 or value is None:
+                    continue
+                target = cases[0] if value == operand else after_branch
+                selected = (target,) if target < count else tuple()
+                if successors[branch_index] != selected:
+                    successors[branch_index] = selected
+                    changed = True
+            if not changed:
+                break
+
+        numeric_values = _numeric_values_by_command(
+            commands, successors, initial_values
+        )
+        for index, (slot, targets) in dynamic_dispatches.items():
+            selected = targets.get(
+                numeric_values[index].get(1_600_000 + slot)
+            )
+            if selected is not None:
+                successors[index] = (selected,)
+    return successors
+
+
+def _common_dispatch_context(contexts, value):
+    if not isinstance(value, int):
+        return None
+    if 0x80000000 <= value <= 0xFFFFFFFF:
+        value -= 0x100000000
+    return (
+        value
+        if abs(value) < 1_000_000 and value in contexts
+        else None
+    )
+
+
+def _common_context_numeric_values(event, context):
+    slot = event.get("dispatch_slot") if event else None
+    return (
+        {1_600_000 + slot: context}
+        if isinstance(slot, int) and isinstance(context, int)
+        else {}
+    )
+
+
+def _numeric_command_destination(command):
+    try:
+        code = int(command.get("code", -1))
+        int_args = command.get("intArgs") or []
+        if code in (121, 123, 124, 125):
+            return int(int_args[0])
+        if code == 250:
+            return int(int_args[4])
+        if code in (210, 211, 300) and int(int_args[1]) & 0x01000000:
+            return int(int_args[-1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _numeric_values_by_command(commands, successors, initial_values=None):
+    if not commands:
+        return []
+    incoming = [None] * len(commands)
+    incoming[0] = dict(initial_values or {})
+    queue = deque([0])
+    while queue:
+        index = queue.popleft()
+        outgoing = dict(incoming[index])
+        command = commands[index]
+        try:
+            code = int(command.get("code", -1))
+            int_args = command.get("intArgs") or []
+        except (TypeError, ValueError, IndexError):
+            code = -1
+            int_args = []
+        destination = _numeric_command_destination(command)
+        if (
+            destination is not None
+            and code == 121
+            and len(int_args) >= 4
+            and int(int_args[2]) == 0
+            and int(int_args[3]) == 0
+        ):
+            outgoing[destination] = int(int_args[1])
+        elif destination is not None:
+            outgoing.pop(destination, None)
+        for successor in successors[index]:
+            previous = incoming[successor]
+            merged = (
+                outgoing
+                if previous is None
+                else {
+                    key: value
+                    for key, value in previous.items()
+                    if outgoing.get(key) == value
+                }
+            )
+            if merged != previous:
+                incoming[successor] = dict(merged)
+                queue.append(successor)
+    return [values or {} for values in incoming]
+
+
+def _common_call_role_key(call, numeric_values=None):
+    event = call.get("event") if call else None
+    if not event:
+        return None
+    slot = event.get("dispatch_slot")
+    contexts = event.get("dispatch_contexts", {})
+    if isinstance(slot, int) and slot < len(call["numeric_inputs"]):
+        raw_value = call["numeric_inputs"][slot]
+        value = _common_dispatch_context(
+            contexts, (numeric_values or {}).get(raw_value, raw_value)
+        )
+        if value in contexts:
+            return event["id"], value
+    return event["id"], None
+
+
+def _reachable_command_indexes(commands, successors):
+    if not commands:
+        return set()
+    reachable = set()
+    queue = deque([0])
+    while queue:
+        index = queue.popleft()
+        if index in reachable:
+            continue
+        reachable.add(index)
+        queue.extend(successors[index])
+    return reachable
+
+
+def _trace_string_variable_usage(
+    commands,
+    start_index,
+    destination,
+    schemas,
+    common_events_by_id,
+    common_events_by_name,
+    common_event_roles,
+    successors,
+    current_event_id=None,
+    current_context=None,
+    numeric_values_by_command=None,
+):
+    if not commands:
+        return {
+            "display": False,
+            "logic": False,
+            "dynamic_target": False,
+            "opaque": False,
+            "unknown": False,
+            "return": False,
+            "logic_codes": set(),
+            "selector_targets": set(),
+            "database_writes": set(),
+        }
+    incoming = [set() for _ in commands]
+    queue = deque()
+    starts = (0,) if start_index is None else successors[start_index]
+    for successor in starts:
+        incoming[successor].add(destination)
+        queue.append(successor)
+
+    display_use = False
+    logic_use = False
+    dynamic_target_use = False
+    opaque_use = False
+    unknown_use = False
+    return_use = False
+    logic_codes = set()
+    selector_targets = set()
+    database_writes = set()
+    if numeric_values_by_command is None:
+        numeric_values_by_command = _numeric_values_by_command(
+            commands,
+            successors,
+            _common_context_numeric_values(
+                common_events_by_id.get(current_event_id), current_context
+            ),
+        )
+    while queue:
+        index = queue.popleft()
+        command = commands[index]
+        active = incoming[index]
+        if not active:
+            continue
+        try:
+            code = int(command.get("code", -1))
+        except (TypeError, ValueError):
+            code = -1
+        call = (
+            _decode_common_call(
+                command,
+                common_events_by_id,
+                common_events_by_name,
+                current_event_id,
+            )
+            if code in (210, 300)
+            else None
+        )
+        call_event = call["event"] if call else None
+        call_output = (
+            call["output"]
+            if call and _string_variable_token(call["output"])
+            else None
+        )
+        call_returns = set()
+        used = set()
+        if code in (210, 300):
+            strings = command.get("stringArgs") or []
+            for variable in active:
+                token = _string_variable_token(variable)
+                target_use = bool(
+                    call and token and token in call["target_expression"]
+                )
+                if target_use:
+                    used.add(variable)
+                    logic_use = True
+                    dynamic_target_use = True
+                    logic_codes.add(code)
+                    continue
+                if call is None:
+                    try:
+                        raw_values = (command.get("intArgs") or [])[2:]
+                    except TypeError:
+                        raw_values = []
+                    if variable in raw_values or any(token and token in str(value) for value in strings[1:]):
+                        used.add(variable)
+                        opaque_use = True
+                    continue
+                if variable in call["numeric_inputs"]:
+                    used.add(variable)
+                    logic_use = True
+                    logic_codes.add(code)
+                for slot, source_kind, source in call["string_inputs"]:
+                    matches = (
+                        source == variable
+                        if source_kind == "variable"
+                        else bool(token and token in source)
+                    )
+                    if not matches:
+                        continue
+                    used.add(variable)
+                    if call_event is None:
+                        opaque_use = True
+                        continue
+                    role = common_event_roles.get(
+                        _common_call_role_key(
+                            call, numeric_values_by_command[index]
+                        ), {}
+                    ).get(slot, set())
+                    display_use = display_use or "display" in role
+                    dynamic_target_use = (
+                        dynamic_target_use or "dynamic_target" in role
+                    )
+                    database_writes.update(
+                        item[1:]
+                        for item in role
+                        if isinstance(item, tuple)
+                        and len(item) in (4, 5)
+                        and item[0] == "database_write"
+                    )
+                    if "logic" in role:
+                        logic_use = True
+                        logic_codes.add(code)
+                    opaque_use = opaque_use or "opaque" in role
+                    unknown_use = unknown_use or "unknown" in role
+                    if "return" in role and call_output is not None:
+                        call_returns.add(variable)
+        else:
+            used = {
+                variable
+                for variable in active
+                if _command_uses_string_variable(
+                    command, variable, _string_variable_token(variable)
+                )
+            }
+        database_write = _database_write(command, schemas)
+        if (
+            database_write is not None
+            and database_write[1] in active
+        ):
+            used.add(database_write[1])
+            database_writes.add(database_write[0])
+        selector_variables = {
+            variable
+            for variable in active
+            if _command_database_selector_role(command, variable)
+        }
+        if selector_variables:
+            logic_use = True
+            target = _database_target(command, schemas)
+            if target and target[1] is not None:
+                selector_targets.add(target[:2])
+
+        if used:
+            unsafe_conditions = {
+                variable
+                for variable in used
+                if not _string_condition_is_presence_check(command, variable)
+            }
+            if code in (112, 140, 213) and unsafe_conditions:
+                logic_use = True
+                logic_codes.add(code)
+            elif code in (101, 102):
+                display_use = True
+            elif code == 150:
+                int_args = command.get("intArgs") or []
+                try:
+                    picture_type = (int(int_args[0]) >> 4) & 0x07
+                except (TypeError, ValueError, IndexError):
+                    picture_type = -1
+                if picture_type == 2:
+                    display_use = True
+                else:
+                    unknown_use = True
+            elif code == 122 and any(
+                isinstance(value, str) and _looks_like_logic_assignment(value)
+                for value in (command.get("stringArgs") or [])
+            ):
+                logic_use = True
+                logic_codes.add(code)
+            elif code == 122 and any(
+                isinstance(value, str) and _DISPLAY_STRING_FORMAT_RE.search(value)
+                for value in (command.get("stringArgs") or [])
+            ):
+                display_use = True
+            elif code == 250 and database_write is not None:
+                pass
+            elif code not in (103, 106, 112, 122, 210, 300):
+                unknown_use = True
+
+        outgoing = set(active)
+        target = _command_string_destination(command)
+        if code == 122 and target is not None:
+            outgoing.discard(target)
+            if used:
+                outgoing.add(target)
+        elif code == 250 and target is not None:
+            outgoing.discard(target)
+        elif code in (210, 300) and call_output is not None:
+            outgoing.discard(call_output)
+            if call_returns:
+                outgoing.add(call_output)
+
+        if not successors[index] and 1_600_005 in outgoing:
+            strings = command.get("stringArgs") or []
+            jump_target = strings[0] if code == 213 and strings else ""
+            if code != 213 or str(jump_target).strip().upper() == "END":
+                return_use = True
+        for successor in successors[index]:
+            merged = incoming[successor] | outgoing
+            if merged != incoming[successor]:
+                incoming[successor] = merged
+                queue.append(successor)
+
+    return {
+        "display": display_use,
+        "logic": logic_use,
+        "dynamic_target": dynamic_target_use,
+        "opaque": opaque_use,
+        "unknown": unknown_use,
+        "return": return_use,
+        "logic_codes": logic_codes,
+        "selector_targets": selector_targets,
+        "database_writes": database_writes,
+    }
+
+
+def _summarize_common_event_string_roles(
+    common_events,
+    schemas,
+    common_events_by_id,
+    common_events_by_name,
+):
+    roles = {}
+    for event in common_events:
+        roles[(event["id"], None)] = {slot: set() for slot in range(5, 10)}
+        for context in event.get("dispatch_contexts", {}):
+            roles[(event["id"], context)] = {slot: set() for slot in range(5, 10)}
+    changed = True
+    while changed:
+        changed = False
+        for event in common_events:
+            contexts = [(None, event["successors"]), *event.get("dispatch_contexts", {}).items()]
+            for context, successors in contexts:
+                numeric_values = _numeric_values_by_command(
+                    event["commands"],
+                    successors,
+                    _common_context_numeric_values(event, context),
+                )
+                for slot in range(5, 10):
+                    traced = _trace_string_variable_usage(
+                        event["commands"],
+                        None,
+                        1_600_000 + slot,
+                        schemas,
+                        common_events_by_id,
+                        common_events_by_name,
+                        roles,
+                        successors,
+                        event["id"],
+                        context,
+                        numeric_values,
+                    )
+                    discovered = {
+                        role
+                        for role in (
+                            "display",
+                            "logic",
+                            "dynamic_target",
+                            "opaque",
+                            "unknown",
+                            "return",
+                        )
+                        if traced[role]
+                    }
+                    discovered.update(
+                        ("database_write", *target)
+                        for target in traced["database_writes"]
+                    )
+                    current = roles[(event["id"], context)][slot]
+                    if not discovered <= current:
+                        current.update(discovered)
+                        changed = True
+    return roles
+
+
+def _summarize_common_event_return_roles(
+    sequences,
+    common_events,
+    schemas,
+    common_events_by_id,
+    common_events_by_name,
+    common_event_roles,
+):
+    role_keys = {
+        (event["id"], context)
+        for event in common_events
+        for context in (None, *event.get("dispatch_contexts", {}))
+    }
+    roles = {key: set() for key in role_keys}
+    dependencies = {key: set() for key in role_keys}
+    for _relative, _base_path, commands, successors, owner_id, owner_context in sequences:
+        numeric_values = _numeric_values_by_command(
+            commands,
+            successors,
+            _common_context_numeric_values(
+                common_events_by_id.get(owner_id), owner_context
+            ),
+        )
+        for index in _reachable_command_indexes(commands, successors):
+            command = commands[index]
+            call = _decode_common_call(
+                command,
+                common_events_by_id,
+                common_events_by_name,
+                owner_id,
+            )
+            if (
+                not call
+                or not call["event"]
+                or call["output"] is None
+                or not _string_variable_token(call["output"])
+            ):
+                continue
+            traced = _trace_string_variable_usage(
+                commands,
+                index,
+                call["output"],
+                schemas,
+                common_events_by_id,
+                common_events_by_name,
+                common_event_roles,
+                successors,
+                owner_id,
+                owner_context,
+                numeric_values,
+            )
+            target_key = _common_call_role_key(
+                call, numeric_values[index]
+            )
+            roles[target_key].update(
+                role
+                for role in (
+                    "display", "logic", "dynamic_target", "opaque", "unknown"
+                )
+                if traced[role]
+            )
+            roles[target_key].update(
+                ("database_write", *target)
+                for target in traced["database_writes"]
+            )
+            owner_key = (owner_id, owner_context)
+            if traced["return"] and owner_key in roles:
+                dependencies[target_key].add(owner_key)
+
+    changed = True
+    while changed:
+        changed = False
+        for role_key, targets in dependencies.items():
+            discovered = set().union(*(roles[target] for target in targets)) if targets else set()
+            if not discovered <= roles[role_key]:
+                roles[role_key].update(discovered)
+                changed = True
+    return roles
+
+
+def _command_database_selector_role(command, variable_id):
+    try:
+        if int(command.get("code", -1)) != 250:
+            return None
+        int_args = command.get("intArgs") or []
+        if len(int_args) < 4:
+            return None
+        flags = int(int_args[3])
+        for index, name_flag, role in (
+            (0, _DATABASE_TYPE_NAME_FLAG, "type"),
+            (1, _DATABASE_DATA_NAME_FLAG, "data"),
+            (2, _DATABASE_FIELD_NAME_FLAG, "field"),
+        ):
+            if not flags & name_flag and int(int_args[index]) == variable_id:
+                return role
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _record_selector_access(command, schemas, identifier_indexes):
+    target = _database_target(command, schemas)
+    if target is None:
+        return None, None, None
+    try:
+        int_args = command.get("intArgs") or []
+        flags = int(int_args[3])
+        type_selector = int(int_args[0])
+    except (TypeError, ValueError, IndexError):
+        return target[:2], "unknown", None
+    dynamic_type = (
+        not flags & _DATABASE_TYPE_NAME_FLAG and type_selector >= 1_000_000
+    )
+    namespace = (target[0], None) if dynamic_type else target[:2]
+    if not flags & _DATABASE_DATA_NAME_FLAG:
+        return namespace, "numeric", None
+    if dynamic_type:
+        return namespace, "unknown", None
+    indexes = identifier_indexes.get(namespace, {}).get(
+        target[2].strip().casefold(), set()
+    )
+    if not indexes:
+        dynamic_name = bool(re.search(r"\\[A-Za-z]+\[", target[2]))
+        return namespace, "unknown" if dynamic_name else "missing", None
+    return namespace, "name", tuple(sorted(indexes))
+
+
+def _database_identifier_collision_policy(usage, namespace):
+    policy = _database_identifier_translation_policy(usage, namespace)
+    if policy == "name_closed":
+        return "name_referenced"
+    if policy == "unsafe":
+        return "unknown"
+    return "numeric_only"
+
+
+def _database_identifier_translation_policy(usage, namespace):
+    namespace = tuple(namespace)
+    cached = usage.get("database_identifier_translation_policy", {}).get(namespace)
+    if cached in ("numeric_only", "name_closed", "unsafe"):
+        return cached
+    profile = usage.get("database_identifier_access", {}).get(namespace, {})
+    if (
+        profile.get("unknown", 0)
+        or not (profile.get("numeric", 0) or profile.get("name", 0))
+    ):
+        return "unsafe"
+    return "name_closed" if profile.get("name", 0) else "numeric_only"
+
+
+def _symbol_expression_tokens(value):
+    if not isinstance(value, str) or not value.strip() or _looks_like_resource(value):
+        return ()
+    tokens = []
+    for part in value.split("|"):
+        token = part.strip()
+        while True:
+            match = re.match(r"^<[^>\r\n]+>", token)
+            if not match:
+                break
+            token = token[match.end():].strip()
+        if (
+            not token
+            or token == "INVALID_IGNORE"
+            or re.fullmatch(r"[+-]?\d+(?:\.\d+)?", token)
+        ):
+            continue
+        tokens.append(token)
+    return tuple(tokens)
+
+
+def _infer_database_symbol_references(
+    databases,
+    database_relatives,
+    common_event_names,
+    identifier_indexes,
+    usage,
+):
+    catalog = {
+        name.strip().casefold()
+        for name in common_event_names
+        if isinstance(name, str) and name.strip()
+    }
+    identifier_symbols = {}
+    for database_name, database in databases.items():
+        for type_index, type_data in enumerate(database.get("types", [])):
+            type_name = type_data.get("name")
+            if isinstance(type_name, str) and type_name.strip():
+                catalog.add(type_name.strip().casefold())
+            for schema_field in type_data.get("fields", []):
+                field_name = schema_field.get("name") if isinstance(schema_field, dict) else None
+                if isinstance(field_name, str) and field_name.strip():
+                    catalog.add(field_name.strip().casefold())
+            for data_index, datum in enumerate(type_data.get("data", [])):
+                datum_name = datum.get("name")
+                if isinstance(datum_name, str) and datum_name.strip():
+                    catalog.add(datum_name.strip().casefold())
+                fields = datum.get("data") or []
+                if not fields or not _uses_first_string_database_id(datum, 0):
+                    continue
+                value = fields[0].get("value")
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                symbol = value.strip().casefold()
+                catalog.add(symbol)
+                namespace_targets = identifier_symbols.setdefault(symbol, {})
+                namespace_targets.setdefault((database_name, type_index), set()).add(data_index)
+
+    for database_name, database in databases.items():
+        relative = database_relatives[database_name]
+        for type_index, type_data in enumerate(database.get("types", [])):
+            rows = type_data.get("data", [])
+            field_count = max((len(row.get("data") or []) for row in rows), default=0)
+            for field_index in range(field_count):
+                field_key = (database_name, type_index, field_index)
+                occurrences = []
+                resolved_record_count = 0
+                for data_index, datum in enumerate(rows):
+                    fields = datum.get("data") or []
+                    if field_index >= len(fields) or _uses_first_string_database_id(datum, field_index):
+                        continue
+                    field = fields[field_index]
+                    value = field.get("value")
+                    if not isinstance(value, str) or not value.strip():
+                        continue
+                    record_key = (database_name, type_index, data_index, field_index)
+                    observed_display = (
+                        field_key in usage["display_database_fields"]
+                        or record_key in usage["display_database_records"]
+                    )
+                    observed_logic = (
+                        field_key in usage["logic_database_fields"]
+                        or record_key in usage["logic_database_records"]
+                    )
+                    if observed_display and not observed_logic:
+                        continue
+                    tokens = _symbol_expression_tokens(value)
+                    if not tokens:
+                        continue
+                    resolved = tuple(
+                        token for token in tokens if token.casefold() in catalog
+                    )
+                    if resolved:
+                        resolved_record_count += 1
+                    occurrences.append((data_index, value, resolved))
+
+                if not occurrences or not resolved_record_count:
+                    continue
+                target_hints = usage.get(
+                    "database_field_reference_targets", {}
+                ).get(field_key, set())
+                if not target_hints:
+                    continue
+
+                usage["symbol_reference_database_fields"].add(field_key)
+                for data_index, expected_value, resolved_tokens in occurrences:
+                    record_key = (database_name, type_index, data_index, field_index)
+                    usage["logic_database_records"].add(record_key)
+                    usage["display_database_records"].discard(record_key)
+                    path = ("types", type_index, "data", data_index, "data", field_index, "value")
+                    for token in resolved_tokens:
+                        normalized_token = token.casefold()
+                        targets = identifier_symbols.get(normalized_token, {})
+                        if not targets:
+                            continue
+                        hinted_targets = {
+                            namespace: indexes
+                            for namespace, indexes in targets.items()
+                            if namespace in target_hints
+                        }
+                        targets = hinted_targets
+                        if len(targets) != 1:
+                            usage["identifier_reference_namespaces"].update(targets)
+                            usage["incomplete_identifier_symbols"].update(
+                                (*namespace, normalized_token) for namespace in targets
+                            )
+                            continue
+                        namespace, target_indexes = next(iter(targets.items()))
+                        usage["identifier_reference_namespaces"].add(namespace)
+                        usage["identifier_reference_paths"].setdefault(
+                            (*namespace, normalized_token), set()
+                        ).add((
+                            relative,
+                            path,
+                            tuple(sorted(target_indexes)),
+                            expected_value,
+                            "database_symbol",
+                        ))
+
+    usage["display_database_fields"] -= usage["logic_database_fields"]
+    usage["display_database_records"] -= usage["logic_database_records"]
+    usage["identifier_symbols"] = identifier_symbols
+
+
+def _common_event_argument_slot(field_name):
+    match = _COMMON_EVENT_ARGUMENT_FIELD_RE.search(str(field_name or ""))
+    if not match:
+        return None
+    numbers = [int(value) for value in re.findall(r"\d+", match.group(1))]
+    return next((value - 1 for value in reversed(numbers) if 1 <= value <= 5), None)
+
+
+def _database_type_reference_key(value):
+    value = re.sub(
+        r"^[\s\u3000◆◇●○┠└xX]*(?:\[[^\]\r\n]*\][\s\u3000]*)*",
+        "",
+        str(value or ""),
+    )
+    return re.sub(r"[\s\u3000]+", "", value).casefold()
+
+
+def _database_common_event_contexts(
+    databases, common_events_by_id, common_events_by_name, active_fields
+):
+    contexts = set()
+    logic_records = set()
+    opaque_records = set()
+    bindings = []
+    diagnostics = []
+    callbacks = []
+
+    for database_name, database in databases.items():
+        for type_index, type_data in enumerate(database.get("types", [])):
+            schema_fields = type_data.get("fields") or []
+            for data_index, datum in enumerate(type_data.get("data", [])):
+                fields = datum.get("data") or []
+                for field_index, field in enumerate(fields):
+                    schema_field = (
+                        schema_fields[field_index]
+                        if field_index < len(schema_fields)
+                        else {}
+                    )
+                    field_name = str(
+                        (schema_field or {}).get("name")
+                        or field.get("name")
+                        or ""
+                    )
+                    field_key = (database_name, type_index, field_index)
+                    name_candidate = bool(
+                        _COMMON_EVENT_CALLBACK_FIELD_RE.search(field_name)
+                    )
+                    flow_candidate = field_key in active_fields
+                    if not name_candidate and not flow_candidate:
+                        continue
+
+                    record_key = (database_name, type_index, data_index, field_index)
+                    logic_records.add(record_key)
+                    argument_fields = []
+                    for argument_index in range(
+                        field_index + 1, min(field_index + 6, len(fields))
+                    ):
+                        argument_field = fields[argument_index]
+                        argument_schema = (
+                            schema_fields[argument_index]
+                            if argument_index < len(schema_fields)
+                            else {}
+                        )
+                        argument_name = str(
+                            (argument_schema or {}).get("name")
+                            or argument_field.get("name")
+                            or ""
+                        )
+                        if _COMMON_EVENT_CALLBACK_FIELD_RE.search(argument_name):
+                            break
+                        slot = _common_event_argument_slot(argument_name)
+                        if slot is None:
+                            break
+                        argument_fields.append((
+                            slot,
+                            (database_name, type_index, data_index, argument_index),
+                            argument_field.get("value"),
+                        ))
+                    if name_candidate and not flow_candidate:
+                        logic_records.update(
+                            record for _slot, record, _value in argument_fields
+                        )
+
+                    value = field.get("value")
+                    event = None
+                    wrapper_context = None
+                    if isinstance(value, str) and value.strip():
+                        event_name = value.strip()
+                        for wrapper_re in _COMMON_EVENT_WRAPPER_RES:
+                            wrapper_match = wrapper_re.fullmatch(event_name)
+                            if wrapper_match:
+                                event_name = wrapper_match.group(1).strip()
+                                wrapper_context = int(wrapper_match.group(2))
+                                break
+                        event = common_events_by_name.get(event_name.casefold())
+                    elif (
+                        isinstance(value, int)
+                        and _COMMON_EVENT_NUMERIC_ID_FIELD_RE.search(field_name)
+                    ):
+                        event = common_events_by_id.get(value)
+
+                    callback_context = None
+                    if event and isinstance(event.get("dispatch_slot"), int):
+                        numeric_arguments = {
+                            slot: argument_value
+                            for slot, _record, argument_value in argument_fields
+                            if isinstance(argument_value, int)
+                        }
+                        dispatch_value = (
+                            wrapper_context
+                            if wrapper_context is not None
+                            else numeric_arguments.get(event["dispatch_slot"])
+                        )
+                        callback_context = _common_dispatch_context(
+                            event.get("dispatch_contexts", {}), dispatch_value
+                        )
+                    callback = {
+                        "database": database_name,
+                        "type": type_index,
+                        "field": field_index,
+                        "record": record_key,
+                        "field_name": field_name,
+                        "value": value,
+                        "arguments": argument_fields,
+                        "event": event,
+                        "context": callback_context,
+                        "active": flow_candidate,
+                    }
+                    callbacks.append(callback)
+
+    for callback in callbacks:
+        if not callback["active"]:
+            continue
+        event = callback["event"]
+        if not event:
+            opaque_records.add(callback["record"])
+            logic_records.update(record for _slot, record, _value in callback["arguments"])
+            opaque_records.update(record for _slot, record, _value in callback["arguments"])
+            value = callback["value"]
+            stripped_value = value.strip() if isinstance(value, str) else value
+            target_contexts = set()
+            reference_match = (
+                _COMMON_EVENT_TYPE_REFERENCE_RE.search(stripped_value)
+                if isinstance(stripped_value, str)
+                else None
+            )
+            if reference_match:
+                delegated_type = (
+                    reference_match.group(1).upper(),
+                    _database_type_reference_key(reference_match.group(2)),
+                )
+            else:
+                delegated_type = None
+            if isinstance(stripped_value, str) and stripped_value:
+                diagnostics.append({
+                    "database": callback["database"],
+                    "type": callback["type"],
+                    "field": callback["field"],
+                    "value": stripped_value,
+                    "candidate_event_ids": tuple(sorted({
+                        event_id for event_id, _context in target_contexts
+                    })),
+                    "candidate_contexts": tuple(sorted(
+                        target_contexts,
+                        key=lambda item: (item[0], item[1] is None, item[1] or 0),
+                    )),
+                    "delegated_type": delegated_type,
+                })
+            continue
+
+        context = callback["context"]
+        contexts.add((event["id"], context))
+        bindings.append((event["id"], context, callback["arguments"]))
+
+    return contexts, logic_records, opaque_records, bindings, diagnostics
+
+
+def _reachable_dynamic_callback_fields(
+    sequences,
+    schemas,
+    common_events_by_id,
+    common_events_by_name,
+    common_event_roles,
+):
+    fields = set()
+    for _relative, _base_path, commands, successors, owner_id, owner_context in sequences:
+        numeric_values = _numeric_values_by_command(
+            commands,
+            successors,
+            _common_context_numeric_values(
+                common_events_by_id.get(owner_id), owner_context
+            ),
+        )
+        for index in _reachable_command_indexes(commands, successors):
+            read = _database_read(commands[index], schemas)
+            if read is None:
+                continue
+            key, destination, _token = read
+            traced = _trace_string_variable_usage(
+                commands,
+                index,
+                destination,
+                schemas,
+                common_events_by_id,
+                common_events_by_name,
+                common_event_roles,
+                successors,
+                owner_id,
+                owner_context,
+                numeric_values,
+            )
+            if traced["dynamic_target"]:
+                fields.add(key)
+    return fields
+
+
+def _analyze_json_usage(json_root, referenced_maps=None):
+    referenced_maps = {
+        str(filename).casefold() for filename in (referenced_maps or ())
+    }
     usage = {
         "display_database_fields": set(),
+        "display_database_records": set(),
+        "visible_database_fields": set(),
+        "visible_database_records": set(),
         "logic_database_fields": set(),
-        "logic_database_literals": set(),
-        "logic_database_record_literals": set(),
+        "logic_database_records": set(),
+        "unknown_database_fields": set(),
+        "unknown_database_records": set(),
+        "opaque_database_fields": set(),
+        "opaque_database_records": set(),
+        "nonselector_logic_database_fields": set(),
+        "nonselector_logic_database_records": set(),
+        "nonselector_logic_field_codes": {},
+        "nonselector_logic_record_codes": {},
+        "named_database_record_references": set(),
+        "database_identifier_access": {},
+        "database_identifier_translation_policy": {},
+        "identifier_reference_paths": {},
+        "identifier_reference_namespaces": set(),
+        "incomplete_identifier_symbols": set(),
+        "missing_identifier_names": {},
+        "symbol_reference_database_fields": set(),
+        "database_field_reference_targets": {},
         "comparison_literals": set(),
         "display_command_literals": set(),
         "logic_command_literals": set(),
+        "unresolved_database_callbacks": [],
+        "analysis_diagnostics": [],
+        "protected_unknown_common_files": set(),
+        "database_write_targets": {},
     }
     schemas = {}
     databases = {}
+    database_relatives = {}
     for database_name in _DATABASE_JSON_BY_KIND.values():
-        path = os.path.join(json_root, "databases", database_name)
+        database_dir = os.path.join(json_root, "databases")
+        filenames = [
+            filename
+            for filename in os.listdir(database_dir)
+            if filename.casefold() == database_name.casefold()
+        ] if os.path.isdir(database_dir) else []
+        if len(filenames) > 1:
+            raise WolfEngineError(f"WOLF 数据库文件无法唯一定位: {database_name}")
+        if not filenames:
+            continue
+        relative = f"databases/{filenames[0]}"
+        path = os.path.join(json_root, "databases", filenames[0])
         if not os.path.isfile(path):
             continue
         try:
@@ -677,6 +2179,7 @@ def _analyze_json_usage(json_root):
         except (OSError, ValueError) as error:
             raise WolfEngineError(f"无法分析 WOLF 数据库结构: {database_name}: {error}") from error
         databases[database_name] = database
+        database_relatives[database_name] = relative
         type_names = {}
         field_names = {}
         for type_index, type_data in enumerate(database.get("types", [])):
@@ -690,13 +2193,42 @@ def _analyze_json_usage(json_root):
                     if isinstance(field_name, str) and field_name.strip():
                         fields.setdefault(field_name.strip().casefold(), field_index)
         schemas[database_name] = {"types": type_names, "fields": field_names}
-    sequences = []
+
+    identifier_indexes = {}
+    record_indexes = {}
+    record_counts = {}
+    for database_name, database in databases.items():
+        for type_index, type_data in enumerate(database.get("types", [])):
+            namespace_index = identifier_indexes.setdefault((database_name, type_index), {})
+            record_index = record_indexes.setdefault((database_name, type_index), {})
+            records = type_data.get("data", [])
+            record_counts[(database_name, type_index)] = len(records)
+            for data_index, datum in enumerate(records):
+                fields = datum.get("data") or []
+                datum_name = datum.get("name")
+                if isinstance(datum_name, str) and datum_name.strip():
+                    record_index.setdefault(datum_name.strip().casefold(), set()).add(data_index)
+                if not fields or not _uses_first_string_database_id(datum, 0):
+                    continue
+                value = fields[0].get("value")
+                if isinstance(value, str) and value:
+                    namespace_index.setdefault(value.strip().casefold(), set()).add(data_index)
+                    record_index.setdefault(value.strip().casefold(), set()).add(data_index)
+
+    map_sequences = []
+    identifier_reference_sequences = []
+    common_events = []
+    common_event_names = set()
+    common_events_by_id = {}
+    common_events_by_name = {}
     for root, _, files in os.walk(json_root):
         parent = os.path.basename(root).lower()
         if parent not in ("common", "maps"):
             continue
         for filename in files:
             if not filename.lower().endswith(".json"):
+                continue
+            if parent == "maps" and referenced_maps and filename.casefold() not in referenced_maps:
                 continue
             try:
                 with open(os.path.join(root, filename), "r", encoding="utf-8") as source:
@@ -705,14 +2237,439 @@ def _analyze_json_usage(json_root):
                 raise WolfEngineError(f"无法分析 WOLF JSON 用途: {filename}: {error}") from error
             if not isinstance(data, dict):
                 continue
+            relative = os.path.relpath(os.path.join(root, filename), json_root).replace(os.sep, "/")
             if parent == "common":
-                sequences.append(data.get("commands", []))
+                arguments = data.get("arguments")
+                activation = data.get("activation")
+                if (
+                    not isinstance(arguments, list)
+                    or len(arguments) != 10
+                    or not all(isinstance(argument, str) for argument in arguments)
+                ):
+                    raise WolfEngineError(
+                        "WOLF 公共事件缺少参数元数据；请用当前版本重新导出翻译文本"
+                    )
+                if not isinstance(activation, dict):
+                    raise WolfEngineError(
+                        "WOLF 公共事件缺少启动元数据；请用当前版本重新导出翻译文本"
+                    )
+                activation_raw = activation.get("raw")
+                activation_extra = activation.get("extra")
+                if (
+                    not isinstance(activation_raw, int)
+                    or isinstance(activation_raw, bool)
+                    or not 0 <= activation_raw <= 0xFFFFFFFF
+                    or not isinstance(activation_extra, list)
+                    or len(activation_extra) != 7
+                    or not all(
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and 0 <= value <= 0xFF
+                        for value in activation_extra
+                    )
+                ):
+                    raise WolfEngineError("WOLF 公共事件启动元数据无效")
+                event_id = data.get("id")
+                if (
+                    not isinstance(event_id, int)
+                    or isinstance(event_id, bool)
+                    or event_id < 0
+                ):
+                    raise WolfEngineError("WOLF 公共事件编号无效")
+                if event_id in common_events_by_id:
+                    raise WolfEngineError(f"WOLF 公共事件编号重复: {event_id}")
+                name = data.get("name")
+                if isinstance(name, str) and name.strip():
+                    common_event_names.add(name.strip())
+                commands = data.get("commands", [])
+                successors = _command_successors(commands)
+                labels = {}
+                for command_index, command in enumerate(commands):
+                    try:
+                        if int(command.get("code", -1)) != 212:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    strings = command.get("stringArgs") or []
+                    if strings and isinstance(strings[0], str):
+                        labels.setdefault(strings[0], command_index)
+                dispatches = _dynamic_jump_dispatches(commands, labels)
+                dispatch_slots = {slot for slot, _targets in dispatches.values()}
+                dispatch_slot = next(iter(dispatch_slots)) if len(dispatch_slots) == 1 else None
+                dispatch_values = (
+                    set().union(*(set(targets) for _slot, targets in dispatches.values()))
+                    if dispatch_slot is not None and dispatches
+                    else set()
+                )
+                event = {
+                    "id": event_id,
+                    "name": name.strip() if isinstance(name, str) else "",
+                    "relative": relative,
+                    "arguments": arguments,
+                    "activation_raw": activation_raw,
+                    "activation_extra": tuple(activation_extra),
+                    "activation_mode": activation_raw & 0xFF,
+                    "commands": commands,
+                    "successors": successors,
+                    "dispatch_slot": dispatch_slot,
+                    "dispatch_contexts": {
+                        value: _command_successors(commands, {dispatch_slot: value})
+                        for value in dispatch_values
+                    },
+                }
+                identifier_reference_sequences.append((
+                    relative, ("commands",), commands
+                ))
+                common_events.append(event)
+                common_events_by_id[event_id] = event
+                if event["name"]:
+                    name_key = event["name"].casefold()
+                    common_events_by_name[name_key] = (
+                        event if name_key not in common_events_by_name else None
+                    )
             else:
-                for event in data.get("events", []):
-                    for page in event.get("pages", []):
-                        sequences.append(page.get("list", []))
+                for event_index, event in enumerate(data.get("events", [])):
+                    for page_index, page in enumerate(event.get("pages", [])):
+                        commands = page.get("list", [])
+                        sequence = (
+                            relative,
+                            ("events", event_index, "pages", page_index, "list"),
+                            commands,
+                            _command_successors(commands),
+                            None,
+                            None,
+                        )
+                        map_sequences.append(sequence)
+                        identifier_reference_sequences.append(sequence[:3])
 
-    for commands in sequences:
+    sequences = list(map_sequences)
+    common_event_roles = _summarize_common_event_string_roles(
+        common_events,
+        schemas,
+        common_events_by_id,
+        common_events_by_name,
+    )
+    automatic_contexts = {
+        (event["id"], None)
+        for event in common_events
+        if event["activation_mode"] == 0x23
+    }
+    pending_contexts = deque(sorted(
+        automatic_contexts,
+        key=lambda item: (item[0], item[1] is None, item[1] or 0),
+    ))
+    visited_contexts = set()
+
+    def enqueue_calls(queue, commands, successors, owner_id, owner_context=None):
+        numeric_values = _numeric_values_by_command(
+            commands,
+            successors,
+            _common_context_numeric_values(
+                common_events_by_id.get(owner_id), owner_context
+            ),
+        )
+        for command_index in _reachable_command_indexes(commands, successors):
+            call = _decode_common_call(
+                commands[command_index],
+                common_events_by_id,
+                common_events_by_name,
+                owner_id,
+            )
+            role_key = _common_call_role_key(call, numeric_values[command_index])
+            if role_key is not None:
+                queue.append(role_key)
+
+    for _relative, _base_path, commands, successors, _owner_id, _owner_context in map_sequences:
+        enqueue_calls(pending_contexts, commands, successors, None)
+
+    def consume_contexts(queue, visited, target_sequences, skip=None):
+        while queue:
+            event_id, context = queue.popleft()
+            key = (event_id, context)
+            if key in visited or key in (skip or ()):
+                continue
+            event = common_events_by_id[event_id]
+            successors = event["dispatch_contexts"].get(context, event["successors"])
+            visited.add(key)
+            target_sequences.append((
+                event["relative"],
+                ("commands",),
+                event["commands"],
+                successors,
+                event["id"],
+                context,
+            ))
+            enqueue_calls(
+                queue, event["commands"], successors, event["id"], context
+            )
+
+    consume_contexts(pending_contexts, visited_contexts, sequences)
+
+    active_callback_fields = set()
+    while True:
+        discovered_fields = _reachable_dynamic_callback_fields(
+            sequences,
+            schemas,
+            common_events_by_id,
+            common_events_by_name,
+            common_event_roles,
+        )
+        if discovered_fields <= active_callback_fields:
+            break
+        active_callback_fields.update(discovered_fields)
+        database_contexts, *_unused = _database_common_event_contexts(
+            databases,
+            common_events_by_id,
+            common_events_by_name,
+            active_callback_fields,
+        )
+        pending_contexts.extend(sorted(
+            database_contexts - visited_contexts,
+            key=lambda item: (item[0], item[1] is None, item[1] or 0),
+        ))
+        consume_contexts(pending_contexts, visited_contexts, sequences)
+
+    (
+        _database_contexts,
+        callback_logic_records,
+        callback_opaque_records,
+        callback_bindings,
+        callback_diagnostics,
+    ) = _database_common_event_contexts(
+        databases,
+        common_events_by_id,
+        common_events_by_name,
+        active_callback_fields,
+    )
+    usage["logic_database_records"].update(callback_logic_records)
+    usage["opaque_database_records"].update(callback_opaque_records)
+    usage["unresolved_database_callbacks"] = callback_diagnostics
+    for diagnostic in callback_diagnostics:
+        database_name = diagnostic.get("database")
+        usage["analysis_diagnostics"].append({
+            "reason": "unresolved_database_callback",
+            "file": database_relatives.get(
+                database_name, f"databases/{database_name}"
+            ),
+            "path": [
+                "types",
+                diagnostic.get("type"),
+                "fields",
+                diagnostic.get("field"),
+            ],
+            "effect": "protected",
+            "details": diagnostic,
+        })
+
+    unknown_root_events = [
+        event
+        for event in common_events
+        if event["activation_mode"] not in (0x20, 0x23)
+    ]
+    usage["protected_unknown_common_files"] = {
+        event["relative"] for event in unknown_root_events
+    }
+    for event in unknown_root_events:
+        usage["analysis_diagnostics"].append({
+            "reason": "unknown_common_event_activation",
+            "file": event["relative"],
+            "path": ["activation"],
+            "effect": "protected",
+            "details": {
+                "raw": event["activation_raw"],
+                "mode": event["activation_mode"],
+                "extra": list(event["activation_extra"]),
+            },
+        })
+
+    common_event_return_roles = _summarize_common_event_return_roles(
+        sequences,
+        common_events,
+        schemas,
+        common_events_by_id,
+        common_events_by_name,
+        common_event_roles,
+    )
+    for event_id, context, argument_fields in callback_bindings:
+        roles = common_event_roles[(event_id, context)]
+        for slot, record_key, value in argument_fields:
+            if not isinstance(value, str) or not value.strip():
+                continue
+            role = roles.get(slot + 5, set())
+            unsafe_roles = {"logic", "opaque", "unknown"} & role
+            if "display" in role and not unsafe_roles:
+                usage["visible_database_records"].add(record_key)
+                usage["display_database_records"].add(record_key)
+            else:
+                usage["logic_database_records"].add(record_key)
+            if "opaque" in role:
+                usage["opaque_database_records"].add(record_key)
+            if "unknown" in role:
+                usage["unknown_database_records"].add(record_key)
+    usage["active_common_event_files"] = {
+        common_events_by_id[event_id]["relative"]
+        for event_id, _context in visited_contexts
+    } | usage["protected_unknown_common_files"]
+    usage["common_event_roles_by_id"] = {
+        event["id"]: common_event_roles[(event["id"], None)]
+        for event in common_events
+    }
+    usage["common_event_roles_by_name"] = {
+        name: common_event_roles[(event["id"], None)] if event else None
+        for name, event in common_events_by_name.items()
+    }
+    usage["common_event_return_roles_by_id"] = {
+        event["id"]: common_event_return_roles[(event["id"], None)]
+        for event in common_events
+    }
+    usage["common_event_return_roles_by_name"] = {
+        name: common_event_return_roles[(event["id"], None)] if event else set()
+        for name, event in common_events_by_name.items()
+    }
+    usage["common_event_contexts_by_id"] = {
+        event["id"]: {
+            "slot": event["dispatch_slot"],
+            "roles": {
+                context: common_event_roles[(event["id"], context)]
+                for context in event["dispatch_contexts"]
+            },
+            "return_roles": {
+                context: common_event_return_roles[(event["id"], context)]
+                for context in event["dispatch_contexts"]
+            },
+        }
+        for event in common_events
+        if event["dispatch_contexts"]
+    }
+    usage["common_event_contexts_by_name"] = {
+        name: usage["common_event_contexts_by_id"].get(event["id"])
+        if event else None
+        for name, event in common_events_by_name.items()
+    }
+
+    usage["reachable_call_argument_roles"] = {}
+    usage["reachable_call_return_roles"] = {}
+    for relative, base_path, commands, successors, owner_id, owner_context in sequences:
+        numeric_values = _numeric_values_by_command(
+            commands,
+            successors,
+            _common_context_numeric_values(
+                common_events_by_id.get(owner_id), owner_context
+            ),
+        )
+        for command_index in _reachable_command_indexes(commands, successors):
+            call = _decode_common_call(
+                commands[command_index],
+                common_events_by_id,
+                common_events_by_name,
+                owner_id,
+            )
+            target_key = _common_call_role_key(call, numeric_values[command_index])
+            if target_key is None:
+                continue
+            command_path = base_path + (command_index,)
+            target_roles = common_event_roles[target_key]
+            usage["reachable_call_return_roles"].setdefault(
+                (relative, command_path), set()
+            ).update(common_event_return_roles[target_key])
+            for slot, source_kind, _source in call["string_inputs"]:
+                if source_kind != "literal":
+                    continue
+                string_index = 1 + slot - 5
+                usage["reachable_call_argument_roles"].setdefault(
+                    (relative, command_path, string_index), set()
+                ).update(target_roles.get(slot, set()))
+
+    usage["reachable_command_paths"] = set()
+    for relative, base_path, commands, successors, _owner_id, _owner_context in sequences:
+        for command_index in _reachable_command_indexes(commands, successors):
+            usage["reachable_command_paths"].add(
+                (relative, base_path + (command_index,))
+            )
+
+    for relative, base_path, commands in identifier_reference_sequences:
+        for command_index, command in enumerate(commands):
+            namespace, access, data_indexes = _record_selector_access(
+                command, schemas, identifier_indexes
+            )
+            if namespace is None:
+                continue
+            if access is None:
+                continue
+            if access == "missing" and namespace[1] is not None:
+                target = _database_target(command, schemas)
+                if target and target[2]:
+                    normalized_name = target[2].strip().casefold()
+                    usage["missing_identifier_names"].setdefault(
+                        namespace, set()
+                    ).add(normalized_name)
+                    # ponytail: Index alignment proves only one-hop runtime mirrors;
+                    # exported database provenance is the upgrade path for longer chains.
+                    aliases = [
+                        candidate
+                        for candidate, names in identifier_indexes.items()
+                        if candidate != namespace
+                        and candidate[1] == namespace[1]
+                        and normalized_name in names
+                    ]
+                    aligned_aliases = [
+                        candidate
+                        for candidate in aliases
+                        if min(identifier_indexes[candidate][normalized_name])
+                        < record_counts.get(namespace, 0)
+                    ]
+                    if len(aligned_aliases) == 1:
+                        candidate = aligned_aliases[0]
+                        candidate_indexes = tuple(sorted(
+                            identifier_indexes[candidate][normalized_name]
+                        ))
+                        usage["identifier_reference_namespaces"].add(candidate)
+                        usage["identifier_reference_paths"].setdefault(
+                            (*candidate, normalized_name), set()
+                        ).add((
+                            relative,
+                            base_path + (command_index, "stringArgs", 2),
+                            candidate_indexes,
+                            target[2],
+                            "runtime_database_alias",
+                        ))
+                        usage["missing_identifier_names"].setdefault(
+                            candidate, set()
+                        ).update(record_indexes.get(namespace, {}))
+                    elif aliases:
+                        for candidate in aliases:
+                            usage["incomplete_identifier_symbols"].add(
+                                (*candidate, normalized_name)
+                            )
+                        usage["analysis_diagnostics"].append({
+                            "reason": "unresolved_runtime_database_alias",
+                            "file": relative,
+                            "path": list(base_path + (command_index, "stringArgs", 2)),
+                            "effect": "protected",
+                            "value": target[2],
+                            "selector_namespace": list(namespace),
+                            "candidate_namespaces": [
+                                list(candidate) for candidate in sorted(aliases)
+                            ],
+                        })
+            affected_namespaces = (
+                [namespace]
+                if namespace[1] is not None
+                else [candidate for candidate in identifier_indexes if candidate[0] == namespace[0]]
+            )
+            for affected in affected_namespaces:
+                profile = usage["database_identifier_access"].setdefault(
+                    affected, {"numeric": 0, "name": 0, "missing": 0, "unknown": 0}
+                )
+                profile[access] += 1
+            if access == "name":
+                target = _database_target(command, schemas)
+                path = base_path + (command_index, "stringArgs", 2)
+                usage["identifier_reference_paths"].setdefault(
+                    (*namespace, target[2].strip().casefold()), set()
+                ).add((relative, path, data_indexes, target[2], "database_selector"))
+
+    for _relative, _base_path, commands in identifier_reference_sequences:
         for command in commands:
             try:
                 code = int(command.get("code", -1))
@@ -725,54 +2682,150 @@ def _analyze_json_usage(json_root):
                     if isinstance(text, str) and text.strip()
                 )
             elif code == 250:
-                try:
-                    strings = command.get("stringArgs") or []
-                    datum_name = strings[2].strip() if isinstance(strings[2], str) else ""
-                except IndexError:
-                    continue
-                if datum_name:
-                    usage["logic_database_record_literals"].add(datum_name.casefold())
+                target = _database_target(command, schemas)
+                if target and target[2]:
+                    usage["named_database_record_references"].add(
+                        (target[0], target[1], target[2].casefold())
+                    )
 
-    for commands in sequences:
-        for index, command in enumerate(commands):
+    for _relative, _base_path, commands, successors, owner_id, owner_context in sequences:
+        numeric_values = _numeric_values_by_command(
+            commands,
+            successors,
+            _common_context_numeric_values(
+                common_events_by_id.get(owner_id), owner_context
+            ),
+        )
+        for index in _reachable_command_indexes(commands, successors):
+            command = commands[index]
             read = _database_read(command, schemas)
             if read is None:
                 continue
-            key, destination, token = read
-            display_use = False
-            logic_use = False
-            # ponytail: Follow one local string variable until overwrite. Cross-event
-            # aliases remain protected; a command CFG is the upgrade path.
-            for following in commands[index + 1:]:
-                strings = following.get("stringArgs") or []
-                uses_token = any(isinstance(text, str) and token in text for text in strings)
-                try:
-                    following_code = int(following.get("code", -1))
-                except (TypeError, ValueError):
-                    following_code = -1
-                if _command_uses_database_selector(following, destination):
-                    logic_use = True
-                elif uses_token:
-                    if following_code in (112, 140, 213):
-                        logic_use = True
-                    elif following_code == 300:
-                        if strings and token in str(strings[0]):
-                            logic_use = True
-                        elif strings and _common_event_displays_text(strings[0]):
-                            display_use = True
-                        else:
-                            logic_use = True
-                    elif following_code in (101, 102, 122, 150):
-                        display_use = True
-                if _command_overwrites_string(following, destination, token):
-                    break
+            key, destination, _token = read
+            data_indexes = _database_read_record_indexes(
+                command, schemas, record_indexes, record_counts
+            )
+            traced = _trace_string_variable_usage(
+                commands,
+                index,
+                destination,
+                schemas,
+                common_events_by_id,
+                common_events_by_name,
+                common_event_roles,
+                successors,
+                owner_id,
+                owner_context,
+                numeric_values,
+            )
+            return_roles = (
+                common_event_return_roles.get((owner_id, owner_context), set())
+                if traced["return"]
+                else set()
+            )
+            display_use = traced["display"] or "display" in return_roles
+            logic_use = traced["logic"] or "logic" in return_roles
+            unknown_flow = traced["unknown"] or "unknown" in return_roles
+            opaque_flow = traced["opaque"] or "opaque" in return_roles
+            nonselector_logic_codes = set(traced["logic_codes"])
+            if "logic" in return_roles:
+                nonselector_logic_codes.add(210)
+            if traced["selector_targets"]:
+                usage["database_field_reference_targets"].setdefault(
+                    key, set()
+                ).update(traced["selector_targets"])
+            record_keys = (
+                [(*key[:2], data_index, key[2]) for data_index in data_indexes]
+                if data_indexes is not None
+                else None
+            )
+            if traced["database_writes"]:
+                for source_key in record_keys or (key,):
+                    usage["database_write_targets"].setdefault(
+                        source_key, set()
+                    ).update(traced["database_writes"])
+            if unknown_flow:
+                if record_keys is None:
+                    usage["unknown_database_fields"].add(key)
+                else:
+                    usage["unknown_database_records"].update(record_keys)
+            if opaque_flow:
+                if record_keys is None:
+                    usage["opaque_database_fields"].add(key)
+                else:
+                    usage["opaque_database_records"].update(record_keys)
+            if display_use:
+                if record_keys is None:
+                    usage["visible_database_fields"].add(key)
+                else:
+                    usage["visible_database_records"].update(record_keys)
             if logic_use:
-                usage["logic_database_fields"].add(key)
+                if record_keys is None:
+                    usage["logic_database_fields"].add(key)
+                else:
+                    usage["logic_database_records"].update(record_keys)
+                if nonselector_logic_codes:
+                    if record_keys is None:
+                        usage["nonselector_logic_database_fields"].add(key)
+                        usage["nonselector_logic_field_codes"].setdefault(key, set()).update(
+                            nonselector_logic_codes
+                        )
+                    else:
+                        usage["nonselector_logic_database_records"].update(record_keys)
+                        for record_key in record_keys:
+                            usage["nonselector_logic_record_codes"].setdefault(
+                                record_key, set()
+                            ).update(nonselector_logic_codes)
             elif display_use:
-                usage["display_database_fields"].add(key)
+                if record_keys is None:
+                    usage["display_database_fields"].add(key)
+                else:
+                    usage["display_database_records"].update(record_keys)
 
-    for commands in sequences:
-        for index, command in enumerate(commands):
+    changed = True
+    while changed:
+        changed = False
+        for source, targets in usage["database_write_targets"].items():
+            if not any(
+                _database_target_is_displayed(usage, target)
+                for target in targets
+            ):
+                continue
+            source_is_record = len(source) == 4
+            display_set = (
+                usage["display_database_records"]
+                if source_is_record
+                else usage["display_database_fields"]
+            )
+            if source in display_set:
+                continue
+            blocked = any(
+                source in usage[name]
+                for name in (
+                    "logic_database_records" if source_is_record else "logic_database_fields",
+                    "unknown_database_records" if source_is_record else "unknown_database_fields",
+                    "opaque_database_records" if source_is_record else "opaque_database_fields",
+                )
+            )
+            if not blocked:
+                display_set.add(source)
+                usage[
+                    "visible_database_records"
+                    if source_is_record
+                    else "visible_database_fields"
+                ].add(source)
+                changed = True
+
+    for _relative, _base_path, commands, successors, owner_id, owner_context in sequences:
+        numeric_values = _numeric_values_by_command(
+            commands,
+            successors,
+            _common_context_numeric_values(
+                common_events_by_id.get(owner_id), owner_context
+            ),
+        )
+        for index in _reachable_command_indexes(commands, successors):
+            command = commands[index]
             try:
                 code = int(command.get("code", -1))
                 int_args = command.get("intArgs") or []
@@ -782,45 +2835,44 @@ def _analyze_json_usage(json_root):
                 continue
             if code != 122 or not strings:
                 continue
-            token = _string_variable_token(destination)
-            if token is None:
+            if _string_variable_token(destination) is None:
                 continue
-            display_use = False
-            logic_use = False
-            for following in commands[index + 1:]:
-                following_strings = following.get("stringArgs") or []
-                uses_token = any(
-                    isinstance(text, str) and token in text
-                    for text in following_strings
-                )
-                try:
-                    following_code = int(following.get("code", -1))
-                except (TypeError, ValueError):
-                    following_code = -1
-                if uses_token:
-                    if following_code in (112, 140, 213):
-                        logic_use = True
-                    elif following_code in (101, 102, 150):
-                        display_use = True
-                    elif following_code == 300:
-                        if following_strings and token in str(following_strings[0]):
-                            logic_use = True
-                        elif following_strings and _common_event_displays_text(following_strings[0]):
-                            display_use = True
-                        else:
-                            logic_use = True
-                if _command_overwrites_string(following, destination, token):
-                    break
+            traced = _trace_string_variable_usage(
+                commands,
+                index,
+                destination,
+                schemas,
+                common_events_by_id,
+                common_events_by_name,
+                common_event_roles,
+                successors,
+                owner_id,
+                owner_context,
+                numeric_values,
+            )
+            return_roles = (
+                common_event_return_roles.get((owner_id, owner_context), set())
+                if traced["return"]
+                else set()
+            )
+            display_use = traced["display"] or "display" in return_roles
+            display_use = display_use or any(
+                _database_target_is_displayed(usage, target)
+                for target in traced["database_writes"]
+            )
+            logic_use = traced["logic"] or "logic" in return_roles
+            unknown_use = traced["unknown"] or "unknown" in return_roles
             if display_use:
                 usage["display_command_literals"].update(
                     text for text in strings if isinstance(text, str) and text.strip()
                 )
-            if logic_use and not display_use:
+            if (logic_use or unknown_use) and not display_use:
                 usage["logic_command_literals"].update(
                     text for text in strings if isinstance(text, str) and text.strip()
                 )
     usage["logic_command_literals"].update(usage["comparison_literals"])
     usage["display_database_fields"] -= usage["logic_database_fields"]
+    usage["display_database_records"] -= usage["logic_database_records"]
     # ponytail: Dynamic numbered fields are treated as one family. This can protect
     # display-only siblings; explicit selector ranges from WolfRPGText are the upgrade path.
     for database_name, type_index, field_index in list(usage["logic_database_fields"]):
@@ -836,52 +2888,174 @@ def _analyze_json_usage(json_root):
                 for candidate, index in fields.items()
                 if re.fullmatch(re.escape(prefix) + r"\d+", candidate)
             )
+    for database_name, type_index, data_index, field_index in list(
+        usage["logic_database_records"]
+    ):
+        fields = schemas.get(database_name, {}).get("fields", {}).get(type_index, {})
+        names = [name for name, index in fields.items() if index == field_index]
+        for name in names:
+            match = re.fullmatch(r"(.*?)(\d+)", name)
+            if not match:
+                continue
+            prefix = match.group(1)
+            usage["logic_database_records"].update(
+                (database_name, type_index, data_index, index)
+                for candidate, index in fields.items()
+                if re.fullmatch(re.escape(prefix) + r"\d+", candidate)
+            )
     usage["display_database_fields"] -= usage["logic_database_fields"]
-    for database_name, database in databases.items():
-        for type_index, type_data in enumerate(database.get("types", [])):
-            for datum in type_data.get("data", []):
-                for field_index, field in enumerate(datum.get("data", [])):
-                    value = field.get("value")
-                    is_logic = (
-                        _uses_first_string_database_id(datum, field_index)
-                        or (database_name, type_index, field_index) in usage["logic_database_fields"]
-                        or _is_explicit_internal_database_text(value)
-                        or _database_field_marker(field.get("name")) == "WOLFLogic"
+    usage["display_database_records"] -= usage["logic_database_records"]
+    _infer_database_symbol_references(
+        databases,
+        database_relatives,
+        common_event_names,
+        identifier_indexes,
+        usage,
+    )
+    for relative, base_path, commands, successors, _owner_id, _owner_context in sequences:
+        for command_index in _reachable_command_indexes(commands, successors):
+            command = commands[command_index]
+            try:
+                if int(command.get("code", -1)) != 112:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            for argument_index, expected_value in enumerate(command.get("stringArgs") or []):
+                if not isinstance(expected_value, str) or not expected_value.strip():
+                    continue
+                for token in _symbol_expression_tokens(expected_value):
+                    normalized_token = token.casefold()
+                    targets = usage.get("identifier_symbols", {}).get(
+                        normalized_token, {}
                     )
-                    if is_logic and isinstance(value, str) and value.strip():
-                        usage["logic_database_literals"].add(value.strip().casefold())
+                    if not targets:
+                        continue
+                    if len(targets) != 1:
+                        usage["identifier_reference_namespaces"].update(targets)
+                        usage["incomplete_identifier_symbols"].update(
+                            (*namespace, normalized_token) for namespace in targets
+                        )
+                        continue
+                    namespace, target_indexes = next(iter(targets.items()))
+                    usage["identifier_reference_namespaces"].add(namespace)
+                    usage["identifier_reference_paths"].setdefault(
+                        (*namespace, normalized_token), set()
+                    ).add((
+                        relative,
+                        base_path + (command_index, "stringArgs", argument_index),
+                        tuple(sorted(target_indexes)),
+                        expected_value,
+                        "string_comparison",
+                    ))
+    namespaces = {
+        namespace for namespace, values in identifier_indexes.items() if values
+    }
+    policies = {}
+    for namespace in namespaces:
+        profile = usage["database_identifier_access"].get(namespace, {})
+        if (
+            profile.get("unknown", 0)
+            or not (profile.get("numeric", 0) or profile.get("name", 0))
+        ):
+            policy = "unsafe"
+        elif profile.get("name", 0) or namespace in usage["identifier_reference_namespaces"]:
+            policy = "name_closed"
+        else:
+            policy = "numeric_only"
+        policies[namespace] = policy
+
+    usage["database_identifier_translation_policy"] = policies
     return usage
 
 
-def _database_value_marker(database_name, type_index, field_index, field, usage, type_name=""):
+def _write_analysis_diagnostics(game_path, usage):
+    items = sorted(
+        usage.get("analysis_diagnostics", []),
+        key=lambda item: (
+            str(item.get("reason", "")),
+            str(item.get("file", "")).casefold(),
+            repr(item.get("path", [])),
+        ),
+    )
+    reasons = {}
+    for item in items:
+        reason = str(item.get("reason") or "unknown")
+        reasons[reason] = reasons.get(reason, 0) + 1
+    payload = {
+        "schema": 1,
+        "wolf_export_schema": WOLF_EXPORT_SCHEMA,
+        "summary": {"protected": len(items), "reasons": reasons},
+        "items": items,
+    }
+    _write_json_atomic(
+        _state_path(game_path, ANALYSIS_DIAGNOSTICS_FILENAME), payload
+    )
+    return payload
+
+
+def _database_value_marker(
+    database_name,
+    type_index,
+    field_index,
+    field,
+    usage,
+    datum_name="",
+    schema_field=None,
+    data_index=None,
+):
     value = field.get("value")
     normalized_value = value.strip().casefold() if isinstance(value, str) else ""
+    normalized_datum_name = str(datum_name or "").strip().casefold()
     explicit_internal = _is_explicit_internal_database_text(value)
-    marker = (
-        "WOLFLogic"
-        if explicit_internal or _DEVELOPMENT_NAME_RE.search(str(type_name or ""))
-        else _database_field_marker(field.get("name"))
-    )
+    marker = "WOLFLogic"
     if usage:
         key = (database_name, type_index, field_index)
+        record_key = (database_name, type_index, data_index, field_index)
+        schema_name = str(
+            (
+                schema_field.get("name")
+                if isinstance(schema_field, dict)
+                else None
+            )
+            or field.get("name")
+            or ""
+        ).strip()
+        opaque_use = (
+            key in usage.get("opaque_database_fields", set())
+            or record_key in usage.get("opaque_database_records", set())
+        )
         if (
             key in usage["logic_database_fields"]
-            or value in usage["comparison_literals"]
+            or record_key in usage.get("logic_database_records", set())
+            or key in usage.get("unknown_database_fields", set())
+            or record_key in usage.get("unknown_database_records", set())
             or (
                 normalized_value
-                and (
-                    normalized_value in usage.get("logic_database_record_literals", set())
-                    or normalized_value in usage.get("logic_database_literals", set())
-                )
+                and normalized_value == normalized_datum_name
+                and (database_name, type_index, normalized_value)
+                in usage.get("named_database_record_references", set())
             )
         ):
             return "WOLFLogic"
-        if marker == "WOLFLogic" and not explicit_internal and key in usage["display_database_fields"]:
+        if opaque_use:
+            return "WOLFLogic"
+        if (
+            marker == "WOLFLogic"
+            and not explicit_internal
+            and not _database_schema_field_is_resource(schema_field)
+            and (
+                key in usage["display_database_fields"]
+                or record_key in usage.get("display_database_records", set())
+            )
+        ):
             return "WOLFText"
     return marker
 
 
 def _uses_first_string_database_id(datum, field_index):
+    # ponytail: WolfRPGText omits WOLF's data-ID mode. A blank record name plus
+    # a first string value is the observable equivalent; expose the mode to
+    # WolfRPGText if a game uses a different layout.
     if field_index != 0 or str(datum.get("name") or "").strip():
         return False
     fields = datum.get("data") or []
@@ -890,6 +3064,79 @@ def _uses_first_string_database_id(datum, field_index):
         and isinstance(fields[0].get("value"), str)
         and fields[0]["value"].strip()
     )
+
+
+def _first_string_database_marker(
+    database_name,
+    type_index,
+    field,
+    usage,
+    schema_field=None,
+    data_index=None,
+):
+    value = field.get("value")
+    symbol = value.strip().casefold() if isinstance(value, str) else value
+    translation_policy = (
+        _database_identifier_translation_policy(usage, (database_name, type_index))
+        if usage
+        else "unsafe"
+    )
+    field_key = (database_name, type_index, 0)
+    record_key = (database_name, type_index, data_index, 0)
+    visible = bool(
+        usage
+        and (
+            field_key in usage.get("visible_database_fields", set())
+            or record_key in usage.get("visible_database_records", set())
+        )
+    )
+    has_nonselector_logic = bool(
+        usage
+        and (
+            field_key in usage.get("nonselector_logic_database_fields", set())
+            or record_key in usage.get("nonselector_logic_database_records", set())
+        )
+    )
+    nonselector_codes = set()
+    if usage:
+        nonselector_codes.update(
+            usage.get("nonselector_logic_field_codes", {}).get(field_key, ())
+        )
+        nonselector_codes.update(
+            usage.get("nonselector_logic_record_codes", {}).get(record_key, ())
+        )
+    nonselector_logic = has_nonselector_logic and not (
+        nonselector_codes and nonselector_codes <= {112}
+    )
+    unknown_flow = bool(
+        usage
+        and (
+            field_key in usage.get("unknown_database_fields", set())
+            or record_key in usage.get("unknown_database_records", set())
+        )
+    )
+    opaque_flow = bool(
+        usage
+        and (
+            field_key in usage.get("opaque_database_fields", set())
+            or record_key in usage.get("opaque_database_records", set())
+        )
+    )
+    if (
+        not usage
+        or translation_policy == "unsafe"
+        or not visible
+        or nonselector_logic
+        or unknown_flow
+        or opaque_flow
+        or (database_name, type_index, symbol)
+        in usage.get("incomplete_identifier_symbols", set())
+        or _is_explicit_internal_database_text(value)
+        or _database_schema_field_is_resource(schema_field)
+        or _looks_like_resource(value)
+    ):
+        return "WOLFLogic"
+    return "WOLFText"
 
 
 def _json_entries(json_root, json_path, usage=None):
@@ -906,7 +3153,14 @@ def _json_entries(json_root, json_path, usage=None):
                 _add_entry(entries, {"kind": "json", "file": json_rel, "path": [key]}, data.get(key))
     elif parent == "common":
         for command_index, command in enumerate(data.get("commands", [])):
-            _command_entries(command, ["commands", command_index], entries, json_rel, usage)
+            _command_entries(
+                command,
+                ["commands", command_index],
+                entries,
+                json_rel,
+                usage,
+                data.get("id"),
+            )
     elif parent == "maps":
         for event_index, event in enumerate(data.get("events", [])):
             for page_index, page in enumerate(event.get("pages", [])):
@@ -921,12 +3175,21 @@ def _json_entries(json_root, json_path, usage=None):
     elif parent == "databases":
         database_name = os.path.basename(json_path).lower()
         for type_index, type_data in enumerate(data.get("types", [])):
+            schema_fields = type_data.get("fields") or []
             for data_index, datum in enumerate(type_data.get("data", [])):
                 fields = datum.get("data", [])
                 field_markers = []
                 for field_index, field in enumerate(fields):
+                    schema_field = schema_fields[field_index] if field_index < len(schema_fields) else None
                     field_markers.append(
-                        "WOLFLogic"
+                        _first_string_database_marker(
+                            database_name,
+                            type_index,
+                            field,
+                            usage,
+                            schema_field,
+                            data_index,
+                        )
                         if _uses_first_string_database_id(datum, field_index)
                         else _database_value_marker(
                             database_name,
@@ -934,7 +3197,9 @@ def _json_entries(json_root, json_path, usage=None):
                             field_index,
                             field,
                             usage,
-                            type_data.get("name"),
+                            datum.get("name"),
+                            schema_field,
+                            data_index,
                         )
                     )
                 logic_values = {
@@ -946,17 +3211,14 @@ def _json_entries(json_root, json_path, usage=None):
                 datum_name_path = ["types", type_index, "data", data_index, "name"]
                 normalized_datum_name = str(datum_name or "").strip().casefold()
                 datum_name_is_logic = (
-                    _DEVELOPMENT_NAME_RE.search(str(type_data.get("name") or ""))
-                    or _is_explicit_internal_database_text(datum_name)
+                    _is_explicit_internal_database_text(datum_name)
                     or datum_name in logic_values
                     or (usage and datum_name in usage["comparison_literals"])
                     or (
                         usage
                         and normalized_datum_name
-                        and (
-                            normalized_datum_name in usage.get("logic_database_record_literals", set())
-                            or normalized_datum_name in usage.get("logic_database_literals", set())
-                        )
+                        and (database_name, type_index, normalized_datum_name)
+                        in usage.get("named_database_record_references", set())
                     )
                 )
                 if datum_name_is_logic:
@@ -975,6 +3237,23 @@ def _json_entries(json_root, json_path, usage=None):
                     value = field.get("value")
                     if isinstance(value, str) and value != "INVALID_IGNORE":
                         path = ["types", type_index, "data", data_index, "data", field_index, "value"]
+                        first_string_id = _uses_first_string_database_id(datum, field_index)
+                        translation_policy = (
+                            _database_identifier_translation_policy(
+                                usage, (database_name, type_index)
+                            )
+                            if usage and first_string_id
+                            else None
+                        )
+                        normalized_identifier = (
+                            value.strip().casefold() if first_string_id else value
+                        )
+                        identifier_incomplete = bool(
+                            first_string_id
+                            and usage
+                            and (database_name, type_index, normalized_identifier)
+                            in usage.get("incomplete_identifier_symbols", set())
+                        )
                         _add_entry(
                             entries,
                             {
@@ -982,9 +3261,79 @@ def _json_entries(json_root, json_path, usage=None):
                                 "file": json_rel,
                                 "path": path,
                                 "marker": field_marker,
-                                **({"logic_role": "identifier"} if field_marker == "WOLFLogic" else {}),
+                                **(
+                                    {
+                                        "identifier_namespace": [database_name, type_index],
+                                        "identifier_record": [database_name, type_index, data_index],
+                                        "identifier_collision_policy": (
+                                            _database_identifier_collision_policy(
+                                                usage, (database_name, type_index)
+                                            )
+                                            if usage
+                                            else "unknown"
+                                        ),
+                                        "identifier_translation_policy": translation_policy,
+                                        "identifier_missing_names": sorted(
+                                            usage.get("missing_identifier_names", {}).get(
+                                                (database_name, type_index), ()
+                                            )
+                                        ) if usage else [],
+                                        "identifier_reference_complete": (
+                                            field_marker != "WOLFLogic"
+                                            and translation_policy in ("numeric_only", "name_closed")
+                                            and not identifier_incomplete
+                                        ),
+                                        "identifier_references": [
+                                            {
+                                                "file": relative,
+                                                "path": list(reference_path),
+                                                "target_data_indexes": list(target_data_indexes),
+                                                "expected_original": expected_original,
+                                                "reference_kind": reference_kind,
+                                            }
+                                            for (
+                                                relative,
+                                                reference_path,
+                                                target_data_indexes,
+                                                expected_original,
+                                                reference_kind,
+                                            ) in sorted(
+                                                (
+                                                    usage.get("identifier_reference_paths", {}).get(
+                                                        (
+                                                            database_name,
+                                                            type_index,
+                                                            normalized_identifier,
+                                                        ),
+                                                        (),
+                                                    )
+                                                    if translation_policy == "name_closed"
+                                                    else ()
+                                                ),
+                                                key=lambda item: (
+                                                    item[0].casefold(), repr(item[1]), item[2]
+                                                ),
+                                            )
+                                        ] if usage else [],
+                                    }
+                                    if first_string_id
+                                    else {}
+                                ),
+                                **(
+                                    {
+                                        "logic_role": (
+                                            "resource"
+                                            if field_index < len(schema_fields)
+                                            and _database_schema_field_is_resource(schema_fields[field_index])
+                                            else "identifier"
+                                        )
+                                    }
+                                    if field_marker == "WOLFLogic"
+                                    else {}
+                                ),
                             },
                             value,
+                            protect_resource=True,
                         )
     return entries
 
@@ -1021,7 +3370,6 @@ def _iter_string_values(value):
 def _collect_runtime_references(json_root):
     strings = []
     scene_ids = set()
-    called_common_events = set()
     for root, _, files in os.walk(json_root):
         parent = os.path.basename(root).lower()
         for filename in files:
@@ -1034,6 +3382,8 @@ def _collect_runtime_references(json_root):
             except (OSError, ValueError) as error:
                 raise WolfEngineError(f"无法分析 WOLF 运行时引用: {filename}: {error}") from error
             strings.extend(_iter_string_values(data))
+            if not isinstance(data, dict):
+                continue
             if parent in ("common", "maps"):
                 sequences = [data.get("commands", [])] if parent == "common" else [
                     page.get("list", [])
@@ -1046,16 +3396,12 @@ def _collect_runtime_references(json_root):
                             code = int(command.get("code", -1))
                         except (TypeError, ValueError):
                             continue
-                        if code != 300:
-                            continue
-                        string_args = command.get("stringArgs") or []
-                        if string_args and isinstance(string_args[0], str) and string_args[0].strip():
-                            called_common_events.add(string_args[0].strip().casefold())
-                        scene_ids.update(
-                            value.strip().casefold()
-                            for value in string_args[1:]
-                            if isinstance(value, str) and value.strip()
-                        )
+                        if code == 300:
+                            scene_ids.update(
+                                value.strip().casefold()
+                                for value in (command.get("stringArgs") or [])[1:]
+                                if isinstance(value, str) and value.strip()
+                            )
             elif parent == "databases":
                 for type_data in data.get("types", []):
                     for datum in type_data.get("data", []):
@@ -1067,7 +3413,7 @@ def _collect_runtime_references(json_root):
                                 and _SCENARIO_FIELD_RE.search(str(field.get("name") or ""))
                             ):
                                 scene_ids.add(value.strip().casefold())
-    return strings, scene_ids, called_common_events
+    return strings, scene_ids
 
 
 def _referenced_map_json_names(references):
@@ -1077,6 +3423,68 @@ def _referenced_map_json_names(references):
         if isinstance(reference, str)
         for match in _MAP_REFERENCE_RE.finditer(reference.replace("\\", "/"))
     }
+
+
+def _runtime_map_json_names(json_root, references):
+    occurrences = [
+        f"{match.group(1)}.json".casefold()
+        for reference in references
+        if isinstance(reference, str)
+        for match in _MAP_REFERENCE_RE.finditer(reference.replace("\\", "/"))
+    ]
+    referenced = set(occurrences)
+    database_dir = os.path.join(json_root, "databases")
+    system_paths = [
+        os.path.join(database_dir, filename)
+        for filename in os.listdir(database_dir)
+        if filename.casefold() == "sysdatabase.json"
+    ] if os.path.isdir(database_dir) else []
+    if len(system_paths) != 1:
+        return referenced
+    try:
+        with open(system_paths[0], "r", encoding="utf-8") as source:
+            system_database = json.load(source)
+    except (OSError, ValueError) as error:
+        raise WolfEngineError(f"无法分析 WOLF 运行地图设置: {error}") from error
+
+    editor_only = set()
+    for type_data in system_database.get("types", []):
+        schema_fields = type_data.get("fields") or []
+        for datum in type_data.get("data", []):
+            if str(datum.get("name") or "").strip():
+                continue
+            fields = datum.get("data") or []
+            for field_index, field in enumerate(fields):
+                schema_field = (
+                    schema_fields[field_index]
+                    if field_index < len(schema_fields)
+                    else {}
+                )
+                field_name = str(
+                    (schema_field or {}).get("name") or field.get("name") or ""
+                )
+                if not _MAP_FILE_FIELD_RE.search(field_name):
+                    continue
+                editor_only.update(_referenced_map_json_names([field.get("value")]))
+
+    # ponytail: A blank SysDB map-setting row is WOLF's editor/test-play slot.
+    # Exporting its role from WolfRPGText removes the duplicate-reference fallback.
+    literal_runtime = referenced - {
+        filename for filename in editor_only if occurrences.count(filename) == 1
+    }
+    dynamic_map_reference = any(
+        re.search(r"MapData[/\\].*\\[A-Za-z]+\[.*\.mps", reference, re.IGNORECASE)
+        for reference in references
+        if isinstance(reference, str)
+    )
+    if not dynamic_map_reference:
+        return literal_runtime
+    maps_dir = os.path.join(json_root, "maps")
+    return {
+        filename.casefold()
+        for filename in os.listdir(maps_dir)
+        if filename.lower().endswith(".json") and filename.casefold() not in editor_only
+    } if os.path.isdir(maps_dir) else literal_runtime
 
 
 def _discover_text_resources(data_path, references):
@@ -1507,6 +3915,9 @@ def _write_string_script(path, entries):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as output:
         for metadata, text in entries:
+            metadata = dict(metadata)
+            metadata["wolf_export_schema"] = WOLF_EXPORT_SCHEMA
+            metadata["wolf_code"] = _translation_code(metadata)
             metadata, text = _encode_wolf_transport(metadata, text)
             marker = metadata.get("marker", "Message")
             output.write(f"@WOLF {_encode_metadata(metadata)}\n#{marker}#\n")
@@ -1522,19 +3933,33 @@ def export_to_string_scripts(game_path, message_queue=None):
     snapshot_path = _state_path(game_path, JSON_SNAPSHOT_DIRNAME)
     string_scripts_path = os.path.join(game_path, STRING_SCRIPTS_DIRNAME)
     backup_path = os.path.join(game_path, STRING_SCRIPTS_ORIGIN_DIRNAME)
+    diagnostics_path = _state_path(game_path, ANALYSIS_DIAGNOSTICS_FILENAME)
 
     for path in (snapshot_path, string_scripts_path, backup_path):
         if os.path.exists(path) and not file_system.safe_remove(path):
             raise WolfEngineError(f"无法清理旧目录: {path}")
+    if os.path.exists(diagnostics_path) and not file_system.safe_remove(diagnostics_path):
+        raise WolfEngineError(f"无法清理旧分析诊断: {diagnostics_path}")
     os.makedirs(snapshot_path, exist_ok=True)
     os.makedirs(string_scripts_path, exist_ok=True)
 
     if message_queue:
         message_queue.put(("log", ("normal", "使用 WolfRPGText 解析 WOLF 二进制数据...")))
     uberwolf.dump_text(data_path, snapshot_path)
-    usage = _analyze_json_usage(snapshot_path)
-    runtime_references, scene_references, called_common_events = _collect_runtime_references(snapshot_path)
-    referenced_maps = _referenced_map_json_names(runtime_references)
+    runtime_references, scene_references = _collect_runtime_references(snapshot_path)
+    referenced_maps = _runtime_map_json_names(snapshot_path, runtime_references)
+    usage = _analyze_json_usage(snapshot_path, referenced_maps)
+    diagnostics = _write_analysis_diagnostics(game_path, usage)
+    if message_queue:
+        message_queue.put((
+            "log",
+            (
+                "warning" if diagnostics["summary"]["protected"] else "normal",
+                "WOLF 分析完成：保护了 "
+                f"{diagnostics['summary']['protected']} 个无法证明用途的入口或引用；"
+                f"详见 {diagnostics_path}",
+            ),
+        ))
 
     file_count = 0
     entry_count = 0
@@ -1543,13 +3968,7 @@ def export_to_string_scripts(game_path, message_queue=None):
             if not filename.lower().endswith(".json"):
                 continue
             json_path = os.path.join(root, filename)
-            common_event_name = re.sub(r"^\d+_", "", os.path.splitext(filename)[0])
-            if (
-                os.path.basename(root).lower() == "common"
-                and _DEVELOPMENT_NAME_RE.search(common_event_name)
-                and common_event_name.casefold() not in called_common_events
-            ):
-                continue
+            json_relative = os.path.relpath(json_path, snapshot_path).replace(os.sep, "/")
             if (
                 os.path.basename(root).lower() == "maps"
                 and referenced_maps
@@ -1625,9 +4044,44 @@ def _iter_released_entries(string_scripts_path):
             index = 0
             while index < len(lines):
                 if not lines[index].startswith("@WOLF "):
+                    if lines[index].strip():
+                        raise WolfEngineError(
+                            f"WOLF StringScripts 缺少当前版本元数据，请重新导出: {path}"
+                        )
                     index += 1
                     continue
                 metadata = _decode_metadata(lines[index][6:].strip())
+                if metadata.get("wolf_export_schema") != WOLF_EXPORT_SCHEMA:
+                    raise WolfEngineError(
+                        f"WOLF StringScripts 版本已过期，请重新导出翻译文本: {path}"
+                    )
+                expected_code = _translation_code(metadata)
+                if metadata.get("wolf_code") != expected_code:
+                    raise WolfEngineError(f"WOLF StringScripts 结构 Code 无效: {path}")
+                namespace = metadata.get("identifier_namespace")
+                if namespace is not None:
+                    if not isinstance(namespace, list) or len(namespace) != 2:
+                        raise WolfEngineError(f"WOLF 数据库标识命名空间无效: {path}")
+                    policies = (
+                        metadata.get("identifier_collision_policy"),
+                        metadata.get("identifier_translation_policy"),
+                    )
+                    if policies not in {
+                        ("numeric_only", "numeric_only"),
+                        ("name_referenced", "name_closed"),
+                        ("unknown", "unsafe"),
+                    }:
+                        raise WolfEngineError(f"WOLF 数据库标识策略组合无效: {path}")
+                    if not isinstance(metadata.get("identifier_reference_complete"), bool):
+                        raise WolfEngineError(f"WOLF 数据库标识引用状态无效: {path}")
+                    if not isinstance(metadata.get("identifier_references"), list):
+                        raise WolfEngineError(f"WOLF 数据库标识引用图无效: {path}")
+                    missing_names = metadata.get("identifier_missing_names")
+                    if (
+                        not isinstance(missing_names, list)
+                        or not all(isinstance(name, str) and name for name in missing_names)
+                    ):
+                        raise WolfEngineError(f"WOLF 数据库缺失标识保护无效: {path}")
                 index += 1
                 if index >= len(lines):
                     raise WolfEngineError(f"WOLF 脚本元数据后缺少文本标记: {path}")
@@ -1718,12 +4172,44 @@ def validate_translation_release(game_path, translations):
     stats = {"locations": 0, "changed": 0, "unchanged": 0, "fallback": 0, "missing": 0}
 
     released_entries = list(_iter_released_entries(origin_path))
+    expected_codes = {}
+    for script_rel, metadata, full_text in released_entries:
+        if metadata.get("marker") == "WOLFLogic":
+            continue
+        source_text = _split_text_format(full_text)[0]
+        code = metadata["wolf_code"]
+        expected_codes.setdefault((script_rel, source_text), set()).add(code)
+    verified_codes = set()
     protected_logic_literals = {
         _split_text_format(full_text)[0]
         for _script_rel, metadata, full_text in released_entries
         if metadata.get("marker") == "WOLFLogic"
         and metadata.get("logic_role", "comparison") == "comparison"
     }
+    identifier_targets = {}
+    identifier_policies = {}
+    for script_rel, metadata, full_text in released_entries:
+        namespace = metadata.get("identifier_namespace")
+        if not isinstance(namespace, list) or len(namespace) != 2:
+            continue
+        source_text = _split_text_format(full_text)[0]
+        result = translations.get(script_rel, {}).get(source_text)
+        translated = (
+            result.get("text")
+            if metadata.get("marker") != "WOLFLogic"
+            and isinstance(result, dict)
+            and isinstance(result.get("text"), str)
+            and result["text"].strip()
+            else source_text
+        )
+        namespace = tuple(namespace)
+        target = identifier_targets.setdefault(namespace, {}).setdefault(
+            translated.casefold(), {"translated": translated, "sources": set()}
+        )
+        target["sources"].add(source_text)
+        identifier_policies.setdefault(namespace, set()).add(
+            metadata["identifier_collision_policy"]
+        )
     for script_rel, metadata, full_text in released_entries:
         source_text = _split_text_format(full_text)[0]
         marker = metadata.get("marker", "Message")
@@ -1738,7 +4224,46 @@ def validate_translation_release(game_path, translations):
             errors.append(f"缺失译文: {script_rel}: {source_text[:80]!r}")
             continue
 
+        code_key = (script_rel, source_text)
+        if marker != "WOLFLogic" and code_key not in verified_codes:
+            verified_codes.add(code_key)
+            if result.get("wolf_export_schema") != WOLF_EXPORT_SCHEMA:
+                errors.append(
+                    f"WOLF 导出版本不匹配，译文来自旧版数据: "
+                    f"{script_rel}: {source_text[:80]!r}"
+                )
+            actual_codes = result.get("wolf_codes")
+            if not isinstance(actual_codes, list) or not all(
+                isinstance(code, str) and code for code in actual_codes
+            ):
+                errors.append(f"缺少 WOLF 结构 Code: {script_rel}: {source_text[:80]!r}")
+            elif set(actual_codes) != expected_codes.get(code_key, set()):
+                errors.append(f"WOLF 结构 Code 不匹配，译文可能来自旧版导出: {script_rel}: {source_text[:80]!r}")
+
         translated = result["text"]
+        namespace = metadata.get("identifier_namespace")
+        if translated != source_text and isinstance(namespace, list) and len(namespace) == 2:
+            translation_policy = metadata["identifier_translation_policy"]
+            missing_names = {
+                name.casefold()
+                for name in metadata.get("identifier_missing_names") or []
+            }
+            if translated.casefold() in missing_names:
+                errors.append(
+                    f"WOLF 数据库译名会激活原本不存在的名称: "
+                    f"{script_rel}: {translated!r}"
+                )
+            elif translation_policy == "unsafe":
+                errors.append(
+                    f"WOLF 数据库标识引用未闭合，禁止翻译: {script_rel}: {source_text[:80]!r}"
+                )
+            elif (
+                translation_policy == "name_closed"
+                and metadata.get("identifier_reference_complete") is not True
+            ):
+                errors.append(
+                    f"WOLF 数据库标识缺少完整引用图，禁止翻译: {script_rel}: {source_text[:80]!r}"
+                )
         if result.get("status") == "fallback":
             stats["fallback"] += 1
             errors.append(f"仍为 fallback: {script_rel}: {source_text[:80]!r}")
@@ -1750,8 +4275,8 @@ def validate_translation_release(game_path, translations):
                 and text_processing.contains_japanese_kana(source_text)
             ):
                 errors.append(f"日文原样保留: {script_rel}: {source_text[:80]!r}")
-            elif marker != "WOLFLogic" and source_text not in protected_logic_literals and _CJK_RE.search(source_text):
-                warnings.append(f"纯汉字原文未变化: {script_rel}: {source_text[:80]!r}")
+            # elif marker != "WOLFLogic" and source_text not in protected_logic_literals and _CJK_RE.search(source_text):
+            #     warnings.append(f"纯汉字原文未变化: {script_rel}: {source_text[:80]!r}")
         else:
             stats["changed"] += 1
 
@@ -1785,6 +4310,20 @@ def validate_translation_release(game_path, translations):
                     errors.append(f"逻辑字面量译法冲突: {source_text!r}: {previous!r} / {translated!r}")
         if marker != "WOLFLogic":
             duplicate_targets.setdefault(source_text, set()).add(translated)
+
+    for namespace, targets in identifier_targets.items():
+        for target in targets.values():
+            translated = target["translated"]
+            sources = target["sources"]
+            if len({source.casefold() for source in sources}) > 1:
+                message = (
+                    f"WOLF 数据库译名碰撞: {namespace[0]} 类型{namespace[1]}: "
+                    f"{sorted(sources)!r} -> {translated!r}"
+                )
+                if identifier_policies.get(namespace) == {"numeric_only"}:
+                    warnings.append(f"{message}（该类型仅按数字 ID 读取，已允许）")
+                else:
+                    errors.append(message)
 
     for file_name, entries in translations.items():
         if file_name not in expected:
@@ -2072,8 +4611,251 @@ def _json_path_value(data, path):
     return value
 
 
-def _verify_logic_json_unchanged(original_root, patched_root):
-    usage = _analyze_json_usage(original_root)
+def _synchronize_database_identifiers(
+    original_root, patched_root, changes, analysis_usage=None
+):
+    if analysis_usage is None:
+        analysis_usage = _analyze_json_usage(original_root)
+    mappings = {}
+    policies = {}
+    translation_policies = {}
+    missing_names_by_namespace = {}
+    explicit_references = []
+    for change in changes:
+        if not isinstance(change, (tuple, list)) or len(change) != 7:
+            raise WolfEngineError("WOLF 数据库标识同步元数据版本无效，请重新导出翻译文本")
+        (
+            namespace,
+            original,
+            translated,
+            policy,
+            references,
+            translation_policy,
+            missing_names,
+        ) = change
+        if (
+            not isinstance(namespace, (tuple, list))
+            or len(namespace) != 2
+            or not isinstance(original, str)
+            or not isinstance(translated, str)
+            or (policy, translation_policy) not in {
+                ("numeric_only", "numeric_only"),
+                ("name_referenced", "name_closed"),
+            }
+            or not isinstance(references, list)
+            or not isinstance(missing_names, list)
+            or not all(isinstance(name, str) and name for name in missing_names)
+        ):
+            raise WolfEngineError("WOLF 数据库标识同步元数据无效")
+        if _looks_like_resource(original) or _looks_like_resource(translated):
+            raise WolfEngineError("WOLF 资源路径禁止参与数据库标识同步")
+        key = tuple(namespace)
+        if (
+            *key,
+            original.strip().casefold(),
+        ) in analysis_usage.get("incomplete_identifier_symbols", set()):
+            raise WolfEngineError(
+                f"WOLF 数据库标识引用未闭合，拒绝导入: {key}: {original!r}"
+            )
+        policies.setdefault(key, set()).add(policy)
+        translation_policies.setdefault(key, set()).add(translation_policy)
+        normalized_missing = frozenset(name.casefold() for name in missing_names)
+        previous_missing = missing_names_by_namespace.setdefault(
+            key, normalized_missing
+        )
+        if previous_missing != normalized_missing:
+            raise WolfEngineError("WOLF 数据库缺失标识保护不一致")
+        if translated.casefold() in normalized_missing:
+            raise WolfEngineError(
+                f"WOLF 数据库译名会激活原本不存在的名称: {key}: {translated!r}"
+            )
+        previous = mappings.setdefault(key, {}).setdefault(original, translated)
+        if previous != translated:
+            raise WolfEngineError(
+                f"WOLF 数据库标识译法冲突: {key}: {original!r}: {previous!r} / {translated!r}"
+            )
+        explicit_references.append((key, original, translated, references))
+
+    original_databases = {}
+    patched_databases = {}
+    database_relatives = {}
+    allowed = set()
+    original_identifier_indexes = {}
+
+    def database_pair(database_name):
+        if database_name not in original_databases:
+            database_dir = _safe_join(original_root, "databases")
+            filenames = [
+                filename
+                for filename in os.listdir(database_dir)
+                if filename.casefold() == database_name.casefold()
+            ]
+            if len(filenames) != 1:
+                raise WolfEngineError(f"WOLF 数据库文件无法唯一定位: {database_name}")
+            relative = f"databases/{filenames[0]}"
+            database_relatives[database_name] = relative
+            with open(_safe_join(original_root, relative), "r", encoding="utf-8") as source:
+                original_databases[database_name] = json.load(source)
+            with open(_safe_join(patched_root, relative), "r", encoding="utf-8") as source:
+                patched_databases[database_name] = json.load(source)
+        return (
+            database_relatives[database_name],
+            original_databases[database_name],
+            patched_databases[database_name],
+        )
+
+    def identifier_indexes(database, type_index):
+        try:
+            data = database["types"][type_index]["data"]
+        except (IndexError, KeyError, TypeError) as error:
+            raise WolfEngineError(
+                f"WOLF 数据库标识命名空间失效: 类型{type_index}"
+            ) from error
+        result = {}
+        for data_index, datum in enumerate(data):
+            fields = datum.get("data") or []
+            if not fields or not _uses_first_string_database_id(datum, 0):
+                continue
+            value = fields[0].get("value")
+            if isinstance(value, str) and value:
+                result.setdefault(value, set()).add(data_index)
+        return result
+
+    for (database_name, type_index), mapping in mappings.items():
+        relative, original_database, patched_database = database_pair(database_name)
+        original_indexes = identifier_indexes(original_database, type_index)
+        patched_indexes = identifier_indexes(patched_database, type_index)
+        original_folded = {}
+        patched_folded = {}
+        for value, indexes in original_indexes.items():
+            original_folded.setdefault(value.casefold(), set()).update(indexes)
+        for value, indexes in patched_indexes.items():
+            patched_folded.setdefault(value.casefold(), set()).update(indexes)
+        original_identifier_indexes[(database_name, type_index)] = original_folded
+        groups = {}
+        for original in original_indexes:
+            translated = mapping.get(original, original)
+            groups.setdefault(translated.casefold(), set()).add(original)
+        collisions = [
+            (translated, sources)
+            for translated, sources in groups.items()
+            if len({source.casefold() for source in sources}) > 1
+        ]
+        if collisions and policies.get((database_name, type_index)) != {"numeric_only"}:
+            translated, sources = collisions[0]
+            raise WolfEngineError(
+                f"WOLF 数据库译名碰撞: {database_name} 类型{type_index}: "
+                f"{sorted(sources)!r} -> {translated!r}"
+            )
+        if translation_policies.get((database_name, type_index)) == {"name_closed"}:
+            for original, translated in mapping.items():
+                source_indexes = original_folded.get(original.casefold(), set())
+                target_indexes = patched_folded.get(translated.casefold(), set())
+                if not source_indexes or target_indexes != source_indexes:
+                    raise WolfEngineError(
+                        f"WOLF 数据库名称解析目标改变: {database_name} 类型{type_index}: "
+                        f"{original!r} -> {translated!r}"
+                    )
+                for data_index in source_indexes:
+                    allowed.add((
+                        relative,
+                        ("types", type_index, "data", data_index, "data", 0, "value"),
+                    ))
+
+    reference_edges = {}
+    for namespace, original, translated, references in explicit_references:
+        source_indexes = original_identifier_indexes.get(namespace, {}).get(
+            original.casefold(), set()
+        )
+        for reference in references:
+            if not isinstance(reference, dict):
+                raise WolfEngineError("WOLF 数据库标识引用图无效")
+            relative = reference.get("file")
+            path = reference.get("path")
+            target_indexes = reference.get("target_data_indexes")
+            if (
+                not isinstance(relative, str)
+                or not isinstance(path, list)
+                or not isinstance(target_indexes, list)
+                or set(target_indexes) != source_indexes
+            ):
+                raise WolfEngineError(
+                    f"WOLF 数据库标识引用目标不一致: {namespace}: {original!r}"
+                )
+            expected = reference.get("expected_original", original)
+            if (
+                not isinstance(expected, str)
+                or original.casefold() not in expected.casefold()
+            ):
+                raise WolfEngineError(
+                    f"WOLF 数据库标识引用原值无效: {relative}: {path}"
+                )
+            edge_key = (relative.casefold(), tuple(path))
+            edge = reference_edges.setdefault(edge_key, {
+                "relative": relative,
+                "path": tuple(path),
+                "expected": expected,
+                "mappings": {},
+            })
+            if edge["expected"] != expected:
+                raise WolfEngineError(f"WOLF 数据库标识引用路径冲突: {relative}: {path}")
+            previous = edge["mappings"].setdefault(original.casefold(), translated)
+            if previous != translated:
+                raise WolfEngineError(f"WOLF 数据库标识引用译法冲突: {relative}: {path}")
+
+    reference_cache = {}
+    for edge in reference_edges.values():
+        relative = edge["relative"]
+        if relative not in reference_cache:
+            with open(_safe_join(original_root, relative), "r", encoding="utf-8") as source:
+                original_data = json.load(source)
+            with open(_safe_join(patched_root, relative), "r", encoding="utf-8") as source:
+                patched_data = json.load(source)
+            reference_cache[relative] = original_data, patched_data
+        original_data, patched_data = reference_cache[relative]
+        path = edge["path"]
+        try:
+            original_value = _json_path_value(original_data, path)
+            patched_value = _json_path_value(patched_data, path)
+        except (IndexError, KeyError, TypeError) as error:
+            raise WolfEngineError(
+                f"WOLF 数据库标识引用路径失效: {relative}: {list(path)}"
+            ) from error
+        if original_value != edge["expected"]:
+            raise WolfEngineError(
+                f"WOLF 数据库标识引用原值改变: {relative}: {list(path)}"
+            )
+        sources = sorted(edge["mappings"], key=len, reverse=True)
+        pattern = re.compile(
+            "|".join(re.escape(source) for source in sources), re.IGNORECASE
+        )
+        translated_value = pattern.sub(
+            lambda match: edge["mappings"][match.group(0).casefold()],
+            original_value,
+        )
+        if patched_value not in (original_value, translated_value):
+            raise WolfEngineError(
+                f"WOLF 数据库标识引用联动冲突: {relative}: {list(path)}"
+            )
+        _set_json_path(patched_data, list(path), translated_value)
+        allowed.add((relative, path))
+
+    for relative, (_original_data, patched_data) in reference_cache.items():
+        _write_json_atomic(_safe_join(patched_root, relative), patched_data)
+
+    return allowed
+
+
+def _verify_logic_json_unchanged(
+    original_root, patched_root, allowed_changes=None, usage=None
+):
+    if usage is None:
+        runtime_references, _scene_references = _collect_runtime_references(original_root)
+        usage = _analyze_json_usage(
+            original_root,
+            _runtime_map_json_names(original_root, runtime_references),
+        )
+    allowed_changes = set(allowed_changes or ())
     protected = set()
     for root, _, files in os.walk(original_root):
         for filename in files:
@@ -2086,6 +4868,8 @@ def _verify_logic_json_unchanged(original_root, patched_root):
 
     cache = {}
     for relative, path in sorted(protected, key=lambda item: (item[0].casefold(), repr(item[1]))):
+        if (relative, path) in allowed_changes:
+            continue
         if relative not in cache:
             try:
                 with open(_safe_join(original_root, relative), "r", encoding="utf-8") as source:
@@ -2544,7 +5328,11 @@ def import_from_string_scripts(game_path, message_queue=None):
             origin_path
         )
     }
+    if not origin_entries:
+        raise WolfEngineError("WOLF StringScripts_Origin 不含当前版本条目，请重新导出文本")
     released_entries = list(_iter_released_entries(scripts_path))
+    if not released_entries:
+        raise WolfEngineError("WOLF StringScripts 不含当前版本条目，请重新导出文本")
     with tempfile.TemporaryDirectory(prefix="windy-wolf-import-") as temp_root:
         patch_path = os.path.join(temp_root, "json")
         staging_data = os.path.join(temp_root, "Data")
@@ -2558,6 +5346,7 @@ def import_from_string_scripts(game_path, message_queue=None):
         applied = 0
         changed = 0
         font_texts = []
+        identifier_changes = []
         seen_identities = set()
         for script_rel, metadata, text in released_entries:
             identity = _entry_identity(script_rel, metadata)
@@ -2580,23 +5369,66 @@ def import_from_string_scripts(game_path, message_queue=None):
             if text != original_text:
                 changed += 1
             target_text = _decode_wolf_transport(text, metadata)
+            original_target_text = _decode_wolf_transport(original_text, metadata)
+            namespace = metadata.get("identifier_namespace")
+            if target_text != original_target_text and isinstance(namespace, list) and len(namespace) == 2:
+                translation_policy = metadata["identifier_translation_policy"]
+                if translation_policy == "unsafe":
+                    raise WolfEngineError(f"WOLF 数据库标识引用未闭合，拒绝导入: {script_rel}")
+                if (
+                    translation_policy == "name_closed"
+                    and metadata.get("identifier_reference_complete") is not True
+                ):
+                    raise WolfEngineError(f"WOLF 数据库标识缺少完整引用图，拒绝导入: {script_rel}")
+                references = metadata.get("identifier_references") or []
+                if not all(
+                    isinstance(reference, dict)
+                    and isinstance(reference.get("file"), str)
+                    and isinstance(reference.get("path"), list)
+                    and isinstance(reference.get("target_data_indexes"), list)
+                    and all(
+                        isinstance(index, int) and index >= 0
+                        for index in reference["target_data_indexes"]
+                    )
+                    for reference in references
+                ):
+                    raise WolfEngineError(f"WOLF 数据库标识引用图无效: {script_rel}")
+                if translation_policy != "name_closed":
+                    references = []
+                collision_policy = metadata["identifier_collision_policy"]
+                identifier_changes.append(
+                    (
+                        namespace,
+                        original_target_text,
+                        target_text,
+                        collision_policy,
+                        references,
+                        translation_policy,
+                        metadata.get("identifier_missing_names") or [],
+                    )
+                )
             if metadata.get("marker") != "WOLFLogic":
                 font_texts.append(target_text)
-            kind = metadata.get("kind")
-            rel = metadata.get("file")
-            if kind == "json":
-                target = _safe_join(patch_path, rel)
-                if target not in json_cache:
-                    with open(target, "r", encoding="utf-8") as source:
-                        json_cache[target] = json.load(source)
-                _set_json_path(json_cache[target], metadata["path"], target_text)
-            elif kind == "txt":
-                restored_text = _restore_line_prefixes(target_text, metadata)
-                txt_changes.setdefault(rel, []).append((metadata["start"], metadata["end"], restored_text))
-            elif kind == "csv":
-                csv_changes.setdefault(rel, []).append((metadata["row"], metadata["column"], target_text))
-            else:
-                raise WolfEngineError(f"未知的 WOLF 文本类型: {kind}")
+            if target_text != original_target_text:
+                kind = metadata.get("kind")
+                rel = metadata.get("file")
+                if kind == "json":
+                    target = _safe_join(patch_path, rel)
+                    if target not in json_cache:
+                        with open(target, "r", encoding="utf-8") as source:
+                            json_cache[target] = json.load(source)
+                    _set_json_path(json_cache[target], metadata["path"], target_text)
+                elif kind == "txt":
+                    restored_text = _restore_line_prefixes(target_text, metadata)
+                    txt_changes.setdefault(rel, []).append((
+                        metadata["start"], metadata["end"], restored_text
+                    ))
+                elif kind == "csv":
+                    csv_changes.setdefault(rel, []).append((
+                        metadata["row"], metadata["column"], target_text
+                    ))
+                else:
+                    raise WolfEngineError(f"未知的 WOLF 文本类型: {kind}")
             applied += 1
 
         missing_identities = set(origin_entries) - seen_identities
@@ -2605,7 +5437,17 @@ def import_from_string_scripts(game_path, message_queue=None):
 
         for path, data in json_cache.items():
             _write_json_atomic(path, data)
-        _verify_logic_json_unchanged(snapshot_path, patch_path)
+        runtime_references, _scene_references = _collect_runtime_references(snapshot_path)
+        verification_usage = _analyze_json_usage(
+            snapshot_path,
+            _runtime_map_json_names(snapshot_path, runtime_references),
+        )
+        allowed_identifier_changes = _synchronize_database_identifiers(
+            snapshot_path, patch_path, identifier_changes, verification_usage
+        ) if identifier_changes else set()
+        _verify_logic_json_unchanged(
+            snapshot_path, patch_path, allowed_identifier_changes, verification_usage
+        )
 
         applied_font_slots = _read_game_json_slots(patch_path)
         for warning in _font_coverage_warnings(game_path, applied_font_slots, font_texts):

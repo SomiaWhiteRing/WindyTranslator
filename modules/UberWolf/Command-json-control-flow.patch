@@ -1,0 +1,16 @@
+diff --git a/UberWolfLib/WolfRPG/Command.hpp b/UberWolfLib/WolfRPG/Command.hpp
+--- a/UberWolfLib/WolfRPG/Command.hpp
++++ b/UberWolfLib/WolfRPG/Command.hpp
+@@ -168,11 +168,9 @@ public:
+ 	virtual nlohmann::ordered_json ToJson() const
+ 	{
+-		if (m_stringArgs.empty() && m_args.empty())
+-			return nlohmann::ordered_json();
+-
+ 		nlohmann::ordered_json json;
+ 		json["code"]    = static_cast<int32_t>(m_cid);
+ 		json["codeStr"] = ToUTF8(GetClassString());
++		json["indent"]  = m_indent;
+ 
+ 		if (!m_stringArgs.empty())
+ 		{
