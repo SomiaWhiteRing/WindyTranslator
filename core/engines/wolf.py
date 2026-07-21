@@ -1,3 +1,9 @@
+"""隐藏的实验性 WOLF RPG Editor 兼容实现。
+
+该路径仅为仍需手动使用它的高级用户保留，不属于项目承诺支持或公开文档化的功能。
+除非正在维护本模块，否则不要在常规 UI、文档或默认开发流程中暴露它。
+"""
+
 import base64
 import csv
 import hashlib

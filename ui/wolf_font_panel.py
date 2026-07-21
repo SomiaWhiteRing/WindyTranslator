@@ -1,3 +1,5 @@
+"""仅在识别到 WOLF 游戏后挂载的隐藏实验性字体面板。"""
+
 import os
 import threading
 import tkinter as tk

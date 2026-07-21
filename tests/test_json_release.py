@@ -206,31 +206,3 @@ def test_apply_translations_write_failure_keeps_original(tmp_path, monkeypatch):
 
     assert script_path.read_text(encoding="utf-8") == original
     assert not (tmp_path / "Map001.txt.tmp").exists()
-
-
-def test_wolf_release_validation_stops_before_restore(tmp_path):
-    from core.engines import wolf
-
-    game_path = tmp_path / "Game"
-    backup_path = game_path / "StringScripts_Origin"
-    current_path = game_path / "StringScripts"
-    translated_json_path = tmp_path / "translation_translated.json"
-    (game_path / "Game.exe").parent.mkdir(parents=True)
-    (game_path / "Game.exe").write_bytes(b"")
-    (game_path / "Data.wolf").write_bytes(b"")
-    entries = []
-    wolf._add_entry(entries, {"kind": "json", "file": "a.json", "path": [0]}, "日本語")
-    wolf._write_string_script(str(backup_path / "WOLF" / "sample.txt"), entries)
-    current_path.mkdir()
-    (current_path / "keep.txt").write_text("keep", encoding="utf-8")
-    translated_json_path.write_text("{}", encoding="utf-8")
-
-    messages = queue.Queue()
-    result = run_release_json(str(game_path), str(tmp_path), str(translated_json_path), messages)
-
-    assert result is False
-    assert (current_path / "keep.txt").read_text(encoding="utf-8") == "keep"
-    assert any(
-        kind == "status" and payload == "释放 JSON 失败 (WOLF完整性校验)"
-        for kind, payload in list(messages.queue)
-    )

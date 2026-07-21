@@ -1,3 +1,5 @@
+"""隐藏兼容路径使用的字体覆盖检查，不是公开功能入口。"""
+
 import ctypes
 import functools
 import os

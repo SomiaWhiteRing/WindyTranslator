@@ -1,3 +1,8 @@
+"""隐藏兼容路径使用的 UberWolf 进程适配层。
+
+它随实验性 WOLF 实现保留，不代表项目公开支持 WOLF RPG Editor。
+"""
+
 import logging
 import os
 import platform

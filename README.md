@@ -69,20 +69,6 @@
    - 将 `dist/WindyTranslator/` 目录整体打包为 zip 分发。
    - 初次运行会在程序同级目录生成 `logs/`，日志与配置会写到可执行文件同级目录。
 
-## WOLF RPG Editor 支持
-
-- 识别条件：游戏目录包含 `Game.exe`，以及 `Data.wolf`、`Data/BasicData.wolf` 或完整的已解包 `Data`。
-- 初始化：仅在缺少完整 `Data` 时调用随包提供的 `UberWolfCli.exe` 解包单包或分卷归档。原归档只作为只读来源保留；从一开始就没有归档的完整 `Data` 也可直接使用。
-- 重写文件名：WOLF 流程跳过此步骤。
-- 词典：WOLF 不加载内置默认数据库映射，也不应用内置基础人物/事物词典；仅使用当前项目生成的词典。
-- 导出/写回：`WolfRPGText.exe` 基于 UberWolf 的结构化读写能力处理地图、公共事件、数据库值和外部 TXT/CSV；`UberWolfCli.exe` 只在初始化时负责解包。公共事件调用中的短按钮、Tips、日志等显示参数会按调用用途导出。
-- 逻辑保护：条件比较、文件路径和公共事件引用等内部值使用独立的 `WOLFLogic` 脚本保存；数据库识别名会按运行时字符串流向区分显示与逻辑用途。显示名、说明和按钮文字仍可正常翻译，相同字面量在逻辑位置和显示位置不会互相覆盖。
-- 发布：缺失译文、`fallback`、控制码损坏、WOLF 固定行数变化或逻辑判断字面量被翻译时，会在恢复 `StringScripts` 前停止。
-- 导入：在临时目录写回解包后的 `Data`，再由 `WolfRPGText.exe` 重读验证；通过后事务式停用活动 `.wolf` 并替换 `Data` 与 manifest，不执行重新封包。停用归档按哈希保存在 `.windy_wolf/disabled_archives/`，首次替换另保留 `Data.windy-original.bak`。字体覆盖不足只会记录警告，不会在翻译流程中自动替换字体。
-- 字体修订：选择 WOLF 游戏目录后会出现独立标签页，可并排预览并分别替换 `MainFont` 与三个 `SubFonts`。候选字体来自 Windows、游戏根目录、`Data` 根目录和 `modules/WOLF`；应用时会复制所选字体并写回解包后的 `Data`，不重新封包。复制 Windows 系统字体前请自行确认其再分发许可。
-
-系统数据库和可证明是内部识别值的名称不会自动翻译；用户数据库中没有绑定内部识别值的记录名会作为显示文本导出。图片内文字不属于当前文本管线，需要单独进行图片本地化。
-
 ## 贡献指南
 
 我们欢迎各种形式的贡献！
@@ -99,7 +85,6 @@
 
 - [RPGRewriter](https://www.vgperson.com/) by vgperson
 - [EasyRPG](https://easyrpg.org/) 项目
-- [UberWolf](https://github.com/Sinflower/UberWolf) by Sinflower
 
 ## 许可证
 
@@ -107,10 +92,9 @@
 
 ### 第三方组件许可证
 
-本项目包含以下第三方组件，它们有自己的许可证条款：
+本项目使用的主要第三方组件有各自的许可证条款：
 
 - **EasyRPG Player**：GPL-3.0许可证 - [https://easyrpg.org/](https://easyrpg.org/)
 - **RPGRewriter**：由vgperson创建，保留所有权利
-- **UberWolf**：MIT许可证
 
 使用本软件意味着您同意各组件的相应许可证条款。详细的第三方许可证信息请参阅 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。 

@@ -132,7 +132,7 @@ class RPGTranslatorApp:
             else:
                 messagebox.showerror(
                     "路径无效",
-                    "选择的目录不是有效的受支持游戏目录（未找到 RPG_RT.lmt、Data/MapInfos.rvdata2、data/MapInfos.json 或 WOLF Data）。",
+                    "选择的目录不是有效的受支持游戏目录（未找到可识别的游戏数据文件）。",
                     parent=self.root,
                 )
                 self.log_message("选择了无效的游戏目录。", "error")
