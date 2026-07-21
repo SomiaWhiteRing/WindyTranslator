@@ -2630,8 +2630,8 @@ def _analyze_json_usage(json_root, referenced_maps=None):
                     usage["missing_identifier_names"].setdefault(
                         namespace, set()
                     ).add(normalized_name)
-                    # Runtime DB aliases are matched by exact name and type index.
-                    # Without exported provenance, every candidate stays protected.
+                    # Index alignment proves only one-hop runtime mirrors;
+                    # exported database provenance is required for longer chains.
                     aliases = [
                         candidate
                         for candidate, names in identifier_indexes.items()
@@ -2639,11 +2639,35 @@ def _analyze_json_usage(json_root, referenced_maps=None):
                         and candidate[1] == namespace[1]
                         and normalized_name in names
                     ]
-                    for candidate in aliases:
-                        usage["incomplete_identifier_symbols"].add(
-                            (*candidate, normalized_name)
-                        )
-                    if aliases:
+                    aligned_aliases = [
+                        candidate
+                        for candidate in aliases
+                        if min(identifier_indexes[candidate][normalized_name])
+                        < record_counts.get(namespace, 0)
+                    ]
+                    if len(aligned_aliases) == 1:
+                        candidate = aligned_aliases[0]
+                        candidate_indexes = tuple(sorted(
+                            identifier_indexes[candidate][normalized_name]
+                        ))
+                        usage["identifier_reference_namespaces"].add(candidate)
+                        usage["identifier_reference_paths"].setdefault(
+                            (*candidate, normalized_name), set()
+                        ).add((
+                            relative,
+                            base_path + (command_index, "stringArgs", 2),
+                            candidate_indexes,
+                            target[2],
+                            "runtime_database_alias",
+                        ))
+                        usage["missing_identifier_names"].setdefault(
+                            candidate, set()
+                        ).update(record_indexes.get(namespace, {}))
+                    elif aliases:
+                        for candidate in aliases:
+                            usage["incomplete_identifier_symbols"].add(
+                                (*candidate, normalized_name)
+                            )
                         usage["analysis_diagnostics"].append({
                             "reason": "unresolved_runtime_database_alias",
                             "file": relative,

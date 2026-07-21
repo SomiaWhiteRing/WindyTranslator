@@ -2079,9 +2079,10 @@ def test_wolf_cross_namespace_first_string_alias_fails_closed(tmp_path):
         raise AssertionError("an unresolved cross-namespace alias must fail closed")
 
 
-def test_wolf_missing_runtime_database_name_protects_matching_identifier(tmp_path):
-    databases = tmp_path / "databases"
-    common = tmp_path / "common"
+def test_wolf_unique_same_type_runtime_database_alias_is_synchronized(tmp_path):
+    original = tmp_path / "original"
+    databases = original / "databases"
+    common = original / "common"
     databases.mkdir(parents=True)
     common.mkdir()
     database_path = databases / "DataBase.json"
@@ -2130,21 +2131,47 @@ def test_wolf_missing_runtime_database_name_protects_matching_identifier(tmp_pat
         encoding="utf-8",
     )
 
-    usage = wolf._analyze_json_usage(str(tmp_path))
-    entries = wolf._json_entries(str(tmp_path), str(database_path), usage)
+    usage = wolf._analyze_json_usage(str(original))
+    entries = wolf._json_entries(str(original), str(database_path), usage)
     metadata = next(metadata for metadata, text in entries if text == "装填レバー")
 
-    assert ("database.json", 0, "装填レバー") in usage["incomplete_identifier_symbols"]
-    assert metadata["marker"] == "WOLFLogic"
-    assert metadata["identifier_reference_complete"] is False
-    assert all(
-        reference["reference_kind"] != "runtime_database_alias"
-        for reference in metadata["identifier_references"]
+    assert ("database.json", 0, "装填レバー") not in usage["incomplete_identifier_symbols"]
+    assert metadata["marker"] == "WOLFText"
+    assert metadata["identifier_reference_complete"] is True
+    assert [reference["reference_kind"] for reference in metadata["identifier_references"]] == [
+        "database_selector",
+        "runtime_database_alias",
+    ]
+
+    patched = tmp_path / "patched"
+    shutil.copytree(original, patched)
+    patched_database = json.loads(
+        (patched / "databases" / "DataBase.json").read_text(encoding="utf-8")
     )
-    assert any(
-        item["reason"] == "unresolved_runtime_database_alias"
-        for item in usage["analysis_diagnostics"]
+    patched_database["types"][0]["data"][0]["data"][0]["value"] = "装填杆"
+    (patched / "databases" / "DataBase.json").write_text(
+        json.dumps(patched_database, ensure_ascii=False), encoding="utf-8"
     )
+    wolf._synchronize_database_identifiers(
+        str(original),
+        str(patched),
+        [
+            (
+                ["database.json", 0],
+                "装填レバー",
+                "装填杆",
+                "name_referenced",
+                metadata["identifier_references"],
+                "name_closed",
+                metadata["identifier_missing_names"],
+            )
+        ],
+    )
+    patched_common = json.loads(
+        (patched / "common" / "Use.json").read_text(encoding="utf-8")
+    )
+    assert patched_common["commands"][0]["stringArgs"][2] == "装填杆"
+    assert patched_common["commands"][2]["stringArgs"][2] == "装填杆"
 
 
 def test_wolf_runtime_database_alias_with_multiple_aligned_sources_stays_protected(tmp_path):
