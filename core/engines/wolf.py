@@ -21,7 +21,7 @@ STATE_DIRNAME = ".windy_wolf"
 JSON_SNAPSHOT_DIRNAME = "original_json"
 MANIFEST_FILENAME = "manifest.json"
 DISABLED_ARCHIVES_DIRNAME = "disabled_archives"
-WOLF_EXPORT_SCHEMA = 7
+WOLF_EXPORT_SCHEMA = 8
 ANALYSIS_DIAGNOSTICS_FILENAME = "analysis_diagnostics.json"
 FUSION_FONT_FILENAME = "fusion-pixel-12px-proportional-zh_hans.ttf"
 FUSION_FONT_FAMILY = "Fusion Pixel 12px Prop zh_hans"
@@ -1898,6 +1898,33 @@ def _infer_database_symbol_references(
                             "database_symbol",
                         ))
 
+    # Equality across first-string namespaces is risk evidence, not alias proof;
+    # a typed runtime provenance graph is required before these names can move.
+    for normalized_symbol, targets in identifier_symbols.items():
+        if len(targets) < 2:
+            continue
+        protected = [
+            namespace
+            for namespace in targets
+            if usage["database_identifier_access"].get(namespace, {}).get("name", 0)
+        ]
+        if not protected:
+            continue
+        candidate_namespaces = [list(namespace) for namespace in sorted(targets)]
+        for namespace in protected:
+            usage["incomplete_identifier_symbols"].add(
+                (*namespace, normalized_symbol)
+            )
+            data_index = min(targets[namespace])
+            usage["analysis_diagnostics"].append({
+                "reason": "ambiguous_database_identifier_alias",
+                "file": database_relatives[namespace[0]],
+                "path": ["types", namespace[1], "data", data_index, "data", 0, "value"],
+                "effect": "protected",
+                "value": normalized_symbol,
+                "candidate_namespaces": candidate_namespaces,
+            })
+
     usage["display_database_fields"] -= usage["logic_database_fields"]
     usage["display_database_records"] -= usage["logic_database_records"]
     usage["identifier_symbols"] = identifier_symbols
@@ -2603,8 +2630,8 @@ def _analyze_json_usage(json_root, referenced_maps=None):
                     usage["missing_identifier_names"].setdefault(
                         namespace, set()
                     ).add(normalized_name)
-                    # ponytail: Index alignment proves only one-hop runtime mirrors;
-                    # exported database provenance is the upgrade path for longer chains.
+                    # Runtime DB aliases are matched by exact name and type index.
+                    # Without exported provenance, every candidate stays protected.
                     aliases = [
                         candidate
                         for candidate, names in identifier_indexes.items()
@@ -2612,35 +2639,11 @@ def _analyze_json_usage(json_root, referenced_maps=None):
                         and candidate[1] == namespace[1]
                         and normalized_name in names
                     ]
-                    aligned_aliases = [
-                        candidate
-                        for candidate in aliases
-                        if min(identifier_indexes[candidate][normalized_name])
-                        < record_counts.get(namespace, 0)
-                    ]
-                    if len(aligned_aliases) == 1:
-                        candidate = aligned_aliases[0]
-                        candidate_indexes = tuple(sorted(
-                            identifier_indexes[candidate][normalized_name]
-                        ))
-                        usage["identifier_reference_namespaces"].add(candidate)
-                        usage["identifier_reference_paths"].setdefault(
-                            (*candidate, normalized_name), set()
-                        ).add((
-                            relative,
-                            base_path + (command_index, "stringArgs", 2),
-                            candidate_indexes,
-                            target[2],
-                            "runtime_database_alias",
-                        ))
-                        usage["missing_identifier_names"].setdefault(
-                            candidate, set()
-                        ).update(record_indexes.get(namespace, {}))
-                    elif aliases:
-                        for candidate in aliases:
-                            usage["incomplete_identifier_symbols"].add(
-                                (*candidate, normalized_name)
-                            )
+                    for candidate in aliases:
+                        usage["incomplete_identifier_symbols"].add(
+                            (*candidate, normalized_name)
+                        )
+                    if aliases:
                         usage["analysis_diagnostics"].append({
                             "reason": "unresolved_runtime_database_alias",
                             "file": relative,
