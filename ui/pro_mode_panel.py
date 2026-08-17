@@ -203,8 +203,13 @@ class ProModePanel(ttk.Frame):
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
         dialog.resizable(False, False)
+        style = ttk.Style(dialog)
+        background = style.lookup("TFrame", "background") or dialog.cget("background")
+        dialog.configure(background=background)
+        content = tk.Frame(dialog, background=background)
+        content.pack(fill=tk.BOTH, expand=True)
 
-        encoding_frame = ttk.LabelFrame(dialog, text="文本编码", padding=10)
+        encoding_frame = ttk.LabelFrame(content, text="文本编码", padding=10)
         encoding_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
         export_code = self.export_encoding_var.get().split(' - ')[-1]
         encoding_var = tk.StringVar(value=next(
@@ -215,8 +220,9 @@ class ProModePanel(ttk.Frame):
             values=self.encoding_display_values, state="readonly", width=28,
         ).pack(fill=tk.X)
 
-        scope_frame = ttk.LabelFrame(dialog, text="导出范围", padding=10)
+        scope_frame = ttk.LabelFrame(content, text="导出范围", padding=10)
         scope_frame.pack(fill=tk.X, padx=12, pady=6)
+        scope_background = style.lookup("TLabelframe", "background") or background
         scope_vars = {
             key: tk.BooleanVar(value=self.export_scope.get(key, default))
             for key, default in (
@@ -230,9 +236,11 @@ class ProModePanel(ttk.Frame):
                 ("troop_names", False),
             )
         }
-        labels = (
+        game_labels = (
             ("game_text", "游戏正文"),
             ("game_title", "游戏标题"),
+        )
+        engineering_labels = (
             ("map_names", "地图名称"),
             ("map_event_names", "地图事件名称"),
             ("switch_names", "开关名称"),
@@ -240,13 +248,56 @@ class ProModePanel(ttk.Frame):
             ("common_event_names", "公共事件名称"),
             ("troop_names", "敌群名称"),
         )
-        for index, (key, label) in enumerate(labels):
+        ttk.Label(scope_frame, text="游戏文本").grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, padx=6, pady=(0, 3)
+        )
+        for index, (key, label) in enumerate(game_labels):
             check = ttk.Checkbutton(scope_frame, text=label, variable=scope_vars[key])
-            check.grid(row=index // 2, column=index % 2, sticky=tk.W, padx=6, pady=3)
+            check.grid(row=1, column=index, sticky=tk.W, padx=6, pady=3)
             if key == "game_text":
                 check.state(["disabled"])
 
-        button_frame = ttk.Frame(dialog)
+        engineering_header = tk.Frame(scope_frame, background=scope_background)
+        engineering_header.grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=6, pady=(8, 3))
+        tk.Label(engineering_header, text="工程文本", background=scope_background).pack(side=tk.LEFT)
+        help_icon = tk.Canvas(
+            engineering_header, width=16, height=16, highlightthickness=0,
+            background=scope_background, cursor="hand2",
+        )
+        help_icon.pack(side=tk.LEFT, padx=(4, 0))
+        help_icon.create_oval(1, 1, 15, 15, outline="#606060")
+        help_icon.create_text(8, 8, text="?", fill="#404040")
+
+        tooltip = None
+
+        def show_tooltip(_event):
+            nonlocal tooltip
+            if tooltip is not None:
+                return
+            tooltip = tk.Toplevel(dialog)
+            tooltip.overrideredirect(True)
+            tooltip.configure(background="#ffffe1")
+            tk.Label(
+                tooltip,
+                text="此类别的文本正常情况下仅会在RPG Maker 编辑器中出现，\n以游玩为目的时通常无需翻译。",
+                background="#ffffe1", relief=tk.SOLID, borderwidth=1, padx=6, pady=4, justify=tk.LEFT, anchor=tk.W,
+            ).pack()
+            tooltip.geometry(f"+{help_icon.winfo_rootx() + help_icon.winfo_width() + 4}+{help_icon.winfo_rooty()}")
+
+        def hide_tooltip(_event):
+            nonlocal tooltip
+            if tooltip is not None:
+                tooltip.destroy()
+                tooltip = None
+
+        help_icon.bind("<Enter>", show_tooltip)
+        help_icon.bind("<Leave>", hide_tooltip)
+
+        for index, (key, label) in enumerate(engineering_labels):
+            check = ttk.Checkbutton(scope_frame, text=label, variable=scope_vars[key])
+            check.grid(row=3 + index // 2, column=index % 2, sticky=tk.W, padx=6, pady=3)
+
+        button_frame = tk.Frame(content, background=background)
         button_frame.pack(fill=tk.X, padx=12, pady=(6, 12))
 
         def save():
