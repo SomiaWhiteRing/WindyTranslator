@@ -1,0 +1,18 @@
+{
+  "manifest_version": 1,
+  "id": "rm2k3_asset_auditor",
+  "category": "gui",
+  "name": "RM2K3 素材调用检查器",
+  "version": "0.4.1",
+  "author": "JerryHOEI",
+  "description": "检查 RPG Maker 2000/2003 工程中的素材调用。",
+  "runtime": "host_python",
+  "entry": "rm_asset_auditor.py",
+  "working_directory": ".",
+  "requires_game_engine": ["rm2k", "rm2k3"],
+  "resources": ["resources/lcf2xml.exe"],
+  "arguments": [
+    {"name": "project", "flag": "--initial-project", "type": "game_path", "required": false},
+    {"name": "lcf2xml", "flag": "--initial-lcf2xml", "type": "fixed", "value": "resources/lcf2xml.exe"}
+  ]
+}

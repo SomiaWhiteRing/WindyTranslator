@@ -5,6 +5,7 @@ import logging
 import sys
 import os
 import datetime
+from core.tools.manager import run_tool_host
 from core.utils.file_system import get_application_path, get_executable_dir  # 导入路径辅助函数
 
 # 导入主应用程序类
@@ -56,7 +57,24 @@ def setup_logging():
     logging.info("日志系统已配置。")
 
 
+def _run_tool_mode(argv):
+    """Run a source tool in an isolated child process before creating Tk."""
+    if len(argv) < 4 or argv[1] != "--run-tool":
+        return None
+    try:
+        return run_tool_host(argv[2], argv[3], argv[4:])
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    except Exception as exc:
+        logging.exception("工具宿主启动失败。")
+        print(f"工具宿主启动失败: {exc}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
+    tool_exit_code = _run_tool_mode(sys.argv)
+    if tool_exit_code is not None:
+        sys.exit(tool_exit_code)
     # 配置日志
     setup_logging()
 

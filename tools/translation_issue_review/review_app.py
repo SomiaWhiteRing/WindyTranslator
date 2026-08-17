@@ -19,9 +19,9 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
-    from scripts.optimize_linebreaks import calc_display_width
-except ImportError:  # pragma: no cover - supports `python scripts/...`
-    from optimize_linebreaks import calc_display_width
+    from .display_width import calc_display_width
+except ImportError:  # Supports execution as the tool entry script.
+    from display_width import calc_display_width
 
 
 MESSAGE_MARKER = "Message"
@@ -2145,14 +2145,18 @@ class LineLimitCheckerApp:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="译文行宽检查器")
+    parser = argparse.ArgumentParser(description="译文问题审阅器")
     parser.add_argument("json_path", nargs="?", help="可选：待审阅的翻译 JSON 路径")
+    parser.add_argument("--initial-input", help="启动时加载的译文 JSON 路径")
+    parser.add_argument("--initial-fallback-csv", help="启动时加载的回退记录 CSV 路径")
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    initial_path = Path(args.json_path).resolve() if args.json_path else None
+    input_path = args.initial_input or args.json_path
+    initial_path = Path(input_path).resolve() if input_path else None
+    fallback_csv_path = Path(args.initial_fallback_csv).resolve() if args.initial_fallback_csv else None
 
     root = tk.Tk()
     style = ttk.Style(root)
@@ -2164,7 +2168,12 @@ def main() -> None:
             except tk.TclError:
                 continue
 
-    app = LineLimitCheckerApp(root, initial_path=initial_path)
+    app = LineLimitCheckerApp(
+        root,
+        initial_path=initial_path,
+        fallback_csv_path=fallback_csv_path,
+        integrated_mode=initial_path is not None,
+    )
     if initial_path and not initial_path.exists():
         messagebox.showerror("加载失败", f"文件不存在:\n{initial_path}", parent=root)
         app.status_var.set(f"启动时未找到文件：{initial_path}")

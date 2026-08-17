@@ -1,0 +1,16 @@
+{
+  "manifest_version": 1,
+  "id": "example_tool",
+  "category": "gui",
+  "name": "示例 GUI 工具",
+  "version": "1.0.0",
+  "author": "作者",
+  "description": "一个可由 WindyTranslator 启动的源码工具。",
+  "runtime": "host_python",
+  "entry": "entry.py",
+  "working_directory": ".",
+  "arguments": [
+    {"name": "project", "flag": "--initial-project", "type": "game_path"},
+    {"name": "input", "flag": "--initial-input", "type": "current_game_file", "source": "translated/translation_translated.json"}
+  ]
+}

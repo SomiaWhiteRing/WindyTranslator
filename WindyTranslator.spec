@@ -12,6 +12,7 @@ a = Analysis(
         ('modules/WOLF', 'modules/WOLF'),
         ('modules/RTPCollection', 'modules/RTPCollection'),
         ('modules/dict', 'modules/dict'),
+        ('tools', 'tools'),
         ('assets/icon.ico', 'assets')
     ],
     hiddenimports=[
@@ -32,6 +33,7 @@ a = Analysis(
         'win32com.shell.shellcon',
         'win32com.propsys.propsys',
         'win32com.propsys.pscon',
+        'openpyxl',
     ],
     hookspath=[],
     hooksconfig={},

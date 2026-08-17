@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from ui.translation_review_dialog import (
+from tools.translation_issue_review.review_app import (
     FALLBACK_CSV_HEADER,
     FallbackRecord,
     UnsupportedFallbackCsvError,

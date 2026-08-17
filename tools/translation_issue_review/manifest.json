@@ -1,0 +1,30 @@
+{
+  "manifest_version": 1,
+  "id": "translation_issue_review",
+  "name": "译文问题审阅",
+  "version": "1.0.0",
+  "author": "WindyTranslator",
+  "description": "审阅译文回退记录和 Message 行宽问题，并直接保存到译文 JSON。",
+  "category": "gui",
+  "runtime": "host_python",
+  "entry": "review_app.py",
+  "working_directory": ".",
+  "arguments": [
+    {
+      "name": "input",
+      "flag": "--initial-input",
+      "type": "current_game_file",
+      "source": "translated/translation_translated.json",
+      "required": true,
+      "label": "译文 JSON 文件"
+    },
+    {
+      "name": "fallback_csv",
+      "flag": "--initial-fallback-csv",
+      "type": "current_game_file",
+      "source": "translated/fallback_corrections.csv",
+      "required": false,
+      "label": "回退记录 CSV 文件"
+    }
+  ]
+}

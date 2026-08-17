@@ -123,10 +123,7 @@ class ProModePanel(ttk.Frame):
         self.deepseek_config_button = ttk.Button(row_frame_5, text="配置", width=config_button_width,
                                               command=lambda: self.app.start_task('configure_deepseek'))
         self.deepseek_config_button.pack(side=tk.RIGHT, padx=padx_val)
-        self.fix_fallback_button = ttk.Button(row_frame_5, text="问题审阅", width=button_width + 2,
-                                              command=lambda: self.app.start_task('fix_fallback'))
-        self.fix_fallback_button.pack(side=tk.RIGHT, padx=padx_val) # <--- 添加按钮到布局
-        all_controls_list.extend([self.translate_button, self.deepseek_config_button, self.fix_fallback_button])
+        all_controls_list.extend([self.translate_button, self.deepseek_config_button])
         row_idx += 1
 
         # --- 6. 释放JSON文件 ---

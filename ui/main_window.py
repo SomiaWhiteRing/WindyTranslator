@@ -16,6 +16,7 @@ from . import wolf_font_panel
 from . import rtp_dialog # 需要调用更新按钮文本
 from . import config_dialogs # 可能需要引用
 from . import dict_editor # 可能需要引用
+from . import tools_panel
 
 class MainWindow:
     """应用程序的主窗口 UI 类。"""
@@ -76,6 +77,12 @@ class MainWindow:
         self.pro_mode_frame_container = ttk.Frame(self.functions_notebook, padding="5")
         self.pro_panel = pro_mode_panel.ProModePanel(self.pro_mode_frame_container, self.app, self.config) # 专业模式需要配置来初始化
         self.functions_notebook.add(self.pro_mode_frame_container, text="专业模式")
+
+        # 源码型外部工具页。工具以独立进程运行，不嵌入第三方 GUI。
+        self.tools_frame_container = ttk.Frame(self.functions_notebook, padding="5")
+        self.tools_panel = tools_panel.ToolsPanel(self.tools_frame_container, self.app)
+        self.tools_panel.pack(fill=tk.BOTH, expand=True)
+        self.functions_notebook.add(self.tools_frame_container, text="小工具")
 
         # WOLF 字体页按所选游戏动态加入 Notebook。
         self.font_mode_frame_container = ttk.Frame(self.functions_notebook, padding="5")

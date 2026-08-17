@@ -272,35 +272,6 @@ class RPGTranslatorApp:
              self._open_dict_editor() # 直接调用内部方法
              return
         
-        elif task_name == 'fix_fallback': # 译文问题审阅任务
-            fallback_csv_path = self._get_fallback_csv_path() # 获取路径
-            translated_json_path = self._get_translated_json_path() # 获取翻译 JSON 路径
-
-            if not fallback_csv_path or not translated_json_path:
-                messagebox.showerror("错误", "无法确定审阅所需的文件路径 (可能是游戏路径未设置?)。", parent=self.root)
-                return
-
-            if not os.path.exists(translated_json_path):
-                messagebox.showinfo("提示", "未找到 translation_translated.json。请先完成翻译。", parent=self.root)
-                self.log_message("没有可审阅的翻译 JSON。", "normal")
-                return
-
-            try:
-                from ui.translation_review_dialog import LineLimitCheckerApp
-
-                review_window = tk.Toplevel(self.root)
-                review_window.transient(self.root)
-                LineLimitCheckerApp(
-                    review_window,
-                    initial_path=Path(translated_json_path),
-                    fallback_csv_path=Path(fallback_csv_path),
-                    integrated_mode=True,
-                )
-                self.log_message("译文问题审阅器已打开。", "normal")
-            except Exception as e:
-                log.exception("打开译文问题审阅器时出错。")
-                messagebox.showerror("错误", f"无法打开译文问题审阅器:\n{e}", parent=self.root)
-            return # 处理完毕，直接返回
         elif task_name == 'configure_gemini':
              self._open_gemini_config() # 直接调用内部方法
              return
@@ -406,6 +377,13 @@ class RPGTranslatorApp:
         translated_dir = self._get_translated_dir(game_path_override)
         if not translated_dir: return None
         return os.path.join(translated_dir, "translation_translated.json")
+
+    def get_tools_context_path(self, relative_path):
+        """Resolve a tool input beneath the current Work directory."""
+        subfolder = self._get_work_subfolder()
+        if not subfolder or not relative_path:
+            return ""
+        return os.path.join(self.works_dir, subfolder, *Path(relative_path).parts)
 
     def _find_translated_json_files(self, game_path_override=None):
         """查找当前游戏已翻译的 JSON 文件列表。"""

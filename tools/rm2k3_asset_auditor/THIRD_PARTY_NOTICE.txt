@@ -1,0 +1,17 @@
+第三方工具说明
+==============
+
+本项目可选调用 EasyRPG 的 lcf2xml 工具，以精确读取 RPG Maker 2000/2003
+的 LDB、LMT、LMU 数据并转换为 XML。
+
+本交付包不包含 lcf2xml.exe，也不重新分发 EasyRPG 二进制文件。
+用户可运行“安装精确解析工具.bat”，从 EasyRPG 官方持续构建地址下载；
+也可以自行下载并在程序中选择。
+
+EasyRPG / liblcf：
+- 项目网站：https://easyrpg.org/
+- 工具下载：https://easyrpg.org/tools/downloads/
+- liblcf 源码：https://github.com/EasyRPG/liblcf
+
+liblcf 采用 MIT License。具体版权与许可条款以 EasyRPG/liblcf 仓库中
+随相应版本提供的 LICENSE 文件为准。

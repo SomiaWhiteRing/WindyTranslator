@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["manifest_version", "id", "name", "version", "author", "category", "entry", "runtime", "arguments"],
+  "properties": {
+    "manifest_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9_]+$"},
+    "name": {"type": "string"},
+    "version": {"type": "string"},
+    "author": {"type": "string"},
+    "description": {"type": "string"},
+    "category": {"enum": ["gui", "cli"]},
+    "runtime": {"enum": ["host_python", "exe"]},
+    "entry": {"type": "string"},
+    "working_directory": {"type": "string"},
+    "requires_game_engine": {"type": "array", "items": {"type": "string"}},
+    "resources": {"type": "array", "items": {"type": "string"}},
+    "arguments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "flag", "type"],
+        "properties": {
+          "name": {"type": "string"},
+          "flag": {"type": "string"},
+          "type": {"enum": ["game_path", "current_game_file", "fixed"]},
+          "required": {"type": "boolean"},
+          "value": {},
+          "source": {"type": "string"},
+          "label": {"type": "string"}
+        },
+        "allOf": [
+          {"if": {"properties": {"type": {"const": "current_game_file"}}}, "then": {"required": ["source"]}},
+          {"if": {"properties": {"type": {"const": "fixed"}}}, "then": {"required": ["value"]}}
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
