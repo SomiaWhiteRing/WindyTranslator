@@ -9,20 +9,43 @@
   "runtime": "host_python",
   "entry": "workbench_app.py",
   "working_directory": ".",
-  "arguments": [
+  "launch_options_label": "校对目标",
+  "launch_options": [
     {
-      "name": "input",
-      "flag": "--initial-input",
-      "type": "current_game_file",
-      "source": "translated/translation_translated.json",
-      "required": true,
-      "label": "译文 JSON 文件"
+      "id": "json",
+      "name": "工程 JSON",
+      "arguments": [
+        {
+          "name": "input",
+          "flag": "--initial-input",
+          "type": "current_game_file",
+          "source": "translated/translation_translated.json",
+          "required": true,
+          "label": "译文 JSON 文件"
+        }
+      ]
     },
     {
-      "name": "source_type",
-      "flag": "--initial-source-type",
-      "type": "fixed",
-      "value": "json"
+      "id": "txt",
+      "name": "StringScript",
+      "arguments": [
+        {
+          "name": "origin_dir",
+          "flag": "--initial-origin-dir",
+          "type": "game_path",
+          "source": "StringScripts_Origin",
+          "required": true,
+          "label": "原文 TXT 文件夹"
+        },
+        {
+          "name": "translated_dir",
+          "flag": "--initial-translated-dir",
+          "type": "game_path",
+          "source": "StringScripts",
+          "required": true,
+          "label": "译文 TXT 文件夹"
+        }
+      ]
     }
   ]
 }

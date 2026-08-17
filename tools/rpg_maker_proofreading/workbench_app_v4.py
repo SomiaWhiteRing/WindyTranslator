@@ -90,8 +90,8 @@ PAGE_KEYS_BY_LABEL = {v: k for k, v in PAGE_LABELS.items()}
 class RPGMakerProofreadingApp(LegacyWorkbenchApp):
     """v4 UI. The proven v3 data loaders/writers remain the persistence layer."""
 
-    def __init__(self, initial_input: str | None = None, initial_input_dir: str | None = None,
-                 initial_source_type: str | None = None, initial_config_dir: str | None = None):
+    def __init__(self, initial_input: str | None = None, initial_origin_dir: str | None = None,
+                 initial_translated_dir: str | None = None):
         tk.Tk.__init__(self)
         self.title(APP_TITLE)
         self.geometry("1660x1000")
@@ -141,34 +141,25 @@ class RPGMakerProofreadingApp(LegacyWorkbenchApp):
         self._build_ui()
         self._load_settings()
         self._initial_input = initial_input
-        self._initial_input_dir = initial_input_dir
-        self._initial_source_type = initial_source_type
-        self._initial_config_dir = initial_config_dir
+        self._initial_origin_dir = initial_origin_dir
+        self._initial_translated_dir = initial_translated_dir
         self.after(100, self._poll_worker)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _apply_initial_input(self):
         initial_input = self._initial_input
-        initial_input_dir = self._initial_input_dir
-        initial_source_type = self._initial_source_type
-        initial_config_dir = self._initial_config_dir
-        if initial_config_dir:
-            self.config_dir = Path(initial_config_dir).resolve()
-            self.config_dir.mkdir(parents=True, exist_ok=True)
-            self.catalog_path = self.config_dir / "标点符号分类.json"
-        if initial_source_type:
-            self.source_type.set(initial_source_type)
+        initial_origin_dir = self._initial_origin_dir
+        initial_translated_dir = self._initial_translated_dir
         if initial_input:
             self.json_path.set(str(Path(initial_input).resolve()))
             self.source_type.set("json")
-        if initial_input_dir:
-            directory = str(Path(initial_input_dir).resolve())
-            if self.source_type.get() == "excel":
-                self.excel_dir.set(directory)
-            else:
-                self.origin_dir.set(directory)
-                self.translated_dir.set(directory)
-        if initial_input or initial_input_dir:
+        if initial_origin_dir or initial_translated_dir:
+            if initial_origin_dir:
+                self.origin_dir.set(str(Path(initial_origin_dir).resolve()))
+            if initial_translated_dir:
+                self.translated_dir.set(str(Path(initial_translated_dir).resolve()))
+            self.source_type.set("txt")
+        if initial_input or initial_origin_dir or initial_translated_dir:
             self._update_source_visibility()
             self.after_idle(self._scan_source)
 

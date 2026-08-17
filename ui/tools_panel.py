@@ -51,7 +51,7 @@ class ToolsPanel(ttk.Frame):
         detail = ttk.Frame(self.content)
         detail.grid(row=0, column=1, sticky="nsew")
         detail.columnconfigure(0, weight=1)
-        detail.rowconfigure(2, weight=1)
+        detail.rowconfigure(3, weight=1)
         detail.bind("<Configure>", self._resize_detail)
         self.info_var = tk.StringVar(value="请选择工具。")
         self.info_label = ttk.Label(detail, textvariable=self.info_var, justify="left", wraplength=1)
@@ -60,18 +60,31 @@ class ToolsPanel(ttk.Frame):
         self.status_label = ttk.Label(detail, textvariable=self.status_var, foreground="#b00020")
         self.status_label.grid(row=1, column=0, sticky="new")
         self.status_label.grid_remove()
+        self.options_frame = ttk.Frame(detail)
+        self.options_frame.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        self.options_label_var = tk.StringVar(value="启动选项")
+        ttk.Label(self.options_frame, textvariable=self.options_label_var).pack(side=tk.LEFT, padx=(0, 6))
+        self.option_var = tk.StringVar()
+        self.option_name_var = tk.StringVar()
+        self.option_combo = ttk.Combobox(
+            self.options_frame,
+            textvariable=self.option_name_var,
+            state="readonly",
+            width=18,
+        )
+        self.option_combo.pack(side=tk.LEFT)
+        self.option_combo.bind("<<ComboboxSelected>>", self._select_launch_option)
+        self.options_frame.grid_remove()
         self.log_text = tk.Text(detail, width=1, height=7, state=tk.DISABLED, wrap=tk.WORD)
-        self.log_text.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
+        self.log_text.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
         actions = ttk.Frame(detail)
-        actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        actions.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         self.start_button = ttk.Button(actions, text="启动工具", command=self.start_tool)
         self.start_button.pack(side=tk.LEFT)
 
-    def get_controls(self):
-        return [self.tool_list, self.start_button]
-
     def _resize_detail(self, event):
-        self.info_label.configure(wraplength=max(1, event.width - 12))
+        wraplength = max(1, event.width - 12)
+        self.info_label.configure(wraplength=wraplength)
 
     def refresh_tools(self):
         self.tools, self.diagnostics = self.manager.discover()
@@ -95,8 +108,8 @@ class ToolsPanel(ttk.Frame):
         tool = self._selected()
         if not tool:
             return
-        self.info_var.set(f"{tool.description}\n作者：{tool.author}    版本：{tool.version}    运行方式：{tool.runtime}")
         self.info_var.set(f"{tool.name}\n版本：{tool.version}\n作者：{tool.author}\n\n{tool.description}")
+        self._show_launch_options(tool)
         if tool.errors:
             self.status_var.set("状态检查未通过")
             self.status_label.grid()
@@ -104,6 +117,28 @@ class ToolsPanel(ttk.Frame):
             self.status_var.set("")
             self.status_label.grid_remove()
         self._update_start_button()
+
+    def _show_launch_options(self, tool):
+        if not tool.launch_options:
+            self.option_var.set("")
+            self.option_name_var.set("")
+            self.options_label_var.set("启动选项")
+            self.option_combo.configure(values=())
+            self.options_frame.grid_remove()
+            return
+        self.option_var.set(tool.launch_options[0].id)
+        self.options_label_var.set(tool.launch_options_label)
+        self.option_combo.configure(values=tuple(option.name for option in tool.launch_options))
+        self.option_combo.current(0)
+        self.options_frame.grid()
+
+    def _select_launch_option(self, _event):
+        tool = self._selected()
+        if not tool:
+            return
+        index = self.option_combo.current()
+        if 0 <= index < len(tool.launch_options):
+            self.option_var.set(tool.launch_options[index].id)
 
     def _update_start_button(self):
         tool = self._selected()
@@ -118,16 +153,17 @@ class ToolsPanel(ttk.Frame):
         messagebox.showinfo(
             "这是什么",
             "该页面展示的是tools文件夹下的翻译辅助工具。\n"
-            "如果你有自己在用的RM2K翻译辅助工具，可以根据tools文件夹下的`小工具文档.md`填写manifest.json后放入tools通过WindyTranslator启动~\n"
+            "如果你有自己在用的RM2K翻译辅助工具，只需要按照tools文件夹下的`小工具文档.md`填写manifest.json后放入tools就可以让其通过WindyTranslator启动~\n"
             "（可以把文档发给AI帮忙写）",
             parent=self.winfo_toplevel(),
         )
 
-    def _values(self, tool):
+    def _values(self, arguments):
         values = {}
-        for argument in tool.arguments:
+        for argument in arguments:
             if argument.type == "game_path" and self.app.get_game_path():
-                values[argument.name] = self.app.get_game_path()
+                game_path = Path(self.app.get_game_path())
+                values[argument.name] = str(game_path.joinpath(*Path(argument.source).parts)) if argument.source else str(game_path)
             elif argument.type == "current_game_file":
                 values[argument.name] = self.app.get_tools_context_path(argument.source)
         return values
@@ -141,16 +177,23 @@ class ToolsPanel(ttk.Frame):
         tool = self._selected()
         if not tool:
             return
+        option_id = self.option_var.get() if tool.launch_options else None
+        try:
+            arguments = tool.arguments_for(option_id)
+        except ToolSpecError as exc:
+            messagebox.showerror("启动失败", str(exc), parent=self)
+            self._write(f"启动失败：{exc}")
+            return
         needs_game_directory = any(
             argument.required and argument.type in {"game_path", "current_game_file"}
-            for argument in tool.arguments
+            for argument in arguments
         )
         if needs_game_directory and not os.path.isdir(self.app.get_game_path() or ""):
-            messagebox.showerror("启动失败", "请先选择一个有效的游戏目录", parent=self)
-            self._write("启动失败：请先选择一个有效的游戏目录")
+            messagebox.showerror("启动失败", "请先选择一个有效的游戏目录。", parent=self)
+            self._write("启动失败：请先选择一个有效的游戏目录。")
             return
         try:
-            running = self.manager.start(tool, self._values(tool), self._host_command())
+            running = self.manager.start(tool, self._values(arguments), self._host_command(), option_id)
         except (ToolSpecError, OSError) as exc:
             messagebox.showerror("启动失败", str(exc), parent=self)
             self._write(f"启动失败：{exc}")

@@ -26,7 +26,19 @@ WindyTranslator.exe --run-tool <tool_dir> <entry> <arguments...>
 
 ## 参数类型
 
-支持 `game_path`、`current_game_file` 和 `fixed`。主程序只按这些声明生成参数，不执行 Manifest 中的 shell 模板。
+支持 `game_path`、`current_game_file` 和 `fixed`。`game_path` 可选 `source`，用于传递游戏目录内的固定子路径；主程序只按这些声明生成参数，不执行 Manifest 中的 shell 模板。
+
+## 启动预设
+
+`launch_options` 是可选的固定启动预设列表。定义预设时，每一项提供完整的 `arguments`；工具页面默认选中第一项。顶层 `arguments` 必须为空或省略，且不会与预设参数合并。
+
+| 字段 | 规则 |
+| --- | --- |
+| `id` | ASCII 字母、数字和下划线组成的唯一标识。 |
+| `name` | 下拉框显示的非空名称。 |
+| `arguments` | 非空的完整参数数组。 |
+
+可选的顶层 `launch_options_label` 决定下拉框左侧的名称，省略时为“启动选项”。它只能与 `launch_options` 一起使用。
 
 ## 发布要求
 

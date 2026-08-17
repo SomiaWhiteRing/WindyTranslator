@@ -136,13 +136,11 @@ class RPGMakerProofreadingApp(V4App):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
 
-    def __init__(self, initial_input=None, initial_input_dir=None,
-                 initial_source_type=None, initial_config_dir=None):
+    def __init__(self, initial_input=None, initial_origin_dir=None, initial_translated_dir=None):
         super().__init__(
             initial_input=initial_input,
-            initial_input_dir=initial_input_dir,
-            initial_source_type=initial_source_type,
-            initial_config_dir=initial_config_dir,
+            initial_origin_dir=initial_origin_dir,
+            initial_translated_dir=initial_translated_dir,
         )
         self.title(APP_TITLE)
         self.config_path = self._app_dir() / CONFIG_NAME
@@ -684,15 +682,13 @@ class RPGMakerProofreadingApp(V4App):
 def main():
     parser = argparse.ArgumentParser(description="RPG制作大师校对工具")
     parser.add_argument("--initial-input")
-    parser.add_argument("--initial-input-dir")
-    parser.add_argument("--initial-source-type", choices=("json", "txt", "excel"))
-    parser.add_argument("--initial-config-dir")
+    parser.add_argument("--initial-origin-dir")
+    parser.add_argument("--initial-translated-dir")
     args = parser.parse_args()
     app=RPGMakerProofreadingApp(
         initial_input=args.initial_input,
-        initial_input_dir=args.initial_input_dir,
-        initial_source_type=args.initial_source_type,
-        initial_config_dir=args.initial_config_dir,
+        initial_origin_dir=args.initial_origin_dir,
+        initial_translated_dir=args.initial_translated_dir,
     );app.mainloop()
 
 

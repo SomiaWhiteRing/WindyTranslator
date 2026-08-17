@@ -9,8 +9,14 @@
   "runtime": "host_python",
   "entry": "entry.py",
   "working_directory": ".",
-  "arguments": [
-    {"name": "project", "flag": "--initial-project", "type": "game_path"},
-    {"name": "input", "flag": "--initial-input", "type": "current_game_file", "source": "translated/translation_translated.json"}
+  "launch_options_label": "启动方式",
+  "launch_options": [
+    {
+      "id": "project",
+      "name": "当前游戏目录",
+      "arguments": [
+        {"name": "project", "flag": "--initial-project", "type": "game_path", "required": true}
+      ]
+    }
   ]
 }

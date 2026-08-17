@@ -4,27 +4,52 @@
   "name": "翻译文本字数统计",
   "version": "1.0.0",
   "author": "WindyTranslator",
-  "description": "统计当前游戏原文 JSON 和译文 JSON 的条目与字符数。",
+  "description": "统计当前游戏原文或译文 JSON 的文本规模。",
   "category": "cli",
   "runtime": "host_python",
   "entry": "word_counter.py",
   "working_directory": ".",
-  "arguments": [
+  "launch_options_label": "统计内容",
+  "launch_options": [
     {
-      "name": "original_json",
-      "flag": "--original-json",
-      "type": "current_game_file",
-      "source": "untranslated/translation.json",
-      "label": "原文 JSON 文件",
-      "required": true
+      "id": "original",
+      "name": "原文",
+      "arguments": [
+        {
+          "name": "original_json",
+          "flag": "--original-json",
+          "type": "current_game_file",
+          "source": "untranslated/translation.json",
+          "label": "原文 JSON 文件",
+          "required": true
+        },
+        {
+          "name": "mode",
+          "flag": "--mode",
+          "type": "fixed",
+          "value": "original"
+        }
+      ]
     },
     {
-      "name": "translated_json",
-      "flag": "--translated-json",
-      "type": "current_game_file",
-      "source": "translated/translation_translated.json",
-      "label": "译文 JSON 文件",
-      "required": true
+      "id": "translated",
+      "name": "译文",
+      "arguments": [
+        {
+          "name": "translated_json",
+          "flag": "--translated-json",
+          "type": "current_game_file",
+          "source": "translated/translation_translated.json",
+          "label": "译文 JSON 文件",
+          "required": true
+        },
+        {
+          "name": "mode",
+          "flag": "--mode",
+          "type": "fixed",
+          "value": "translated"
+        }
+      ]
     }
   ]
 }
