@@ -172,7 +172,7 @@ def rewrite_game_data(lmt_path, rewrite_all=True, log_filename=None):
 
     return run_rpgrewriter_command(lmt_path, args, interact_input="Y\n")
 
-def export_text_command(lmt_path, encoding_code):
+def export_text_command(lmt_path, encoding_code, export_scope):
     """
     执行导出文本的命令。
 
@@ -184,6 +184,15 @@ def export_text_command(lmt_path, encoding_code):
         tuple: (return_code, stdout, stderr)
     """
     args = ["-export", "-readcode", str(encoding_code), "-filereadcode", str(encoding_code), "-miscreadcode", str(encoding_code)]
+    for config_key, argument in (
+        ("map_names", "-mapnames"),
+        ("map_event_names", "-mapeventnames"),
+        ("switch_names", "-switchnames"),
+        ("variable_names", "-variablenames"),
+        ("common_event_names", "-commoneventnames"),
+        ("troop_names", "-troopnames"),
+    ):
+        args.extend([argument, "Y" if export_scope.get(config_key, False) else "N"])
     # 注意：这个命令不需要交互输入
     return run_rpgrewriter_command(lmt_path, args)
 

@@ -4,14 +4,16 @@ import re
 import shutil # <--- 新增导入
 import logging
 import time # 用于短暂等待
+from pathlib import Path
 from core.external import rpgrewriter
 from core.utils import file_system
+from core.utils import rpg_rt_ini
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
 # --- 导出文本任务 ---
-def run_export(game_path, export_encoding, message_queue):
+def run_export(game_path, export_encoding, export_scope, message_queue):
     """
     执行导出文本到 StringScripts 文件夹的流程。
     包含处理 RPGRewriter 导出失败时移动问题地图文件的逻辑。
@@ -121,7 +123,7 @@ def run_export(game_path, export_encoding, message_queue):
             # -----------------------------------------
 
             # 执行导出命令
-            return_code, stdout, stderr = rpgrewriter.export_text_command(lmt_path, export_encoding)
+            return_code, stdout, stderr = rpgrewriter.export_text_command(lmt_path, export_encoding, export_scope)
 
             if return_code == 0:
                 export_successful = True
@@ -172,6 +174,21 @@ def run_export(game_path, export_encoding, message_queue):
 
         if export_successful:
             if os.path.exists(string_scripts_path):
+
+                if export_scope.get("game_title", True):
+                    ini_path = os.path.join(game_path, "RPG_RT.ini")
+                    try:
+                        ini_text, _ini_encoding = rpg_rt_ini.read_ini(
+                            Path(ini_path), export_encoding
+                        )
+                        title = rpg_rt_ini.get_game_title(ini_text)
+                        if title is None:
+                            message_queue.put(("warning", "RPG_RT.ini 中未找到 GameTitle，跳过标题导出。"))
+                        else:
+                            with open(os.path.join(string_scripts_path, "title.txt"), "w", encoding="utf-8") as title_file:
+                                title_file.write(f"#GameTitle#\n{title}\n")
+                    except (OSError, UnicodeError, ValueError) as title_error:
+                        message_queue.put(("warning", f"读取游戏标题失败，跳过标题导出: {title_error}"))
 
                 # --- 新增：备份 StringScripts 到 StringScripts_Origin ---
                 try:

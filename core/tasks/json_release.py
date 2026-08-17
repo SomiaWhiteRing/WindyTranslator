@@ -308,12 +308,6 @@ def _apply_translations_to_file(file_path, translations_for_this_file):
                 i += 1
             continue
 
-        if original_marker_type == "EventName":
-            if i < len(lines):
-                new_lines.append(lines[i])
-                i += 1
-            continue
-
         if original_marker_type == "Choice":
             while i < len(lines) and lines[i].strip() != "##":
                 original_line_with_newline = lines[i]

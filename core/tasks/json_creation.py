@@ -241,13 +241,6 @@ def _extract_strings_from_file(file_path, require_wolf_metadata=False):
                     if i < len(lines) and lines[i].strip() == '##': 
                          i += 1
                 
-                elif original_marker == 'EventName': 
-                    if i < len(lines):
-                        log.debug(f"    跳过 EventName: '{lines[i].strip()}' (内容在 L{i+1})")
-                        i += 1 
-                    else:
-                        log.warning(f"    标记 #{original_marker}# (在 L{current_line_number_for_log}) 后没有内容行.")
-
                 elif original_marker == 'Choice': # 特别的，Choice 虽然以系统文本归类，但其内部存在不止一行，需要为这一个标记制作多个条目
                     choice_lines = []
                     while i < len(lines) and not lines[i].strip() == '##':

@@ -152,6 +152,16 @@ N. 译文行N
 DEFAULT_PRO_MODE_SETTINGS = {
     "export_encoding": "932",   # 默认 Shift-JIS
     "import_encoding": "936",   # 默认 GBK
+    "export_scope": {
+        "game_text": True,
+        "game_title": True,
+        "map_names": False,
+        "map_event_names": False,
+        "switch_names": False,
+        "variable_names": False,
+        "common_event_names": False,
+        "troop_names": False,
+    },
     "rewrite_rtp_fix": False,    # 默认进行RTP修正（然后发现这个功能并没有什么卯月就让它变成黑历史吧
     "auto_import_after_release": False,
     "rtp_options": {            # RTP 默认选项
@@ -264,9 +274,14 @@ class ConfigManager:
                  rtp_node = pro_node['rtp_options'] = json.loads(json.dumps(DEFAULT_PRO_MODE_SETTINGS['rtp_options']))
             for key, default_value in DEFAULT_PRO_MODE_SETTINGS['rtp_options'].items():
                 rtp_node.setdefault(key, default_value)
+            export_scope_node = pro_node.setdefault('export_scope', {})
+            if not isinstance(export_scope_node, dict):
+                export_scope_node = pro_node['export_scope'] = json.loads(json.dumps(DEFAULT_PRO_MODE_SETTINGS['export_scope']))
+            for key, default_value in DEFAULT_PRO_MODE_SETTINGS['export_scope'].items():
+                export_scope_node.setdefault(key, default_value)
         # 填充 pro_mode_settings 下的其他顶级键
         for key, default_value in DEFAULT_PRO_MODE_SETTINGS.items():
-             if key != 'rtp_options':
+             if key not in ('rtp_options', 'export_scope'):
                  pro_node.setdefault(key, default_value)
 
         # 确保顶层 selected_mode 存在

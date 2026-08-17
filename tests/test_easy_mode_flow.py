@@ -38,6 +38,7 @@ def test_easy_flow_stops_after_first_failed_step(monkeypatch, tmp_path):
         "936",
         {},
         {},
+        {},
         False,
         queue,
     )

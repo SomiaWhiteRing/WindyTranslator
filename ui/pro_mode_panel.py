@@ -19,6 +19,7 @@ class ProModePanel(ttk.Frame):
         self.import_encoding_var = tk.StringVar(value=pro_settings.get('import_encoding', '936'))
         self.rtp_fix_check = tk.BooleanVar(value=pro_settings.get('rewrite_rtp_fix', True))
         self.auto_import_after_release_check = tk.BooleanVar(value=pro_settings.get('auto_import_after_release', False))
+        self.export_scope = dict(pro_settings.get('export_scope', {}))
         self.rtp_button_text = tk.StringVar()
 
         # --- 编码选项列表 (不变) ---
@@ -71,16 +72,12 @@ class ProModePanel(ttk.Frame):
         self.export_button = ttk.Button(row_frame_1, text="执行", width=button_width,
                                        command=lambda: self.app.start_task('export'))
         self.export_button.pack(side=tk.RIGHT, padx=padx_val)
-        # 编码控件组合 (也使用 pack)
-        encoding_frame_export = ttk.Frame(row_frame_1)
-        encoding_frame_export.pack(side=tk.RIGHT, padx=padx_val)
-        self.export_encoding_combo = ttk.Combobox(encoding_frame_export, textvariable=self.export_encoding_var,
-                                             values=self.encoding_display_values, state="readonly", width=config_control_width - 2)
-        ttk.Label(encoding_frame_export, text="编码:").pack(side=tk.LEFT, padx=(0, 2))
-        self.export_encoding_combo.pack(side=tk.LEFT)
-        self.export_encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
-        self._set_combobox_value(self.export_encoding_combo, self.export_encoding_var.get())
-        all_controls_list.extend([self.export_button, self.export_encoding_combo])
+        self.export_config_button = ttk.Button(
+            row_frame_1, text="配置", width=config_button_width,
+            command=self._show_export_settings,
+        )
+        self.export_config_button.pack(side=tk.RIGHT, padx=padx_val)
+        all_controls_list.extend([self.export_button, self.export_config_button])
         row_idx += 1
 
         # --- 2. 重写文件名 ---
@@ -200,6 +197,68 @@ class ProModePanel(ttk.Frame):
         """当编码下拉框选择变化时保存设置。"""
         self._save_settings()
 
+    def _show_export_settings(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("导出设置")
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        encoding_frame = ttk.LabelFrame(dialog, text="文本编码", padding=10)
+        encoding_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
+        export_code = self.export_encoding_var.get().split(' - ')[-1]
+        encoding_var = tk.StringVar(value=next(
+            value for value in self.encoding_display_values if value.endswith(f" - {export_code}")
+        ))
+        ttk.Combobox(
+            encoding_frame, textvariable=encoding_var,
+            values=self.encoding_display_values, state="readonly", width=28,
+        ).pack(fill=tk.X)
+
+        scope_frame = ttk.LabelFrame(dialog, text="导出范围", padding=10)
+        scope_frame.pack(fill=tk.X, padx=12, pady=6)
+        scope_vars = {
+            key: tk.BooleanVar(value=self.export_scope.get(key, default))
+            for key, default in (
+                ("game_text", True),
+                ("game_title", True),
+                ("map_names", False),
+                ("map_event_names", False),
+                ("switch_names", False),
+                ("variable_names", False),
+                ("common_event_names", False),
+                ("troop_names", False),
+            )
+        }
+        labels = (
+            ("game_text", "游戏正文"),
+            ("game_title", "游戏标题"),
+            ("map_names", "地图名称"),
+            ("map_event_names", "地图事件名称"),
+            ("switch_names", "开关名称"),
+            ("variable_names", "变量名称"),
+            ("common_event_names", "公共事件名称"),
+            ("troop_names", "敌群名称"),
+        )
+        for index, (key, label) in enumerate(labels):
+            check = ttk.Checkbutton(scope_frame, text=label, variable=scope_vars[key])
+            check.grid(row=index // 2, column=index % 2, sticky=tk.W, padx=6, pady=3)
+            if key == "game_text":
+                check.state(["disabled"])
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X, padx=12, pady=(6, 12))
+
+        def save():
+            self.export_encoding_var.set(encoding_var.get())
+            self.export_scope = {key: var.get() for key, var in scope_vars.items()}
+            self.export_scope["game_text"] = True
+            self._save_settings()
+            dialog.destroy()
+
+        ttk.Button(button_frame, text="确定", command=save).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
+
     def _save_settings(self):
         """将当前面板上的设置保存到 App 配置中。"""
         # 现在可以直接通过实例属性访问 Combobox
@@ -212,6 +271,7 @@ class ProModePanel(ttk.Frame):
         settings_to_save = {
             'export_encoding': export_code,
             'import_encoding': import_code,
+            'export_scope': dict(self.export_scope),
             'rewrite_rtp_fix': self.rtp_fix_check.get(),
             'auto_import_after_release': self.auto_import_after_release_check.get(),
         }

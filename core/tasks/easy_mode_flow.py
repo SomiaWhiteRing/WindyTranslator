@@ -15,6 +15,7 @@ def run_easy_flow(
     rtp_options,
     export_encoding, # export 需要
     import_encoding, # import_task 需要
+    export_scope,
     world_dict_config, # dict_generation 需要
     translate_config, # translate 需要
     rewrite_rtp_fix, # rename 需要
@@ -40,7 +41,7 @@ def run_easy_flow(
 
     steps = [
         {"name": "初始化", "func": initialize.run_initialize, "args": [game_path, rtp_options, message_queue]},
-        {"name": "导出文本", "func": export.run_export, "args": [game_path, export_encoding, message_queue]},
+        {"name": "导出文本", "func": export.run_export, "args": [game_path, export_encoding, export_scope, message_queue]},
         {"name": "重写文件名", "func": rename.run_rename, "args": [game_path, program_dir, rewrite_rtp_fix, message_queue]},
         {"name": "制作JSON文件", "func": json_creation.run_create_json, "args": [game_path, works_dir, message_queue]},
         {"name": "生成世界观字典", "func": dict_generation.run_generate_dictionary, "args": [game_path, works_dir, world_dict_config, message_queue]},
@@ -69,7 +70,7 @@ def run_easy_flow(
     import_step = {
         "name": "导入文本",
         "func": import_task.run_import,
-        "args": [game_path, import_encoding, message_queue]
+        "args": [game_path, export_encoding, import_encoding, message_queue]
     }
 
     # 将最后两步加入

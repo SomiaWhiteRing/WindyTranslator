@@ -189,6 +189,7 @@ class RPGTranslatorApp:
         rtp_options = pro_config.get('rtp_options', {'2000': True, '2000en': False, '2003': False, '2003steam': False, '2003zh_tw': False})
         export_encoding = pro_config.get('export_encoding', '932')
         import_encoding = pro_config.get('import_encoding', '936')
+        export_scope = pro_config.get('export_scope', {})
         rewrite_rtp_fix = pro_config.get('rewrite_rtp_fix', True)
         world_dict_config = self.config.get('world_dict_config', {})
         translate_config = self.config.get('translate_config', {})
@@ -202,7 +203,7 @@ class RPGTranslatorApp:
             task_args = [current_game_path, self.executable_dir, rewrite_rtp_fix, self.message_queue]
         elif task_name == 'export':
             task_func = export.run_export
-            task_args = [current_game_path, export_encoding, self.message_queue]
+            task_args = [current_game_path, export_encoding, export_scope, self.message_queue]
         elif task_name == 'create_json':
             task_func = json_creation.run_create_json
             task_args = [current_game_path, self.works_dir, self.message_queue]
@@ -238,7 +239,7 @@ class RPGTranslatorApp:
                 return
         elif task_name == 'import':
             task_func = import_task.run_import
-            task_args = [current_game_path, import_encoding, self.message_queue]
+            task_args = [current_game_path, export_encoding, import_encoding, self.message_queue]
         elif task_name == 'apply_wolf_fonts':
             from core.engines import wolf
 
@@ -253,7 +254,7 @@ class RPGTranslatorApp:
              task_func = easy_mode_flow.run_easy_flow
              task_args = [
                  current_game_path, self.executable_dir, self.works_dir,
-                 rtp_options, export_encoding, import_encoding,
+                 rtp_options, export_encoding, import_encoding, export_scope,
                  world_dict_config, translate_config, rewrite_rtp_fix,
                  self.message_queue
              ]

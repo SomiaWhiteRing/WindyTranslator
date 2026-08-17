@@ -1,13 +1,22 @@
 # core/tasks/import_task.py
 import os
 import logging
+from pathlib import Path
 from core.external import rpgrewriter
+from core.utils import rpg_rt_ini
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
 # --- 主任务函数 ---
-def run_import(game_path, import_encoding, message_queue):
+def _read_title_file(path):
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    if len(lines) != 2 or lines[0] != "#GameTitle#":
+        raise ValueError("title.txt 格式无效")
+    return lines[1]
+
+
+def run_import(game_path, export_encoding, import_encoding, message_queue):
     """
     执行将 StringScripts 文本导入回游戏文件的流程。
 
@@ -16,6 +25,7 @@ def run_import(game_path, import_encoding, message_queue):
         import_encoding (str): 导入时使用的写入编码代号 (如 "936")。
         message_queue (queue.Queue): 用于向主线程发送消息的队列。
     """
+    ini_temp_path = None
     try:
         detected = detect_game_engine(game_path)
         if detected and detected.engine == "wolf":
@@ -73,6 +83,9 @@ def run_import(game_path, import_encoding, message_queue):
 
         lmt_path = os.path.join(game_path, "RPG_RT.lmt")
         string_scripts_path = os.path.join(game_path, "StringScripts")
+        ini_path = Path(game_path) / "RPG_RT.ini"
+        title_path = Path(string_scripts_path) / "title.txt"
+        origin_title_path = Path(game_path) / "StringScripts_Origin" / "title.txt"
 
         if not os.path.exists(lmt_path):
             message_queue.put(("error", f"未找到 RPG_RT.lmt 文件: {lmt_path}"))
@@ -85,15 +98,28 @@ def run_import(game_path, import_encoding, message_queue):
             message_queue.put(("done", None))
             return
 
+        translated_title = _read_title_file(title_path) if title_path.exists() else None
+        original_title = _read_title_file(origin_title_path) if origin_title_path.exists() else None
+        ini_text, _ini_encoding = rpg_rt_ini.read_ini(ini_path, export_encoding, original_title)
+        if translated_title is not None:
+            ini_text = rpg_rt_ini.set_game_title(ini_text, translated_title)
+        ini_bytes = rpg_rt_ini.encode_ini(ini_text, import_encoding)
+        ini_temp_path = ini_path.with_name(f"{ini_path.name}.import.tmp")
+        ini_temp_path.write_bytes(ini_bytes)
+
         # 执行导入命令
         return_code, stdout, stderr = rpgrewriter.import_text_command(lmt_path, import_encoding)
 
         if return_code == 0:
+            os.replace(ini_temp_path, ini_path)
+            ini_temp_path = None
             message_queue.put(("log", ("success", "RPGRewriter 导入命令成功完成。")))
             message_queue.put(("success", "文本已从 StringScripts 文件夹导入到游戏中。"))
             message_queue.put(("status", "文本导入完成"))
             message_queue.put(("done", None))
         else:
+            ini_temp_path.unlink(missing_ok=True)
+            ini_temp_path = None
             message_queue.put(("error", f"文本导入失败 (RPGRewriter 退出码: {return_code})。"))
             if stderr:
                  message_queue.put(("log", ("error", f"RPGRewriter 错误信息: {stderr}")))
@@ -104,6 +130,8 @@ def run_import(game_path, import_encoding, message_queue):
             message_queue.put(("done", None))
 
     except Exception as e:
+        if ini_temp_path is not None:
+            ini_temp_path.unlink(missing_ok=True)
         log.exception("导入文本任务执行期间发生意外错误。")
         message_queue.put(("error", f"导入文本过程中发生严重错误: {e}"))
         message_queue.put(("status", "导入文本失败"))
