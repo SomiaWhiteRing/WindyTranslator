@@ -32,14 +32,12 @@ def test_easy_flow_stops_after_first_failed_step(monkeypatch, tmp_path):
     result = easy_mode_flow.run_easy_flow(
         str(tmp_path),
         str(tmp_path),
-        str(tmp_path),
         {},
         "932",
         "936",
         {},
         {},
         {},
-        False,
         queue,
     )
 

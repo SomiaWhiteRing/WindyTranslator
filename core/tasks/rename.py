@@ -3,19 +3,16 @@ import os
 import logging
 from core.external import rpgrewriter # 导入 RPGRewriter 交互模块
 from core.utils import file_system
-from core.external import rtp # 导入外部交互模块
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
-def _create_input_txt(lmt_path, program_dir, rtp_fix_check):
+def _create_input_txt(lmt_path):
     """
     生成 filelist.txt 并转换为 input.txt。
 
     Args:
         lmt_path (str): 游戏 LMT 文件路径。
-        program_dir (str): 程序根目录 (用于查找生成的 filelist.txt，根据rpgrewriter行为调整)。
-        rtp_fix_check (bool): 是否在转化完成后进行rtp修正。
 
     Returns:
         bool: 是否成功创建 input.txt。
@@ -89,14 +86,12 @@ def _create_input_txt(lmt_path, program_dir, rtp_fix_check):
         return False, None, 0
 
 # --- 主任务函数 ---
-def run_rename(game_path, program_dir, rtp_fix, message_queue):
+def run_rename(game_path, message_queue):
     """
     执行重写文件名流程。
 
     Args:
         game_path (str): 游戏根目录路径。
-        program_dir (str): 程序根目录路径。
-        rtp_fix (bool): 是否进行RTP修正。
         message_queue (queue.Queue): 用于向主线程发送消息的队列。
     """
     try:
@@ -131,7 +126,7 @@ def run_rename(game_path, program_dir, rtp_fix, message_queue):
             return
 
         # 1. 生成 input.txt
-        success_input, input_txt_path, converted_count = _create_input_txt(lmt_path, program_dir, rtp_fix)
+        success_input, input_txt_path, converted_count = _create_input_txt(lmt_path)
         if not success_input:
             message_queue.put(("error", "生成 input.txt 文件失败。"))
             message_queue.put(("status", "重写文件名失败"))
@@ -165,16 +160,6 @@ def run_rename(game_path, program_dir, rtp_fix, message_queue):
 
         message_queue.put(("success", "文件名重写完成"))
         message_queue.put(("log", ("success", f"成功转换 {converted_count} 个非 ASCII 文件名并重写游戏数据。")))
-
-        # 进行RTP修正
-        if rtp_fix:
-            message_queue.put(("log", ("normal", "步骤 2.5: 进行 RTP 修正...")))
-            success_rtp = rtp.install_rtp_files(game_path, ["2000fix.zip"])
-            if success_rtp:
-                message_queue.put(("log", ("success", "RTP 修正完成。")))
-            else:
-                message_queue.put(("log", ("error", "RTP 修正过程中出现错误。")))
-                # 根据策略决定是否继续
 
         message_queue.put(("status", "文件名重写完成"))
         message_queue.put(("done", None)) # 标记任务完成

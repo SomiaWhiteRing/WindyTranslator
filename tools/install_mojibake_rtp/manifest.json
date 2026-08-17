@@ -1,0 +1,21 @@
+{
+  "manifest_version": 1,
+  "id": "install_mojibake_rtp",
+  "name": "安装乱码RTP",
+  "version": "1.0.0",
+  "author": "WindyTranslator",
+  "description": "安装乱码版本的RTP（可能对某些奇怪的BUG有效？）",
+  "category": "cli",
+  "runtime": "host_python",
+  "entry": "install_mojibake_rtp.py",
+  "working_directory": ".",
+  "arguments": [
+    {
+      "name": "project",
+      "flag": "--project",
+      "type": "game_path",
+      "required": true,
+      "label": "当前游戏目录"
+    }
+  ]
+}

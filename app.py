@@ -190,7 +190,6 @@ class RPGTranslatorApp:
         export_encoding = pro_config.get('export_encoding', '932')
         import_encoding = pro_config.get('import_encoding', '936')
         export_scope = pro_config.get('export_scope', {})
-        rewrite_rtp_fix = pro_config.get('rewrite_rtp_fix', True)
         world_dict_config = self.config.get('world_dict_config', {})
         translate_config = self.config.get('translate_config', {})
 
@@ -200,7 +199,7 @@ class RPGTranslatorApp:
             task_args = [current_game_path, rtp_options, self.message_queue]
         elif task_name == 'rename':
             task_func = rename.run_rename
-            task_args = [current_game_path, self.executable_dir, rewrite_rtp_fix, self.message_queue]
+            task_args = [current_game_path, self.message_queue]
         elif task_name == 'export':
             task_func = export.run_export
             task_args = [current_game_path, export_encoding, export_scope, self.message_queue]
@@ -253,9 +252,9 @@ class RPGTranslatorApp:
 
              task_func = easy_mode_flow.run_easy_flow
              task_args = [
-                 current_game_path, self.executable_dir, self.works_dir,
+                 current_game_path, self.works_dir,
                  rtp_options, export_encoding, import_encoding, export_scope,
-                 world_dict_config, translate_config, rewrite_rtp_fix,
+                 world_dict_config, translate_config,
                  self.message_queue
              ]
         # --- 新增：手动应用基础字典任务 ---

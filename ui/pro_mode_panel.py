@@ -17,7 +17,6 @@ class ProModePanel(ttk.Frame):
         # --- 控件变量 (不变) ---
         self.export_encoding_var = tk.StringVar(value=pro_settings.get('export_encoding', '932'))
         self.import_encoding_var = tk.StringVar(value=pro_settings.get('import_encoding', '936'))
-        self.rtp_fix_check = tk.BooleanVar(value=pro_settings.get('rewrite_rtp_fix', True))
         self.auto_import_after_release_check = tk.BooleanVar(value=pro_settings.get('auto_import_after_release', False))
         self.export_scope = dict(pro_settings.get('export_scope', {}))
         self.rtp_button_text = tk.StringVar()
@@ -85,10 +84,6 @@ class ProModePanel(ttk.Frame):
         self.rename_button = ttk.Button(row_frame_2, text="执行", width=button_width,
                                        command=lambda: self.app.start_task('rename'))
         self.rename_button.pack(side=tk.RIGHT, padx=padx_val)
-        # self.log_checkbutton = ttk.Checkbutton(row_frame_1, text="RTP修正", variable=self.rtp_fix_check,
-        #                                        command=self._save_settings)
-        # self.log_checkbutton.pack(side=tk.RIGHT, padx=padx_val)
-        # all_controls_list.extend([self.rename_button, self.log_checkbutton])
         all_controls_list.extend([self.rename_button])
         row_idx += 1
 
@@ -320,7 +315,6 @@ class ProModePanel(ttk.Frame):
             'export_encoding': export_code,
             'import_encoding': import_code,
             'export_scope': dict(self.export_scope),
-            'rewrite_rtp_fix': self.rtp_fix_check.get(),
             'auto_import_after_release': self.auto_import_after_release_check.get(),
         }
         self.app.save_pro_mode_settings(settings_to_save)

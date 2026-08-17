@@ -162,7 +162,6 @@ DEFAULT_PRO_MODE_SETTINGS = {
         "common_event_names": False,
         "troop_names": False,
     },
-    "rewrite_rtp_fix": False,    # 默认进行RTP修正（然后发现这个功能并没有什么卯月就让它变成黑历史吧
     "auto_import_after_release": False,
     "rtp_options": {            # RTP 默认选项
         "2000": True,
