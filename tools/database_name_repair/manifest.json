@@ -1,0 +1,21 @@
+{
+  "manifest_version": 1,
+  "id": "database_name_repair",
+  "name": "数据库名称修正",
+  "version": "1.0.0",
+  "author": "WindyTranslator",
+  "description": "将未翻译的RM内部字段从乱码修正回日语。",
+  "category": "cli",
+  "runtime": "host_python",
+  "entry": "database_name_repair.py",
+  "working_directory": ".",
+  "arguments": [
+    {
+      "name": "project",
+      "flag": "--project",
+      "type": "game_path",
+      "required": true,
+      "label": "当前游戏目录"
+    }
+  ]
+}
