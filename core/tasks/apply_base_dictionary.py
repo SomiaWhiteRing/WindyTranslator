@@ -58,6 +58,34 @@ def _count_term_in_json_originals(json_path, term):
         return 0 # 出错则返回0
     return count
 
+
+def _select_applicable_base_items(base_items, existing_originals, term_counter):
+    """Select base entries whose corresponding original is available as well."""
+    available = set(existing_originals)
+    pending = list(base_items)
+    selected = []
+
+    # ponytail: one small fixed-point pass handles nickname -> main-name chains.
+    while pending:
+        progressed = False
+        for item in pending[:]:
+            original = (item.get('原文') or '').strip()
+            if not original:
+                pending.remove(item)
+                continue
+            corresponding = (item.get('对应原名') or '').strip()
+            if corresponding and corresponding not in available:
+                continue
+            if original not in available and term_counter(original) < 3:
+                continue
+            selected.append(item)
+            available.add(original)
+            pending.remove(item)
+            progressed = True
+        if not progressed:
+            break
+    return selected
+
 def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_queue, **kwargs):
     """
     应用基础字典到游戏特定的生成字典。
@@ -156,13 +184,25 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
             message_queue.put(("log", ("normal", f"游戏事物生成字典 '{entity_gen_filename}' 未找到，将使用默认表头并尝试处理。")))
             game_entity_headers = dictionary_manager.BASE_ENTITY_HEADERS
 
+        existing_gen_originals = {
+            item.get('原文')
+            for item in game_char_data_list + game_entity_data_list
+            if item.get('原文')
+        }
+        applicable_base_items = _select_applicable_base_items(
+            base_char_dict + base_entity_dict,
+            existing_gen_originals,
+            lambda term: _count_term_in_json_originals(untranslated_json_path, term),
+        )
+        applicable_base_item_ids = {id(item) for item in applicable_base_items}
+
         # --- 3. 步骤 1 (替换) ---
         message_queue.put(("log", ("normal", "开始执行替换步骤...")))
         replacements_made_count = 0
         fields_updated_count = 0
 
         base_translation_map = {}
-        for item in base_char_dict + base_entity_dict:
+        for item in applicable_base_items:
             original = item.get('原文')
             translation = item.get('译文')
             if original and translation:
@@ -235,13 +275,9 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
         if not os.path.exists(untranslated_json_path):
             message_queue.put(("warning", f"原文 JSON 文件 ({os.path.basename(untranslated_json_path)}) 不存在，无法执行添加新术语的步骤。"))
         else:
-            existing_gen_originals = set()
-            for item in game_char_data_list: existing_gen_originals.add(item.get('原文'))
-            for item in game_entity_data_list: existing_gen_originals.add(item.get('原文'))
-            
             for base_item in base_char_dict:
                 base_original = base_item.get('原文')
-                if base_original and base_original not in existing_gen_originals:
+                if id(base_item) in applicable_base_item_ids and base_original and base_original not in existing_gen_originals:
                     term_count = _count_term_in_json_originals(untranslated_json_path, base_original)
                     if term_count >= 3:
                         log.info(f"添加基础人物词条: '{base_original}' (出现 {term_count} 次) 到游戏人物字典。")
@@ -252,7 +288,7 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
             
             for base_item in base_entity_dict:
                 base_original = base_item.get('原文')
-                if base_original and base_original not in existing_gen_originals:
+                if id(base_item) in applicable_base_item_ids and base_original and base_original not in existing_gen_originals:
                     term_count = _count_term_in_json_originals(untranslated_json_path, base_original)
                     if term_count >= 3:
                         log.info(f"添加基础事物词条: '{base_original}' (出现 {term_count} 次) 到游戏事物字典。")
