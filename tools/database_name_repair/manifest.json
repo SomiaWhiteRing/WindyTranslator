@@ -16,6 +16,14 @@
       "type": "game_path",
       "required": true,
       "label": "当前游戏目录"
+    },
+    {
+      "name": "rpgrewriter",
+      "flag": "--rpgrewriter",
+      "type": "modules",
+      "source": "RPGRewriter/RPGRewriter.exe",
+      "required": true,
+      "label": "RPGRewriter 可执行文件"
     }
   ]
 }

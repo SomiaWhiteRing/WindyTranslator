@@ -26,7 +26,7 @@ WindyTranslator.exe --run-tool <tool_dir> <entry> <arguments...>
 
 ## 参数类型
 
-支持 `game_path`、`current_game_file` 和 `fixed`。`game_path` 可选 `source`，用于传递游戏目录内的固定子路径；主程序只按这些声明生成参数，不执行 Manifest 中的 shell 模板。
+支持 `game_path`、`current_game_file`、`modules` 和 `fixed`。`game_path` 可选 `source`，用于传递游戏目录内的固定子路径；`modules` 必须填写 `source`，用于指向主程序 `modules` 根目录下的文件，宿主会根据开发运行或打包运行解析成实际绝对路径。主程序只按这些声明生成参数，不执行 Manifest 中的 shell 模板。
 
 ## 启动预设
 

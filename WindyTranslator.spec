@@ -12,7 +12,6 @@ a = Analysis(
         ('modules/WOLF', 'modules/WOLF'),
         ('modules/RTPCollection', 'modules/RTPCollection'),
         ('modules/dict', 'modules/dict'),
-        ('tools', 'tools'),
         ('assets/icon.ico', 'assets')
     ],
     hiddenimports=[
@@ -60,9 +59,6 @@ exe = EXE(
     upx=True,
     console=False,
     icon='assets/icon.ico',
-    # Keep external tool folders beside the executable. PyInstaller 6 defaults
-    # to an _internal directory, while the app resolves tools from exe_dir/tools.
-    contents_directory='.',
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

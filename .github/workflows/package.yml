@@ -41,6 +41,7 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean $env:SPEC_FILE
+          Copy-Item -Path "tools" -Destination "dist/$env:APP_NAME/tools" -Recurse -Force
           if (-not (Test-Path "dist/$env:APP_NAME/tools")) {
             throw "Expected tools directory beside the executable in the onedir package."
           }

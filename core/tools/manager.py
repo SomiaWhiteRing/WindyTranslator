@@ -9,8 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-
-SUPPORTED_ARGUMENT_TYPES = {"game_path", "current_game_file", "fixed"}
+SUPPORTED_ARGUMENT_TYPES = {"game_path", "current_game_file", "modules", "fixed"}
 SUPPORTED_RUNTIMES = {"host_python", "exe"}
 SUPPORTED_CATEGORIES = {"gui", "cli"}
 
@@ -106,11 +105,13 @@ def _parse_arguments(payload: Any) -> tuple[ToolArgument, ...]:
         if arg_type not in SUPPORTED_ARGUMENT_TYPES:
             raise ToolSpecError(f"不支持的参数类型: {arg_type}")
         source = item.get("source")
-        if arg_type in {"game_path", "current_game_file"} and source is not None:
+        if arg_type in {"game_path", "current_game_file", "modules"} and source is not None:
             if not isinstance(source, str) or not source.strip() or Path(source).is_absolute() or ".." in Path(source).parts:
                 raise ToolSpecError(f"{arg_type} 的 source 必须是安全相对路径: {name}")
         if arg_type == "current_game_file" and source is None:
             raise ToolSpecError(f"current_game_file 缺少安全的 source: {name}")
+        if arg_type == "modules" and source is None:
+            raise ToolSpecError(f"modules 缺少安全的 source: {name}")
         if arg_type == "fixed":
             if "value" not in item:
                 raise ToolSpecError(f"fixed 参数缺少 value: {name}")

@@ -9,6 +9,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from core.tools import RunningTool, ToolManager, ToolManifest, ToolSpecError
+from core.utils.file_system import get_application_path
 
 
 class ToolsPanel(ttk.Frame):
@@ -166,6 +167,8 @@ class ToolsPanel(ttk.Frame):
                 values[argument.name] = str(game_path.joinpath(*Path(argument.source).parts)) if argument.source else str(game_path)
             elif argument.type == "current_game_file":
                 values[argument.name] = self.app.get_tools_context_path(argument.source)
+            elif argument.type == "modules":
+                values[argument.name] = str(Path(get_application_path(), "modules", *Path(argument.source).parts))
         return values
 
     def _host_command(self):

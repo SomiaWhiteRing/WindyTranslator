@@ -133,8 +133,8 @@ def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _rpgrewriter_path() -> Path:
-    path = Path(__file__).resolve().parents[2] / "modules" / "RPGRewriter" / "RPGRewriter.exe"
+def _rpgrewriter_path(module_path: str) -> Path:
+    path = Path(module_path)
     if not path.is_file():
         raise RepairError(f"未找到 RPGRewriter.exe: {path}")
     return path
@@ -173,8 +173,9 @@ def _import_arguments() -> list[str]:
 
 
 class RepairSession:
-    def __init__(self, project: Path):
+    def __init__(self, project: Path, rpgrewriter_path: str):
         self.project = project.resolve()
+        self.rpgrewriter_path = Path(rpgrewriter_path)
         self.temp_root: Path | None = None
         self.initial_hashes: dict[Path, str] = {}
         self.candidates: list[Candidate] = []
@@ -191,7 +192,7 @@ class RepairSession:
                 shutil.copy2(path, target)
                 self.initial_hashes[path] = _hash(path)
         report("正在导出六类内部字段...")
-        _run(_rpgrewriter_path(), self.temp_root, _export_arguments())
+        _run(_rpgrewriter_path(self.rpgrewriter_path), self.temp_root, _export_arguments())
         scripts = self.temp_root / "StringScripts"
         if not scripts.is_dir():
             raise RepairError("RPGRewriter 未生成 StringScripts。")
@@ -208,7 +209,7 @@ class RepairSession:
         report("正在准备修正脚本...")
         apply_candidates(self.temp_root / "StringScripts", self.candidates)
         report("正在导入修正后的内部字段...")
-        _run(_rpgrewriter_path(), self.temp_root, _import_arguments())
+        _run(_rpgrewriter_path(self.rpgrewriter_path), self.temp_root, _import_arguments())
         report("正在覆盖项目数据文件...")
         changed: list[Path] = []
         for original, digest in self.initial_hashes.items():
@@ -242,8 +243,9 @@ def _confirm(candidate_count: int) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
+    parser.add_argument("--rpgrewriter", required=True)
     args = parser.parse_args()
-    session = RepairSession(Path(args.project))
+    session = RepairSession(Path(args.project), args.rpgrewriter)
     try:
         print("正在读取当前项目的内部字段...", flush=True)
         candidates = session.scan(lambda message: print(message, flush=True))

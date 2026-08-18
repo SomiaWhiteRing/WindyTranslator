@@ -8,7 +8,7 @@
       "properties": {
         "name": {"type": "string"},
         "flag": {"type": "string"},
-        "type": {"enum": ["game_path", "current_game_file", "fixed"]},
+        "type": {"enum": ["game_path", "current_game_file", "modules", "fixed"]},
         "required": {"type": "boolean"},
         "value": {},
         "source": {"type": "string"},
@@ -16,6 +16,7 @@
       },
       "allOf": [
         {"if": {"properties": {"type": {"const": "current_game_file"}}}, "then": {"required": ["source"]}},
+        {"if": {"properties": {"type": {"const": "modules"}}}, "then": {"required": ["source"], "not": {"required": ["value"]}}},
         {"if": {"properties": {"type": {"const": "fixed"}}}, "then": {"required": ["value"], "not": {"required": ["source"]}}, "else": {"not": {"required": ["value"]}}}
       ],
       "additionalProperties": false

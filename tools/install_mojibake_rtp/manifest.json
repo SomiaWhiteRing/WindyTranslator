@@ -16,6 +16,14 @@
       "type": "game_path",
       "required": true,
       "label": "当前游戏目录"
+    },
+    {
+      "name": "rtp_archive",
+      "flag": "--rtp-archive",
+      "type": "modules",
+      "source": "RTPCollection/2000fix.zip",
+      "required": true,
+      "label": "乱码 RTP 归档"
     }
   ]
 }
