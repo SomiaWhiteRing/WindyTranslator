@@ -54,8 +54,9 @@
 
 5. 打包内容说明（由 spec 配置）
    - 代码入口：`main.py`
-   - 资源与数据（打包进入 `_internal`）：
+   - 资源与数据（均位于可执行文件同级目录）：
       - `modules/EasyRPG`, `modules/RPGRewriter`, `modules/UberWolf`, `modules/WOLF`, `modules/RTPCollection`, `modules/dict`
+      - `tools`（翻译辅助工具目录）
       - `assets/icon.ico`（应用图标）
    - 运行时自动生成（与可执行文件同级）：
      - `Works`（工作目录）

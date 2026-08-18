@@ -41,6 +41,9 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean $env:SPEC_FILE
+          if (-not (Test-Path "dist/$env:APP_NAME/tools")) {
+            throw "Expected tools directory beside the executable in the onedir package."
+          }
 
       - name: Zip dist output
         id: zip
