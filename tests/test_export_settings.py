@@ -65,6 +65,25 @@ def test_import_updates_title_and_transcodes_ini(monkeypatch, tmp_path):
     assert "Encoding=932" in text
 
 
+def test_import_without_ini_still_imports_text(monkeypatch, tmp_path):
+    game_path = tmp_path / "game"
+    (game_path / "StringScripts").mkdir(parents=True)
+    lmt_path = game_path / "RPG_RT.lmt"
+    lmt_path.write_bytes(b"LMT")
+    called = []
+
+    def import_text(path, encoding):
+        called.append((path, encoding))
+        return 0, "", ""
+
+    monkeypatch.setattr(import_task.rpgrewriter, "import_text_command", import_text)
+
+    import_task.run_import(str(game_path), "932", "936", Queue())
+
+    assert called == [(str(lmt_path), "936")]
+    assert not (game_path / "RPG_RT.ini").exists()
+
+
 def test_import_rejects_unrepresentable_title_without_touching_ini(monkeypatch, tmp_path):
     game_path = tmp_path / "game"
     scripts = game_path / "StringScripts"

@@ -98,28 +98,31 @@ def run_import(game_path, export_encoding, import_encoding, message_queue):
             message_queue.put(("done", None))
             return
 
-        translated_title = _read_title_file(title_path) if title_path.exists() else None
-        original_title = _read_title_file(origin_title_path) if origin_title_path.exists() else None
-        ini_text, _ini_encoding = rpg_rt_ini.read_ini(ini_path, export_encoding, original_title)
-        if translated_title is not None:
-            ini_text = rpg_rt_ini.set_game_title(ini_text, translated_title)
-        ini_bytes = rpg_rt_ini.encode_ini(ini_text, import_encoding)
-        ini_temp_path = ini_path.with_name(f"{ini_path.name}.import.tmp")
-        ini_temp_path.write_bytes(ini_bytes)
+        if ini_path.exists():
+            translated_title = _read_title_file(title_path) if title_path.exists() else None
+            original_title = _read_title_file(origin_title_path) if origin_title_path.exists() else None
+            ini_text, _ini_encoding = rpg_rt_ini.read_ini(ini_path, export_encoding, original_title)
+            if translated_title is not None:
+                ini_text = rpg_rt_ini.set_game_title(ini_text, translated_title)
+            ini_bytes = rpg_rt_ini.encode_ini(ini_text, import_encoding)
+            ini_temp_path = ini_path.with_name(f"{ini_path.name}.import.tmp")
+            ini_temp_path.write_bytes(ini_bytes)
 
         # 执行导入命令
         return_code, stdout, stderr = rpgrewriter.import_text_command(lmt_path, import_encoding)
 
         if return_code == 0:
-            os.replace(ini_temp_path, ini_path)
-            ini_temp_path = None
+            if ini_temp_path is not None:
+                os.replace(ini_temp_path, ini_path)
+                ini_temp_path = None
             message_queue.put(("log", ("success", "RPGRewriter 导入命令成功完成。")))
             message_queue.put(("success", "文本已从 StringScripts 文件夹导入到游戏中。"))
             message_queue.put(("status", "文本导入完成"))
             message_queue.put(("done", None))
         else:
-            ini_temp_path.unlink(missing_ok=True)
-            ini_temp_path = None
+            if ini_temp_path is not None:
+                ini_temp_path.unlink(missing_ok=True)
+                ini_temp_path = None
             message_queue.put(("error", f"文本导入失败 (RPGRewriter 退出码: {return_code})。"))
             if stderr:
                  message_queue.put(("log", ("error", f"RPGRewriter 错误信息: {stderr}")))
