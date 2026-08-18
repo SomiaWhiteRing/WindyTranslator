@@ -299,8 +299,8 @@ class ProModePanel(ttk.Frame):
             self._save_settings()
             dialog.destroy()
 
-        ttk.Button(button_frame, text="确定", command=save).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(button_frame, text="确定", command=save).pack(side=tk.RIGHT)
 
     def _save_settings(self):
         """将当前面板上的设置保存到 App 配置中。"""
