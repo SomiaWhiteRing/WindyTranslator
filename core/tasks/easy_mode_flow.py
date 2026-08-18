@@ -12,7 +12,7 @@ def run_easy_flow(
     game_path,
     works_dir,
     rtp_options,
-    export_encoding, # export 需要
+    export_source_encoding,
     import_encoding, # import_task 需要
     export_scope,
     world_dict_config, # dict_generation 需要
@@ -26,7 +26,7 @@ def run_easy_flow(
         game_path (str): 游戏路径。
         works_dir (str): Works 目录。
         rtp_options (dict): RTP 选择。
-        export_encoding (str): 导出编码。
+        export_source_encoding (str): 导出编码选择。
         import_encoding (str): 导入编码。
         world_dict_config (dict): Gemini 配置。
         translate_config (dict): DeepSeek 配置。
@@ -36,8 +36,8 @@ def run_easy_flow(
     total_steps = 8 # 定义总步骤数
 
     steps = [
-        {"name": "初始化", "func": initialize.run_initialize, "args": [game_path, rtp_options, message_queue]},
-        {"name": "导出文本", "func": export.run_export, "args": [game_path, export_encoding, export_scope, message_queue]},
+        {"name": "初始化", "func": initialize.run_initialize, "args": [game_path, rtp_options, export_source_encoding, message_queue]},
+        {"name": "导出文本", "func": export.run_export, "args": [game_path, export_source_encoding, export_scope, message_queue]},
         {"name": "重写文件名", "func": rename.run_rename, "args": [game_path, message_queue]},
         {"name": "制作JSON文件", "func": json_creation.run_create_json, "args": [game_path, works_dir, message_queue]},
         {"name": "生成世界观字典", "func": dict_generation.run_generate_dictionary, "args": [game_path, works_dir, world_dict_config, message_queue]},
@@ -66,7 +66,7 @@ def run_easy_flow(
     import_step = {
         "name": "导入文本",
         "func": import_task.run_import,
-        "args": [game_path, export_encoding, import_encoding, message_queue]
+        "args": [game_path, export_source_encoding, import_encoding, message_queue]
     }
 
     # 将最后两步加入

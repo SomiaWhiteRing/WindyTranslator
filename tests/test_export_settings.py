@@ -1,6 +1,6 @@
 import hashlib
 
-from core.tasks import export, import_task
+from core.tasks import export, import_task, initialize
 
 
 class Queue:
@@ -46,6 +46,32 @@ def test_export_writes_title_before_origin_backup(monkeypatch, tmp_path):
     assert (game_path / "StringScripts_Origin" / "title.txt").read_text(encoding="utf-8") == expected
 
 
+def test_export_auto_uses_detected_source_encoding(monkeypatch, tmp_path):
+    game_path = tmp_path / "game"
+    game_path.mkdir()
+    (game_path / "RPG_RT.lmt").write_bytes(b"LMT")
+    _write_ini(game_path / "RPG_RT.ini", "游戏", encoding="936")
+    called = []
+
+    def resolve(_game_path, selection):
+        called.append(selection)
+        return "936"
+
+    def run(_lmt_path, encoding, _scope_value):
+        called.append(encoding)
+        scripts = game_path / "StringScripts"
+        scripts.mkdir()
+        (scripts / "Map0001.txt").write_text("#Message#\n本文\n##\n", encoding="utf-8")
+        return 0, "", ""
+
+    monkeypatch.setattr(export.easyrpg, "resolve_game_encoding", resolve)
+    monkeypatch.setattr(export.rpgrewriter, "export_text_command", run)
+
+    export.run_export(str(game_path), "auto", _scope(), Queue())
+
+    assert called == ["auto", "936"]
+
+
 def test_import_updates_title_and_transcodes_ini(monkeypatch, tmp_path):
     game_path = tmp_path / "game"
     scripts = game_path / "StringScripts"
@@ -62,7 +88,18 @@ def test_import_updates_title_and_transcodes_ini(monkeypatch, tmp_path):
 
     text = (game_path / "RPG_RT.ini").read_bytes().decode("cp936")
     assert "GameTitle=游戏标题" in text
-    assert "Encoding=932" in text
+    assert "Encoding=936" in text
+
+
+def test_initialize_updates_ini_to_current_source_encoding(tmp_path):
+    ini_path = tmp_path / "RPG_RT.ini"
+    _write_ini(ini_path, "Title", encoding="932")
+
+    assert initialize._update_rpg_rt_ini(str(ini_path), target_encoding_code="936")
+
+    text = ini_path.read_bytes().decode("cp936")
+    assert text.count("Encoding=") == 1
+    assert "Encoding=936" in text
 
 
 def test_import_without_ini_still_imports_text(monkeypatch, tmp_path):

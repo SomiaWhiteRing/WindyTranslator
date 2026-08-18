@@ -150,7 +150,7 @@ N. 译文行N
 
 # --- 默认专业模式配置 ---
 DEFAULT_PRO_MODE_SETTINGS = {
-    "export_encoding": "932",   # 默认 Shift-JIS
+    "export_source_encoding": "auto",
     "import_encoding": "936",   # 默认 GBK
     "export_scope": {
         "game_text": True,

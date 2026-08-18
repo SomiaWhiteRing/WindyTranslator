@@ -58,6 +58,46 @@ def get_game_title(text):
     return _get_value(text, "RPG_RT", "GameTitle")
 
 
+def set_easy_rpg_encoding(text, encoding):
+    lines = text.splitlines(keepends=True)
+    section = None
+    easyrpg_index = None
+    encoding_indices = []
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip().casefold()
+            if section == "easyrpg":
+                easyrpg_index = index
+            continue
+        if section == "easyrpg" and "=" in line:
+            key, _value = line.split("=", 1)
+            if key.strip().casefold() == "encoding":
+                encoding_indices.append(index)
+
+    if encoding_indices:
+        first = encoding_indices[0]
+        key, _value = lines[first].split("=", 1)
+        newline = "\r\n" if lines[first].endswith("\r\n") else "\n" if lines[first].endswith("\n") else ""
+        lines[first] = f"{key}={encoding}{newline}"
+        for index in reversed(encoding_indices[1:]):
+            del lines[index]
+        return "".join(lines)
+
+    if easyrpg_index is None:
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        lines.extend(("[EasyRPG]\n", f"Encoding={encoding}\n"))
+        return "".join(lines)
+
+    insert_at = easyrpg_index + 1
+    while insert_at < len(lines) and not lines[insert_at].strip().startswith("["):
+        insert_at += 1
+    lines.insert(insert_at, f"Encoding={encoding}\n")
+    return "".join(lines)
+
+
 def set_game_title(text, title):
     lines = text.splitlines(keepends=True)
     section = None

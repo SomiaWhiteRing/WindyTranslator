@@ -22,6 +22,16 @@ MAP_DATA_RE = re.compile(r"^Map\d+\.lmu$", re.IGNORECASE)
 EASYRPG_ENCODING_MAP = {
     "ibm-943_p15a-2003": "932",
     "windows-936-2000": "936",
+    "windows-949-2000": "949",
+    "big5": "950",
+    "windows-950": "950",
+    "windows-874": "874",
+    "ibm-5348_p100-1997": "1252",
+    "windows-1252": "1252",
+    "ibm-5346_p100-1998": "1250",
+    "windows-1250": "1250",
+    "ibm-5347_p100-1998": "1251",
+    "windows-1251": "1251",
 }
 
 
@@ -224,6 +234,11 @@ class RepairSession:
         required = (self.project / "RPG_RT.lmt", self.project / "RPG_RT.ldb")
         if not all(path.is_file() for path in required):
             raise RepairError("当前项目缺少 RPG_RT.lmt 或 RPG_RT.ldb。")
+        report("正在由魔改版 EasyRPG 检测当前编码（跳过 RPG_RT.ini）...")
+        encoding = detect_text_encoding(_easyrpg_path(self.easyrpg_path), self.project)
+        report(f"正文编码判定：EasyRPG 返回 {encoding}。")
+        if encoding != "936":
+            return []
         report("正在创建临时工程...")
         self.temp_root = Path(tempfile.mkdtemp(prefix=".database_name_repair_", dir=self.project.parent))
         for path in [*required, *sorted(self.project.glob("Map*.lmu"))]:
@@ -235,11 +250,6 @@ class RepairSession:
             source = self.project / directory
             if source.is_dir():
                 shutil.copytree(source, self.temp_root / directory)
-        report("正在由魔改版 EasyRPG 检测当前编码...")
-        encoding = detect_text_encoding(_easyrpg_path(self.easyrpg_path), self.temp_root)
-        report(f"正文编码判定：EasyRPG 返回 {encoding}。")
-        if encoding != "936":
-            return []
         executable = _rpgrewriter_path(self.rpgrewriter_path)
         report("正在按 936 导出内部字段...")
         _run(executable, self.temp_root, _export_arguments(encoding))

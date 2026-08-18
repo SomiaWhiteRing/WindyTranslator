@@ -5,7 +5,7 @@ import shutil # <--- 新增导入
 import logging
 import time # 用于短暂等待
 from pathlib import Path
-from core.external import rpgrewriter
+from core.external import easyrpg, rpgrewriter
 from core.utils import file_system
 from core.utils import rpg_rt_ini
 from core.utils.engine_detection import detect_game_engine
@@ -13,7 +13,7 @@ from core.utils.engine_detection import detect_game_engine
 log = logging.getLogger(__name__)
 
 # --- 导出文本任务 ---
-def run_export(game_path, export_encoding, export_scope, message_queue):
+def run_export(game_path, source_encoding, export_scope, message_queue):
     """
     执行导出文本到 StringScripts 文件夹的流程。
     包含处理 RPGRewriter 导出失败时移动问题地图文件的逻辑。
@@ -21,7 +21,7 @@ def run_export(game_path, export_encoding, export_scope, message_queue):
 
     Args:
         game_path (str): 游戏根目录路径。
-        export_encoding (str): 导出时使用的读取编码代号 (如 "932")。
+        source_encoding (str): 导出时使用的读取编码选择（如 "auto" 或 "932"）。
         message_queue (queue.Queue): 用于向主线程发送消息的队列。
     """
     try:
@@ -76,8 +76,9 @@ def run_export(game_path, export_encoding, export_scope, message_queue):
                 message_queue.put(("done", None))
             return
 
-        message_queue.put(("status", f"正在导出文本 (编码: {export_encoding})..."))
-        message_queue.put(("log", ("normal", f"步骤 1: 开始导出文本 (读取编码: {export_encoding})...")))
+        source_encoding = easyrpg.resolve_game_encoding(game_path, source_encoding)
+        message_queue.put(("status", f"正在导出文本 (编码: {source_encoding})..."))
+        message_queue.put(("log", ("normal", f"步骤 1: 开始导出文本 (读取编码: {source_encoding})...")))
 
         lmt_path = os.path.join(game_path, "RPG_RT.lmt")
         if not os.path.exists(lmt_path):
@@ -123,7 +124,7 @@ def run_export(game_path, export_encoding, export_scope, message_queue):
             # -----------------------------------------
 
             # 执行导出命令
-            return_code, stdout, stderr = rpgrewriter.export_text_command(lmt_path, export_encoding, export_scope)
+            return_code, stdout, stderr = rpgrewriter.export_text_command(lmt_path, source_encoding, export_scope)
 
             if return_code == 0:
                 export_successful = True
@@ -179,7 +180,7 @@ def run_export(game_path, export_encoding, export_scope, message_queue):
                     ini_path = os.path.join(game_path, "RPG_RT.ini")
                     try:
                         ini_text, _ini_encoding = rpg_rt_ini.read_ini(
-                            Path(ini_path), export_encoding
+                            Path(ini_path), source_encoding
                         )
                         title = rpg_rt_ini.get_game_title(ini_text)
                         if title is None:

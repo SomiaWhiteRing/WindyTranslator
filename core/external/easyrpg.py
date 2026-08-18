@@ -1,6 +1,7 @@
 # core/external/easyrpg.py
 import os
 import logging
+import subprocess
 from core.utils.file_system import get_application_path  # 导入路径辅助函数
 from core.utils import file_system
 
@@ -8,6 +9,58 @@ log = logging.getLogger(__name__)
 
 # EasyRPG 模块源路径
 EASYRPG_SRC_DIR = os.path.join(get_application_path(), "modules", "EasyRPG")
+EASYRPG_PLAYER_PATH = os.path.join(EASYRPG_SRC_DIR, "Player.exe")
+EASYRPG_ENCODING_MAP = {
+    "ibm-943_p15a-2003": "932",
+    "windows-936-2000": "936",
+    "windows-949-2000": "949",
+    "big5": "950",
+    "windows-950": "950",
+    "windows-874": "874",
+    "ibm-5348_p100-1997": "1252",
+    "windows-1252": "1252",
+    "ibm-5346_p100-1998": "1250",
+    "windows-1250": "1250",
+    "ibm-5347_p100-1998": "1251",
+    "windows-1251": "1251",
+}
+
+
+class EncodingDetectionError(RuntimeError):
+    pass
+
+
+def detect_game_encoding(game_path):
+    """Detect an RPG Maker 2000/2003 project's encoding without trusting RPG_RT.ini."""
+    if not os.path.isfile(EASYRPG_PLAYER_PATH):
+        raise EncodingDetectionError(f"未找到 EasyRPG Player: {EASYRPG_PLAYER_PATH}")
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    completed = subprocess.run(
+        [EASYRPG_PLAYER_PATH, "--detect-encoding"],
+        cwd=game_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        creationflags=creationflags,
+        check=False,
+    )
+    if completed.returncode != 0:
+        details = (completed.stderr or completed.stdout).strip()
+        raise EncodingDetectionError(f"EasyRPG 编码检测失败: {details[:500]}")
+
+    raw_encoding = completed.stdout.strip()
+    encoding = EASYRPG_ENCODING_MAP.get(raw_encoding.casefold())
+    if encoding is None:
+        raise EncodingDetectionError(
+            f"EasyRPG 返回了无法识别的编码 {raw_encoding!r}，请上报开发者或手动指定编码。"
+        )
+    return encoding
+
+
+def resolve_game_encoding(game_path, selection):
+    return detect_game_encoding(game_path) if str(selection).casefold() == "auto" else str(selection)
 
 def copy_easyrpg_files(target_game_dir):
     """

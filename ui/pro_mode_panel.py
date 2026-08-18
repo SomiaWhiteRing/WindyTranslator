@@ -15,7 +15,7 @@ class ProModePanel(ttk.Frame):
         pro_settings = self.config.setdefault('pro_mode_settings', {})
 
         # --- 控件变量 (不变) ---
-        self.export_encoding_var = tk.StringVar(value=pro_settings.get('export_encoding', '932'))
+        self.export_source_encoding_var = tk.StringVar(value=pro_settings.get('export_source_encoding', 'auto'))
         self.import_encoding_var = tk.StringVar(value=pro_settings.get('import_encoding', '936'))
         self.auto_import_after_release_check = tk.BooleanVar(value=pro_settings.get('auto_import_after_release', False))
         self.export_scope = dict(pro_settings.get('export_scope', {}))
@@ -23,6 +23,7 @@ class ProModePanel(ttk.Frame):
 
         # --- 编码选项列表 (不变) ---
         self.encoding_options = [
+            ("自动检测", "auto"),
             ("日语 (Shift-JIS)", "932"), ("中文简体 (GBK)", "936"), ("中文繁体 (Big5)", "950"),
             ("韩语 (EUC-KR)", "949"), ("泰语", "874"), ("拉丁语系 (西欧)", "1252"),
             ("东欧", "1250"), ("西里尔字母", "1251")
@@ -203,7 +204,7 @@ class ProModePanel(ttk.Frame):
 
         encoding_frame = ttk.LabelFrame(content, text="文本编码", padding=10)
         encoding_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
-        export_code = self.export_encoding_var.get().split(' - ')[-1]
+        export_code = self.export_source_encoding_var.get().split(' - ')[-1]
         encoding_var = tk.StringVar(value=next(
             value for value in self.encoding_display_values if value.endswith(f" - {export_code}")
         ))
@@ -293,7 +294,7 @@ class ProModePanel(ttk.Frame):
         button_frame.pack(fill=tk.X, padx=12, pady=(6, 12))
 
         def save():
-            self.export_encoding_var.set(encoding_var.get())
+            self.export_source_encoding_var.set(encoding_var.get())
             self.export_scope = {key: var.get() for key, var in scope_vars.items()}
             self.export_scope["game_text"] = True
             self._save_settings()
@@ -305,14 +306,14 @@ class ProModePanel(ttk.Frame):
     def _save_settings(self):
         """将当前面板上的设置保存到 App 配置中。"""
         # 现在可以直接通过实例属性访问 Combobox
-        export_display = self.export_encoding_var.get()
+        export_display = self.export_source_encoding_var.get()
         import_display = self.import_encoding_var.get()
 
-        export_code = export_display.split(' - ')[-1] if ' - ' in export_display else '932'
+        export_code = export_display.split(' - ')[-1]
         import_code = import_display.split(' - ')[-1] if ' - ' in import_display else '936'
 
         settings_to_save = {
-            'export_encoding': export_code,
+            'export_source_encoding': export_code,
             'import_encoding': import_code,
             'export_scope': dict(self.export_scope),
             'auto_import_after_release': self.auto_import_after_release_check.get(),

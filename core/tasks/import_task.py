@@ -2,7 +2,7 @@
 import os
 import logging
 from pathlib import Path
-from core.external import rpgrewriter
+from core.external import easyrpg, rpgrewriter
 from core.utils import rpg_rt_ini
 from core.utils.engine_detection import detect_game_engine
 
@@ -16,12 +16,13 @@ def _read_title_file(path):
     return lines[1]
 
 
-def run_import(game_path, export_encoding, import_encoding, message_queue):
+def run_import(game_path, source_encoding, import_encoding, message_queue):
     """
     执行将 StringScripts 文本导入回游戏文件的流程。
 
     Args:
         game_path (str): 游戏根目录路径。
+        source_encoding (str): 原始游戏编码选择（如 "auto" 或 "932"）。
         import_encoding (str): 导入时使用的写入编码代号 (如 "936")。
         message_queue (queue.Queue): 用于向主线程发送消息的队列。
     """
@@ -78,6 +79,7 @@ def run_import(game_path, export_encoding, import_encoding, message_queue):
                 message_queue.put(("done", None))
             return
 
+        source_encoding = easyrpg.resolve_game_encoding(game_path, source_encoding)
         message_queue.put(("status", f"正在导入文本 (编码: {import_encoding})..."))
         message_queue.put(("log", ("normal", f"步骤 7: 开始导入文本 (写入编码: {import_encoding})...")))
 
@@ -101,9 +103,10 @@ def run_import(game_path, export_encoding, import_encoding, message_queue):
         if ini_path.exists():
             translated_title = _read_title_file(title_path) if title_path.exists() else None
             original_title = _read_title_file(origin_title_path) if origin_title_path.exists() else None
-            ini_text, _ini_encoding = rpg_rt_ini.read_ini(ini_path, export_encoding, original_title)
+            ini_text, _ini_encoding = rpg_rt_ini.read_ini(ini_path, source_encoding, original_title)
             if translated_title is not None:
                 ini_text = rpg_rt_ini.set_game_title(ini_text, translated_title)
+            ini_text = rpg_rt_ini.set_easy_rpg_encoding(ini_text, import_encoding)
             ini_bytes = rpg_rt_ini.encode_ini(ini_text, import_encoding)
             ini_temp_path = ini_path.with_name(f"{ini_path.name}.import.tmp")
             ini_temp_path.write_bytes(ini_bytes)

@@ -187,7 +187,7 @@ class RPGTranslatorApp:
         # 从配置中获取所需参数
         pro_config = self.config.get('pro_mode_settings', {}) # 专业模式的独立配置
         rtp_options = pro_config.get('rtp_options', {'2000': True, '2000en': False, '2003': False, '2003steam': False, '2003zh_tw': False})
-        export_encoding = pro_config.get('export_encoding', '932')
+        export_source_encoding = pro_config.get('export_source_encoding', 'auto')
         import_encoding = pro_config.get('import_encoding', '936')
         export_scope = pro_config.get('export_scope', {})
         world_dict_config = self.config.get('world_dict_config', {})
@@ -196,13 +196,13 @@ class RPGTranslatorApp:
         # 根据 task_name 选择任务函数和参数
         if task_name == 'initialize':
             task_func = initialize.run_initialize
-            task_args = [current_game_path, rtp_options, self.message_queue]
+            task_args = [current_game_path, rtp_options, export_source_encoding, self.message_queue]
         elif task_name == 'rename':
             task_func = rename.run_rename
             task_args = [current_game_path, self.message_queue]
         elif task_name == 'export':
             task_func = export.run_export
-            task_args = [current_game_path, export_encoding, export_scope, self.message_queue]
+            task_args = [current_game_path, export_source_encoding, export_scope, self.message_queue]
         elif task_name == 'create_json':
             task_func = json_creation.run_create_json
             task_args = [current_game_path, self.works_dir, self.message_queue]
@@ -238,7 +238,7 @@ class RPGTranslatorApp:
                 return
         elif task_name == 'import':
             task_func = import_task.run_import
-            task_args = [current_game_path, export_encoding, import_encoding, self.message_queue]
+            task_args = [current_game_path, export_source_encoding, import_encoding, self.message_queue]
         elif task_name == 'apply_wolf_fonts':
             from core.engines import wolf
 
@@ -253,7 +253,7 @@ class RPGTranslatorApp:
              task_func = easy_mode_flow.run_easy_flow
              task_args = [
                  current_game_path, self.works_dir,
-                 rtp_options, export_encoding, import_encoding, export_scope,
+                  rtp_options, export_source_encoding, import_encoding, export_scope,
                  world_dict_config, translate_config,
                  self.message_queue
              ]

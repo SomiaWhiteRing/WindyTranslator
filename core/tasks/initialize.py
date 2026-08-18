@@ -3,7 +3,7 @@ import os
 import shutil
 import logging
 from core.external import easyrpg, rtp # 导入外部交互模块
-from core.utils import file_system, text_processing
+from core.utils import file_system, rpg_rt_ini, text_processing
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
@@ -103,9 +103,7 @@ def _update_rpg_rt_ini(ini_path, target_encoding_code='936'):
 
     # --- 分析内容 ---
     rpg_rt_section_index = -1
-    easyrpg_section_index = -1
     full_package_found = False
-    encoding_found = False
 
     current_section = None
     for i, line in enumerate(lines):
@@ -114,12 +112,8 @@ def _update_rpg_rt_ini(ini_path, target_encoding_code='936'):
             current_section = line_strip
             if current_section == '[RPG_RT]':
                 rpg_rt_section_index = i
-            elif current_section == '[EasyRPG]':
-                easyrpg_section_index = i
         elif current_section == '[RPG_RT]' and line_strip.lower() == 'fullpackageflag=1':
             full_package_found = True
-        elif current_section == '[EasyRPG]' and line_strip.lower() == f'encoding={target_encoding_code}':
-            encoding_found = True
 
     # --- 构建新内容 ---
     output_lines = list(lines) # 创建副本以修改
@@ -139,26 +133,11 @@ def _update_rpg_rt_ini(ini_path, target_encoding_code='936'):
          log.warning("RPG_RT.ini 中未找到 [RPG_RT] 段落，无法添加 FullPackageFlag。")
 
 
-    # 2. 添加 Encoding=936
-    if not encoding_found:
-        if easyrpg_section_index != -1: # 如果 [EasyRPG] 段落存在
-            insert_enc_at = len(output_lines)
-            for j in range(easyrpg_section_index + 1, len(output_lines)):
-                if output_lines[j].strip().startswith('['):
-                    insert_enc_at = j
-                    break
-            output_lines.insert(insert_enc_at, f"Encoding={target_encoding_code}\n")
-            log.info(f"在 [EasyRPG] 段落中添加 Encoding={target_encoding_code}")
-        else: # 如果 [EasyRPG] 段落不存在，在文件末尾添加
-            # 确保末尾有换行符
-            if output_lines and not output_lines[-1].endswith('\n'):
-                 output_lines[-1] = output_lines[-1].rstrip() + '\n'
-            # 可能需要在前面加一个空行
-            if output_lines and output_lines[-1].strip(): # 如果最后一行不是空行
-                 output_lines.append('\n')
-            output_lines.append("[EasyRPG]\n")
-            output_lines.append(f"Encoding={target_encoding_code}\n")
-            log.info(f"添加 [EasyRPG] 段落和 Encoding={target_encoding_code}")
+    original_text = "".join(output_lines)
+    updated_text = rpg_rt_ini.set_easy_rpg_encoding(original_text, target_encoding_code)
+    if updated_text != original_text:
+        output_lines = updated_text.splitlines(keepends=True)
+        log.info(f"设置 EasyRPG Encoding={target_encoding_code}")
         needs_write = True
 
     # --- 写回文件 ---
@@ -186,7 +165,7 @@ def _update_rpg_rt_ini(ini_path, target_encoding_code='936'):
         return False # 表示未修改
 
 # --- 主任务函数 ---
-def run_initialize(game_path, rtp_options, message_queue):
+def run_initialize(game_path, rtp_options, source_encoding, message_queue):
     """
     执行游戏初始化流程：复制 EasyRPG，安装 RTP，转换编码，更新 ini。
 
@@ -194,6 +173,7 @@ def run_initialize(game_path, rtp_options, message_queue):
         game_path (str): 游戏根目录路径。
         rtp_options (dict): 包含 RTP 选择状态的字典，例如:
                            {'2000': True, '2000en': False, '2003': True, '2003steam': False}
+        source_encoding (str): 原始游戏编码选择（如 "auto" 或 "932"）。
         message_queue (queue.Queue): 用于向主线程发送消息的队列。
     """
     try:
@@ -246,26 +226,32 @@ def run_initialize(game_path, rtp_options, message_queue):
         else:
             message_queue.put(("log", ("warning", "未选择任何 RTP 文件进行安装。")))
 
+        source_encoding = easyrpg.resolve_game_encoding(game_path, source_encoding)
+        message_queue.put(("log", ("normal", f"项目编码：{source_encoding}")))
+
         # 3. 转换文本文件编码 (日文 Shift-JIS/EUC-JP -> GBK)
         message_queue.put(("log", ("normal", "检查并转换文本文件编码 (日文 -> GBK)...")))
         converted_count = 0
         checked_count = 0
-        target_files = [item for item in os.listdir(game_path)
-                        if os.path.isfile(os.path.join(game_path, item)) and
-                        (item.lower().endswith('.txt') or item.lower().endswith('.ini'))]
+        if source_encoding == '932':
+            target_files = [item for item in os.listdir(game_path)
+                            if os.path.isfile(os.path.join(game_path, item)) and
+                            (item.lower().endswith('.txt') or item.lower().endswith('.ini'))]
 
-        for filename in target_files:
-            file_path = os.path.join(game_path, filename)
-            checked_count += 1
-            converted, _ = _detect_and_convert_encoding(file_path, target_encoding='gbk')
-            if converted:
-                converted_count += 1
+            for filename in target_files:
+                file_path = os.path.join(game_path, filename)
+                checked_count += 1
+                converted, _ = _detect_and_convert_encoding(file_path, target_encoding='gbk')
+                if converted:
+                    converted_count += 1
+        else:
+            message_queue.put(("log", ("normal", "当前项目不是 932，跳过日文侧车文件转换。")))
         message_queue.put(("log", ("success", f"编码检查完成: 检查 {checked_count} 个文件，转换 {converted_count} 个。")))
 
         # 4. 检查并更新 RPG_RT.ini
         ini_path = os.path.join(game_path, "RPG_RT.ini")
         message_queue.put(("log", ("normal", "检查并更新 RPG_RT.ini 配置...")))
-        _update_rpg_rt_ini(ini_path, target_encoding_code='936') # 936 代表 GBK
+        _update_rpg_rt_ini(ini_path, target_encoding_code=source_encoding)
 
         message_queue.put(("success", "初始化完成"))
         message_queue.put(("status", "初始化完成"))
