@@ -8,7 +8,6 @@ import sys
 import threading
 import time
 import traceback
-import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -35,10 +34,6 @@ from core import (
     permanently_delete_assets,
     safe_int,
 )
-
-LCF2XML_DOWNLOAD_URL = "https://ci.easyrpg.org/view/liblcf/job/liblcf-win32/lastSuccessfulBuild/artifact/build/bin/lcf2xml.exe"
-EASYRPG_TOOLS_URL = "https://easyrpg.org/tools/downloads/"
-
 
 def app_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -115,8 +110,6 @@ class AuditorApp(tk.Tk):
         ttk.Label(top, text="lcf2xml：").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(top, textvariable=self.parser_var).grid(row=1, column=1, columnspan=4, sticky="ew", padx=4, pady=(6, 0))
         ttk.Button(top, text="选择…", command=self.choose_parser).grid(row=1, column=5, padx=2, pady=(6, 0))
-        ttk.Button(top, text="官方下载", command=lambda: webbrowser.open(LCF2XML_DOWNLOAD_URL)).grid(row=1, column=6, padx=2, pady=(6, 0))
-        ttk.Button(top, text="工具说明", command=lambda: webbrowser.open(EASYRPG_TOOLS_URL)).grid(row=1, column=7, padx=2, pady=(6, 0))
 
         ttk.Label(top, text="引擎：").grid(row=2, column=0, sticky="w", pady=(6, 0))
         engine_box = ttk.Frame(top)
