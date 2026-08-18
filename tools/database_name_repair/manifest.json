@@ -24,6 +24,14 @@
       "source": "RPGRewriter/RPGRewriter.exe",
       "required": true,
       "label": "RPGRewriter 可执行文件"
+    },
+    {
+      "name": "easyrpg",
+      "flag": "--easyrpg",
+      "type": "modules",
+      "source": "EasyRPG/Player.exe",
+      "required": true,
+      "label": "EasyRPG Player 可执行文件"
     }
   ]
 }

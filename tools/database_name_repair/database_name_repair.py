@@ -19,6 +19,10 @@ CP936 = "cp936"
 MARKER_RE = re.compile(r"^#([^#]+)#")
 MAP_SCRIPT_RE = re.compile(r"^Map\d+\.txt$", re.IGNORECASE)
 MAP_DATA_RE = re.compile(r"^Map\d+\.lmu$", re.IGNORECASE)
+EASYRPG_ENCODING_MAP = {
+    "ibm-943_p15a-2003": "932",
+    "windows-936-2000": "936",
+}
 
 
 @dataclass(frozen=True)
@@ -140,6 +144,41 @@ def _rpgrewriter_path(module_path: str) -> Path:
     return path
 
 
+def _easyrpg_path(module_path: str) -> Path:
+    path = Path(module_path)
+    if not path.is_file():
+        raise RepairError(f"未找到 EasyRPG Player: {path}")
+    return path
+
+
+def _normalize_easyrpg_encoding(output: str) -> str:
+    value = output.strip()
+    encoding = EASYRPG_ENCODING_MAP.get(value.casefold())
+    if encoding is None:
+        if value.casefold() == "windows-936":
+            raise RepairError("EasyRPG 未检测到编码，返回了本机区域设置 windows-936；已取消修正。")
+        raise RepairError(f"EasyRPG 检测到不受支持的编码: {value[:200]}")
+    return encoding
+
+
+def detect_text_encoding(easyrpg_path: Path, project: Path) -> tuple[str, str]:
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    completed = subprocess.run(
+        [str(easyrpg_path), "--detect-encoding"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        creationflags=flags,
+        check=False,
+    )
+    if completed.returncode != 0:
+        details = (completed.stderr or completed.stdout).strip()
+        raise RepairError(f"EasyRPG 编码检测失败: {details[:500]}")
+    return _normalize_easyrpg_encoding(completed.stdout)
+
+
 def _run(executable: Path, game_root: Path, arguments: list[str]) -> None:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     completed = subprocess.run(
@@ -157,9 +196,9 @@ def _run(executable: Path, game_root: Path, arguments: list[str]) -> None:
         raise RepairError(f"RPGRewriter 退出码 {completed.returncode}: {details[:500]}")
 
 
-def _export_arguments() -> list[str]:
+def _export_arguments(encoding: str) -> list[str]:
     return [
-        "-export", "-readcode", "936", "-filereadcode", "936", "-miscreadcode", "936",
+        "-export", "-readcode", encoding, "-filereadcode", encoding, "-miscreadcode", encoding,
         "-mapnames", "Y", "-mapeventnames", "Y", "-switchnames", "Y",
         "-variablenames", "Y", "-commoneventnames", "Y", "-troopnames", "Y",
     ]
@@ -173,9 +212,10 @@ def _import_arguments() -> list[str]:
 
 
 class RepairSession:
-    def __init__(self, project: Path, rpgrewriter_path: str):
+    def __init__(self, project: Path, rpgrewriter_path: str, easyrpg_path: str):
         self.project = project.resolve()
         self.rpgrewriter_path = Path(rpgrewriter_path)
+        self.easyrpg_path = Path(easyrpg_path)
         self.temp_root: Path | None = None
         self.initial_hashes: dict[Path, str] = {}
         self.candidates: list[Candidate] = []
@@ -191,8 +231,18 @@ class RepairSession:
                 target = self.temp_root / path.name
                 shutil.copy2(path, target)
                 self.initial_hashes[path] = _hash(path)
-        report("正在导出六类内部字段...")
-        _run(_rpgrewriter_path(self.rpgrewriter_path), self.temp_root, _export_arguments())
+        for directory in ("Title", "System", "Music", "Sound"):
+            source = self.project / directory
+            if source.is_dir():
+                shutil.copytree(source, self.temp_root / directory)
+        report("正在由魔改版 EasyRPG 检测当前编码...")
+        encoding = detect_text_encoding(_easyrpg_path(self.easyrpg_path), self.temp_root)
+        report(f"正文编码判定：EasyRPG 返回 {encoding}。")
+        if encoding != "936":
+            return []
+        executable = _rpgrewriter_path(self.rpgrewriter_path)
+        report("正在按 936 导出内部字段...")
+        _run(executable, self.temp_root, _export_arguments(encoding))
         scripts = self.temp_root / "StringScripts"
         if not scripts.is_dir():
             raise RepairError("RPGRewriter 未生成 StringScripts。")
@@ -244,8 +294,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
     parser.add_argument("--rpgrewriter", required=True)
+    parser.add_argument("--easyrpg", required=True)
     args = parser.parse_args()
-    session = RepairSession(Path(args.project), args.rpgrewriter)
+    session = RepairSession(Path(args.project), args.rpgrewriter, args.easyrpg)
     try:
         print("正在读取当前项目的内部字段...", flush=True)
         candidates = session.scan(lambda message: print(message, flush=True))

@@ -261,17 +261,21 @@ class ToolManager:
               option_id: str | None = None) -> RunningTool:
         if not manifest.available:
             raise ToolSpecError("工具不可用: " + "; ".join(manifest.errors))
+        for argument in manifest.arguments_for(option_id):
+            if argument.required and argument.type in {"game_path", "current_game_file", "modules"}:
+                value = values.get(argument.name)
+                if not value or not Path(str(value)).exists():
+                    raise ToolSpecError(f"未找到{argument.label or argument.name}: {value}")
         command = self.build_command(manifest, values, host_executable, option_id)
-        output = subprocess.PIPE if manifest.category == "cli" else subprocess.DEVNULL
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         process = subprocess.Popen(
             command,
             cwd=str(manifest.working_directory),
-            stdout=output,
-            stderr=subprocess.STDOUT if manifest.category == "cli" else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            encoding=locale.getpreferredencoding(False) if manifest.category == "cli" else None,
-            errors="replace" if manifest.category == "cli" else None,
+            encoding=locale.getpreferredencoding(False),
+            errors="replace",
             shell=False,
             creationflags=creationflags,
         )

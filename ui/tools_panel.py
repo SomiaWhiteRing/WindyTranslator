@@ -210,8 +210,7 @@ class ToolsPanel(ttk.Frame):
                     self.output_queue.put((process_info, line.rstrip()))
             running.process.wait()
 
-        if tool.category == "cli":
-            threading.Thread(target=read_output, args=(running,), daemon=True).start()
+        threading.Thread(target=read_output, args=(running,), daemon=True).start()
 
     def _poll_process(self):
         while True:
@@ -221,7 +220,7 @@ class ToolsPanel(ttk.Frame):
             except queue.Empty:
                 break
         for running in self.manager.clear_finished():
-            if running.manifest.category == "cli":
+            if running.process.returncode:
                 self._write(f"[{running.manifest.name}] 工具已退出，退出码：{running.process.returncode}")
         self._update_start_button()
         self.after(150, self._poll_process)

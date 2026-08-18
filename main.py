@@ -66,8 +66,9 @@ def _run_tool_mode(argv):
     except SystemExit as exc:
         return int(exc.code or 0)
     except Exception as exc:
-        logging.exception("工具宿主启动失败。")
-        print(f"工具宿主启动失败: {exc}", file=sys.stderr)
+        print(f"工具宿主启动失败 ({argv[3]}): {type(exc).__name__}: {exc}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         return 1
 
 
