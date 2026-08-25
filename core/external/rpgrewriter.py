@@ -4,12 +4,12 @@ import subprocess
 import logging
 import sys
 import platform
-from core.utils.file_system import get_application_path  # 导入路径辅助函数
+from core.utils.file_system import get_modules_path
 
 log = logging.getLogger(__name__)
 
 # 定义 RPGRewriter.exe 的路径
-RPGREWRITER_EXE_PATH = os.path.join(get_application_path(), "modules", "RPGRewriter", "RPGRewriter.exe")
+RPGREWRITER_EXE_PATH = os.path.join(get_modules_path(), "RPGRewriter", "RPGRewriter.exe")
 
 # --- RPGRewriter 核心交互函数 ---
 

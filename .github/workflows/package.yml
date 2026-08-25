@@ -42,8 +42,12 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --clean $env:SPEC_FILE
           Copy-Item -Path "tools" -Destination "dist/$env:APP_NAME/tools" -Recurse -Force
+          Copy-Item -Path "modules" -Destination "dist/$env:APP_NAME/modules" -Recurse -Force
           if (-not (Test-Path "dist/$env:APP_NAME/tools")) {
             throw "Expected tools directory beside the executable in the onedir package."
+          }
+          if (-not (Test-Path "dist/$env:APP_NAME/modules")) {
+            throw "Expected modules directory beside the executable in the onedir package."
           }
 
       - name: Zip dist output

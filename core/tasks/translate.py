@@ -810,6 +810,16 @@ def _discard_stale_translation_outputs(paths):
             raise OSError(f"无法废弃旧版翻译中间态: {path}")
 
 
+def _discard_translation_cache_if_dictionaries_changed(translated_json_path, dictionary_paths, outputs):
+    if not os.path.exists(translated_json_path):
+        return False
+    translated_mtime = os.path.getmtime(translated_json_path)
+    if not any(os.path.exists(path) and os.path.getmtime(path) > translated_mtime for path in dictionary_paths):
+        return False
+    _discard_stale_translation_outputs(outputs)
+    return True
+
+
 # --- 主任务函数 ---
 def run_translate(game_path, works_dir, translate_config, world_dict_config, message_queue):
     start_time = time.time()
@@ -832,6 +842,12 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         translated_json_path = os.path.join(translated_dir, "translation_translated.json")
         error_log_path = os.path.join(translated_dir, "translation_errors.log")
         fallback_csv_path = os.path.join(translated_dir, fallback_csv_filename)
+        char_dict_filename = world_dict_config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
+        entity_dict_filename = world_dict_config.get("entity_dict_filename", DEFAULT_WORLD_DICT_CONFIG["entity_dict_filename"])
+        dictionary_paths = (
+            os.path.join(work_game_dir, char_dict_filename),
+            os.path.join(work_game_dir, entity_dict_filename),
+        )
         from core.engines import wolf as wolf_engine
         detected_game = detect_game_engine(game_path)
         is_wolf_game = bool(detected_game and detected_game.engine == "wolf")
@@ -842,6 +858,11 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         )
         
         if not file_system.ensure_dir_exists(translated_dir): raise OSError(f"无法创建目录: {translated_dir}")
+        # ponytail: dictionary edits invalidate the completed cache; failed runs still keep checkpoints.
+        if _discard_translation_cache_if_dictionaries_changed(
+            translated_json_path, dictionary_paths, stale_wolf_outputs
+        ):
+            log.info("检测到字典晚于翻译结果，已清理旧翻译暂存并重新翻译。")
         if os.path.exists(error_log_path):
             log.info(f"删除旧翻译错误日志: {error_log_path}")
             file_system.safe_remove(error_log_path)
@@ -915,8 +936,6 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 message_queue.put(("log", ("normal", "检测到已有翻译文件，但没有可复用的成功译文。")))
         
         # --- 加载词典 (全局共享) ---
-        char_dict_filename = world_dict_config.get("character_dict_filename", DEFAULT_WORLD_DICT_CONFIG["character_dict_filename"])
-        entity_dict_filename = world_dict_config.get("entity_dict_filename", DEFAULT_WORLD_DICT_CONFIG["entity_dict_filename"])
         character_dict_path = os.path.join(work_game_dir, char_dict_filename)
         entity_dict_path = os.path.join(work_game_dir, entity_dict_filename)
         if os.path.exists(character_dict_path):

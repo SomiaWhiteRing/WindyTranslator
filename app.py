@@ -88,6 +88,7 @@ class RPGTranslatorApp:
         ensure_dir_exists(self.works_dir)
         self.config_manager = cfg.ConfigManager(self.config_file_path) # 实例化管理器
         self.config = self.config_manager.load_config() # 加载配置
+        dictionary_manager.ensure_base_dictionaries()
         if not os.path.exists(self.config_file_path):
             try:
                 self.config_manager.save_config(self.config)

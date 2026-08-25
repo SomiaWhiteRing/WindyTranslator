@@ -98,6 +98,45 @@ def set_easy_rpg_encoding(text, encoding):
     return "".join(lines)
 
 
+def set_full_package_flag(text):
+    lines = text.splitlines(keepends=True)
+    section = None
+    rpg_rt_index = None
+    flag_indices = []
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip().casefold()
+            if section == "rpg_rt":
+                rpg_rt_index = index
+            continue
+        if section == "rpg_rt" and "=" in line:
+            key, _value = line.split("=", 1)
+            if key.strip().casefold() == "fullpackageflag":
+                flag_indices.append(index)
+
+    if flag_indices:
+        first = flag_indices[0]
+        key, _value = lines[first].split("=", 1)
+        newline = "\r\n" if lines[first].endswith("\r\n") else "\n" if lines[first].endswith("\n") else ""
+        lines[first] = f"{key}=1{newline}"
+        for index in reversed(flag_indices[1:]):
+            del lines[index]
+        return "".join(lines)
+
+    if rpg_rt_index is None:
+        raise ValueError("RPG_RT.ini 缺少 [RPG_RT] 段落")
+    insert_at = rpg_rt_index + 1
+    while insert_at < len(lines):
+        candidate = lines[insert_at].strip()
+        if candidate.startswith("[") and candidate.endswith("]") and "=" not in candidate:
+            break
+        insert_at += 1
+    lines.insert(insert_at, "FullPackageFlag=1\n")
+    return "".join(lines)
+
+
 def set_game_title(text, title):
     lines = text.splitlines(keepends=True)
     section = None

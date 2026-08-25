@@ -42,6 +42,19 @@ def _strip_code_fence(text):
         lines = lines[:-1]
     return "\n".join(lines).strip()
 
+
+def _has_csv_header(rows, headers):
+    """判断模型返回的数据首行是否已经包含指定 CSV 表头。"""
+    if not rows:
+        return False
+    first_row = rows[0]
+    if len(first_row) != len(headers):
+        return False
+    return all(
+        isinstance(value, str) and value.lstrip("\ufeff").strip() == header
+        for value, header in zip(first_row, headers)
+    )
+
 # --- CSV 解析辅助函数 ---
 def _parse_csv_response(csv_response_text, expected_columns, message_queue):
     """
@@ -952,7 +965,9 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                     with open(character_dict_path, 'w', newline='', encoding='utf-8-sig') as f_csv:
                         writer = csv.writer(f_csv, quoting=csv.QUOTE_ALL)
                         # 写入表头
-                        writer.writerow(['原文', '译文', '对应原名', '性别', '年龄', '性格', '口吻', '描述'])
+                        character_headers = ['原文', '译文', '对应原名', '性别', '年龄', '性格', '口吻', '描述']
+                        if not _has_csv_header(character_data, character_headers):
+                            writer.writerow(character_headers)
                         if character_data:
                             writer.writerows(character_data)
                     character_dict_success = True
@@ -1067,7 +1082,9 @@ def run_generate_dictionary(game_path, works_dir, world_dict_config, message_que
                     with open(entity_dict_path, 'w', newline='', encoding='utf-8-sig') as f_csv:
                         writer = csv.writer(f_csv, quoting=csv.QUOTE_ALL)
                         # 写入表头
-                        writer.writerow(['原文', '译文', '类别', '描述'])
+                        entity_headers = ['原文', '译文', '类别', '描述']
+                        if not _has_csv_header(entity_data, entity_headers):
+                            writer.writerow(entity_headers)
                         if entity_data:
                             writer.writerows(entity_data)
                     entity_dict_success = True

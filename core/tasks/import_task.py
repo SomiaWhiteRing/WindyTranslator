@@ -87,7 +87,7 @@ def run_import(game_path, source_encoding, import_encoding, message_queue):
         string_scripts_path = os.path.join(game_path, "StringScripts")
         ini_path = Path(game_path) / "RPG_RT.ini"
         title_path = Path(string_scripts_path) / "title.txt"
-        origin_title_path = Path(game_path) / "StringScripts_Origin" / "title.txt"
+        # ponytail: 导入允许重复执行，当前 INI 可能已经包含上一次的译名。
 
         if not os.path.exists(lmt_path):
             message_queue.put(("error", f"未找到 RPG_RT.lmt 文件: {lmt_path}"))
@@ -102,10 +102,10 @@ def run_import(game_path, source_encoding, import_encoding, message_queue):
 
         if ini_path.exists():
             translated_title = _read_title_file(title_path) if title_path.exists() else None
-            original_title = _read_title_file(origin_title_path) if origin_title_path.exists() else None
-            ini_text, _ini_encoding = rpg_rt_ini.read_ini(ini_path, source_encoding, original_title)
+            ini_text, _ini_encoding = rpg_rt_ini.read_ini(ini_path, source_encoding)
             if translated_title is not None:
                 ini_text = rpg_rt_ini.set_game_title(ini_text, translated_title)
+            ini_text = rpg_rt_ini.set_full_package_flag(ini_text)
             ini_text = rpg_rt_ini.set_easy_rpg_encoding(ini_text, import_encoding)
             ini_bytes = rpg_rt_ini.encode_ini(ini_text, import_encoding)
             ini_temp_path = ini_path.with_name(f"{ini_path.name}.import.tmp")

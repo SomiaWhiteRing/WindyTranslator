@@ -7,12 +7,12 @@ import zipfile
 from pathlib import PurePosixPath
 
 from core.utils import file_system
-from core.utils.file_system import get_application_path
+from core.utils.file_system import get_modules_path
 
 log = logging.getLogger(__name__)
 
 # RTP 集合源路径
-RTP_COLLECTION_DIR = os.path.join(get_application_path(), "modules", "RTPCollection")
+RTP_COLLECTION_DIR = os.path.join(get_modules_path(), "RTPCollection")
 
 _EOCD_SIGNATURE = b"PK\x05\x06"
 _CENTRAL_DIR_SIGNATURE = b"PK\x01\x02"

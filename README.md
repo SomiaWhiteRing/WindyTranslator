@@ -52,9 +52,9 @@
      .\dist\WindyTranslator\WindyTranslator.exe
      ```
 
-5. 打包内容说明（由 spec 配置）
+5. 打包内容说明（由 spec 与打包步骤配置）
    - 代码入口：`main.py`
-   - 资源与数据（运行库位于 `_internal`，工具目录单独放在可执行文件同级）：
+   - 资源与数据（运行库位于 `_internal`；`modules`、`tools` 与可执行文件同级）：
       - `modules/EasyRPG`, `modules/RPGRewriter`, `modules/UberWolf`, `modules/WOLF`, `modules/RTPCollection`, `modules/dict`
       - `tools`（翻译辅助工具目录）
       - `assets/icon.ico`（应用图标）

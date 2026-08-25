@@ -2,13 +2,15 @@
 import os
 import csv
 import logging
-from core.utils.file_system import get_application_path  # 导入路径辅助函数
+from core.utils.file_system import get_modules_path, get_executable_dir
 from . import file_system
 
 log = logging.getLogger(__name__)
 
 # --- 基础字典文件路径常量 ---
-BASE_DICT_DIR = os.path.join(get_application_path(), "modules", "dict")
+# Templates ship with the application; editable copies live beside the exe.
+BASE_DICT_DIR = os.path.join(get_executable_dir(), "dict")
+BASE_DICT_TEMPLATE_DIR = os.path.join(get_modules_path(), "dict")
 BASE_CHARACTER_DICT_FILENAME = "base_character_dictionary.csv"
 BASE_ENTITY_DICT_FILENAME = "base_entity_dictionary.csv"
 BASE_CHARACTER_DICT_PATH = os.path.join(BASE_DICT_DIR, BASE_CHARACTER_DICT_FILENAME)
@@ -63,17 +65,27 @@ def load_base_dictionaries():
         tuple: (character_dict_data, entity_dict_data)
                两个列表，每个列表包含从对应基础字典文件加载的字典条目。
     """
-    file_system.ensure_dir_exists(BASE_DICT_DIR) # 确保目录存在
-    
-    # 如果文件不存在，尝试创建带表头的空文件
-    if not os.path.exists(BASE_CHARACTER_DICT_PATH):
-        _create_empty_base_dict_file(BASE_CHARACTER_DICT_PATH, BASE_CHARACTER_HEADERS)
-    if not os.path.exists(BASE_ENTITY_DICT_PATH):
-        _create_empty_base_dict_file(BASE_ENTITY_DICT_PATH, BASE_ENTITY_HEADERS)
+    ensure_base_dictionaries()
 
     char_data = _load_single_base_dict(BASE_CHARACTER_DICT_PATH, BASE_CHARACTER_HEADERS)
     entity_data = _load_single_base_dict(BASE_ENTITY_DICT_PATH, BASE_ENTITY_HEADERS)
     return char_data, entity_data
+
+def ensure_base_dictionaries():
+    """Create missing editable dictionaries from the bundled templates."""
+    file_system.ensure_dir_exists(BASE_DICT_DIR)
+    for filename, target, headers in (
+        (BASE_CHARACTER_DICT_FILENAME, BASE_CHARACTER_DICT_PATH, BASE_CHARACTER_HEADERS),
+        (BASE_ENTITY_DICT_FILENAME, BASE_ENTITY_DICT_PATH, BASE_ENTITY_HEADERS),
+    ):
+        if os.path.exists(target):
+            continue
+        template = os.path.join(BASE_DICT_TEMPLATE_DIR, filename)
+        if os.path.isfile(template):
+            file_system.safe_copy(template, target)
+        else:
+            log.warning("基础字典模板未找到: %s", template)
+            _create_empty_base_dict_file(target, headers)
 
 def _save_single_base_dict(file_path, dict_data, headers):
     """

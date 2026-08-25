@@ -1,17 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[
-        ('modules/EasyRPG', 'modules/EasyRPG'),
-        ('modules/RPGRewriter', 'modules/RPGRewriter'),
-        ('modules/UberWolf', 'modules/UberWolf'),
-        ('modules/WOLF', 'modules/WOLF'),
-        ('modules/RTPCollection', 'modules/RTPCollection'),
-        ('modules/dict', 'modules/dict'),
         ('assets/icon.ico', 'assets')
     ],
     hiddenimports=[

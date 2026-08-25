@@ -66,6 +66,10 @@ def get_application_path():
         # 在正常的 Python 环境中运行，返回主执行脚本的目录
         return os.path.dirname(os.path.abspath(sys.argv[0]))
 
+def get_modules_path():
+    """Return the external modules directory beside the packaged executable."""
+    return os.path.join(get_executable_dir() if getattr(sys, 'frozen', False) else get_application_path(), "modules")
+
 def get_executable_dir():
     """获取可执行文件所在的目录。
     如果是 PyInstaller 打包的程序，则返回 .exe 文件所在的目录。

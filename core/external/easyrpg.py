@@ -2,13 +2,13 @@
 import os
 import logging
 import subprocess
-from core.utils.file_system import get_application_path  # 导入路径辅助函数
+from core.utils.file_system import get_modules_path
 from core.utils import file_system
 
 log = logging.getLogger(__name__)
 
 # EasyRPG 模块源路径
-EASYRPG_SRC_DIR = os.path.join(get_application_path(), "modules", "EasyRPG")
+EASYRPG_SRC_DIR = os.path.join(get_modules_path(), "EasyRPG")
 EASYRPG_PLAYER_PATH = os.path.join(EASYRPG_SRC_DIR, "Player.exe")
 EASYRPG_ENCODING_MAP = {
     "ibm-943_p15a-2003": "932",

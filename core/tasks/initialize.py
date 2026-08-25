@@ -236,7 +236,7 @@ def run_initialize(game_path, rtp_options, source_encoding, message_queue):
         if source_encoding == '932':
             target_files = [item for item in os.listdir(game_path)
                             if os.path.isfile(os.path.join(game_path, item)) and
-                            (item.lower().endswith('.txt') or item.lower().endswith('.ini'))]
+                            item.lower().endswith('.txt')]
 
             for filename in target_files:
                 file_path = os.path.join(game_path, filename)
@@ -247,11 +247,6 @@ def run_initialize(game_path, rtp_options, source_encoding, message_queue):
         else:
             message_queue.put(("log", ("normal", "当前项目不是 932，跳过日文侧车文件转换。")))
         message_queue.put(("log", ("success", f"编码检查完成: 检查 {checked_count} 个文件，转换 {converted_count} 个。")))
-
-        # 4. 检查并更新 RPG_RT.ini
-        ini_path = os.path.join(game_path, "RPG_RT.ini")
-        message_queue.put(("log", ("normal", "检查并更新 RPG_RT.ini 配置...")))
-        _update_rpg_rt_ini(ini_path, target_encoding_code=source_encoding)
 
         message_queue.put(("success", "初始化完成"))
         message_queue.put(("status", "初始化完成"))

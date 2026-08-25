@@ -3,14 +3,14 @@ import csv
 import logging
 from typing import Dict, Set, Tuple, Optional
 
-from core.utils.file_system import get_application_path
+from core.utils.file_system import get_modules_path
 from core.utils.engine_detection import detect_game_engine
 from . import file_system
 
 log = logging.getLogger(__name__)
 
 # 固定位置：modules/dict 下的默认数据库映射文件
-BASE_DICT_DIR = os.path.join(get_application_path(), "modules", "dict")
+BASE_DICT_DIR = os.path.join(get_modules_path(), "dict")
 DEFAULT_DB_FILENAME = "default_database_dictionary.csv"
 DEFAULT_DB_PATH = os.path.join(BASE_DICT_DIR, DEFAULT_DB_FILENAME)
 

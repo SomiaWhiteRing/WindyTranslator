@@ -73,6 +73,7 @@ release.zip
 
 # 配置文件
 app_config.json
+dict/
 
 repomix-output.xml
 

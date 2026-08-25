@@ -8,11 +8,11 @@ import os
 import platform
 import subprocess
 
-from core.utils.file_system import get_application_path
+from core.utils.file_system import get_modules_path
 
 log = logging.getLogger(__name__)
 
-UBERWOLF_DIR = os.path.join(get_application_path(), "modules", "UberWolf")
+UBERWOLF_DIR = os.path.join(get_modules_path(), "UberWolf")
 UBERWOLF_CLI = os.path.join(UBERWOLF_DIR, "UberWolfCli.exe")
 WOLF_TEXT_HELPER = os.path.join(UBERWOLF_DIR, "WolfRPGText.exe")
 

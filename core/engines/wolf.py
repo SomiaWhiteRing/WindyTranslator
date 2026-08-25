@@ -4588,7 +4588,7 @@ def _replace_data_and_manifest(
 
 def _fusion_font_path():
     relative = os.path.join("modules", "WOLF", "FusionPixel", FUSION_FONT_FILENAME)
-    packaged = os.path.join(file_system.get_application_path(), relative)
+    packaged = os.path.join(file_system.get_modules_path(), "WOLF", "FusionPixel", FUSION_FONT_FILENAME)
     if os.path.isfile(packaged):
         return packaged
     source_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -5313,7 +5313,7 @@ def _font_coverage_warnings(game_path, slots, texts):
     required = _required_font_characters(texts)
     if not required:
         return []
-    module_root = os.path.join(file_system.get_application_path(), "modules", "WOLF")
+    module_root = os.path.join(file_system.get_modules_path(), "WOLF")
     candidates = font_coverage.discover_font_candidates(module_root, game_path)
     by_family = {}
     for candidate in candidates:

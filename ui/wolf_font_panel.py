@@ -222,7 +222,7 @@ class WolfFontPanel(ttk.Frame):
 
         def worker():
             try:
-                module_root = os.path.join(file_system.get_application_path(), "modules", "WOLF")
+                module_root = os.path.join(file_system.get_modules_path(), "WOLF")
                 context = preloaded_context or wolf.get_font_revision_context(game_path)
                 candidates = font_coverage.discover_font_candidates(module_root, game_path)
                 required, from_scripts = wolf.font_revision_required_characters(game_path, self.sample_var.get())
@@ -546,7 +546,7 @@ class WolfFontPanel(ttk.Frame):
         token = self._load_token
 
         def worker():
-            module_root = os.path.join(file_system.get_application_path(), "modules", "WOLF")
+            module_root = os.path.join(file_system.get_modules_path(), "WOLF")
             try:
                 fingerprint = font_coverage.font_catalog_fingerprint(module_root, game_path)
             except OSError:
