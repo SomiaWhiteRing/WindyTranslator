@@ -12,10 +12,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
-def run(*args):
-    result = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
+def run(*args, timeout=120):
+    result = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
     if result.returncode:
         sys.stderr.write(result.stdout + result.stderr)
         result.check_returncode()
@@ -70,8 +71,20 @@ def main():
         if not path.is_file() or not 0 < path.stat().st_size < 100_000_000:
             raise ValueError(f"Missing, empty or >= 100 MB asset: {path}")
 
-    def gh(*command):
-        return run("gh", *command)
+    def gh(*command, timeout=120):
+        return run("gh", *command, timeout=timeout)
+
+    def upload(tag, path):
+        for attempt in range(1, 4):
+            print(f"Uploading {tag}/{path.name} (attempt {attempt}/3)", flush=True)
+            try:
+                gh("release", "upload", tag, "--repo", repo, "--clobber", str(path), timeout=300)
+                return
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                if attempt == 3:
+                    raise
+                print(f"Upload failed: {error}. Retrying this asset in 5 seconds.", flush=True)
+                time.sleep(5)
 
     def paginated(endpoint):
         pages = json.loads(gh("api", "--paginate", "--slurp", f"repos/{repo}/{endpoint}"))
@@ -163,9 +176,9 @@ def main():
                 gh("release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
                    "--title", title, "--notes-file", str(notes))
             # Upload the manifest last, after every application asset succeeds.
-            gh("release", "upload", tag, "--repo", repo, "--clobber",
-               *(str(staging / item["name"]) for item in assets))
-            gh("release", "upload", tag, "--repo", repo, "--clobber", str(manifest_path))
+            for item in assets:
+                upload(tag, staging / item["name"])
+            upload(tag, manifest_path)
             # The by-tag API only promises published releases; drafts need the list API.
             release = next(item for item in paginated("releases?per_page=100") if item["tag_name"] == tag)
             uploaded = paginated(f"releases/{release['id']}/assets?per_page=100")

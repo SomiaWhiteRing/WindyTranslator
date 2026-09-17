@@ -93,6 +93,7 @@ jobs:
 
   publish:
     name: Publish Nightly and versioned release
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build-windows
     runs-on: ubuntu-24.04
