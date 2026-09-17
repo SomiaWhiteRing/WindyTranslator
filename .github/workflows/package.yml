@@ -55,6 +55,9 @@ jobs:
           if (-not (Test-Path "dist/$env:APP_NAME/_internal/modules")) {
             throw "Expected modules directory inside _internal in the onedir package."
           }
+          if (-not (Test-Path "dist/$env:APP_NAME/_internal/build-info.json")) {
+            throw "Expected build identity for website update checks."
+          }
 
       - name: Zip dist output
         id: zip

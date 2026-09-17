@@ -33,7 +33,7 @@ class MainWindow:
         self.root = root
         self.app = app_controller # 保留对 App 控制器的引用
         self.config = config
-        self.root.title("WindyTranslator")
+        self.root.title(f"WindyTranslator {self.app.build_info.get('version', '')}")
         self.completion_notification_var = tk.BooleanVar(
             value=self.config.get("enable_completion_notification", False)
         )
@@ -137,6 +137,8 @@ class MainWindow:
         status_label = ttk.Label(status_frame, textvariable=self.status_var, anchor=tk.W)
         # 让 status_label 水平填充
         status_label.grid(row=0, column=0, sticky="ew")
+        ttk.Button(status_frame, text="检查更新…", command=self.app.show_updates).grid(
+            row=0, column=1, padx=(8, 0))
 
         # --- 保存控件引用，方便启用/禁用 ---
         self.all_controls = [

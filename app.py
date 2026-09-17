@@ -27,6 +27,8 @@ from ui.dict_editor import DictEditorWindow
 from core.utils.file_system import get_executable_dir, ensure_dir_exists  # 导入路径辅助函数
 from core.utils.engine_detection import detect_game_engine
 from core.utils import windows_notifications
+from core.updates import load_build_info
+from ui.update_dialog import UpdateController
 
 log = logging.getLogger(__name__) # 获取 logger 实例
 
@@ -83,6 +85,7 @@ class RPGTranslatorApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close) # 绑定关闭事件
 
         self.executable_dir = get_executable_dir()
+        self.build_info = load_build_info()
         self.works_dir = os.path.join(self.executable_dir, "Works")
         self.config_file_path = os.path.join(self.executable_dir, "app_config.json") # 定义路径
         ensure_dir_exists(self.works_dir)
@@ -111,6 +114,7 @@ class RPGTranslatorApp:
         # --- 初始化 UI ---
         # 将 self (App实例) 传递给 MainWindow，以便 UI 调用 App 的方法
         self.main_window = main_window.MainWindow(self.root, self, self.config)
+        self.update_controller = UpdateController(self)
 
         # 根据加载的配置设置初始模式和窗口大小
         initial_mode = self.config.get('selected_mode', 'easy')
@@ -120,6 +124,9 @@ class RPGTranslatorApp:
         self.log_message("程序已启动，请选择游戏目录", "normal")
 
     # --- UI 调用接口 ---
+
+    def show_updates(self):
+        self.update_controller.show()
 
     def browse_game_path(self):
         """弹出目录选择对话框，更新游戏路径。"""
@@ -792,6 +799,7 @@ class RPGTranslatorApp:
                 # self.thread_pool.shutdown(wait=False) # 不等待线程结束
                 if hasattr(self.main_window, "font_panel"):
                     self.main_window.font_panel.close()
+                self.update_controller.close()
                 self.root.destroy()
             else:
                 return # 用户取消退出
@@ -800,5 +808,6 @@ class RPGTranslatorApp:
              self.save_config()
              if hasattr(self.main_window, "font_panel"):
                  self.main_window.font_panel.close()
+             self.update_controller.close()
              self.thread_pool.shutdown(wait=True) # 等待线程池关闭
              self.root.destroy()

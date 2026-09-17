@@ -4,6 +4,7 @@ from pathlib import Path
 import runpy
 
 repo_root = Path(SPECPATH)
+build_info = runpy.run_path(str(repo_root / 'scripts' / 'generate_build_info.py'))['write_build_info'](repo_root)
 pack_rtp = runpy.run_path(str(repo_root / 'scripts' / 'pack_rtp.py'))['pack_rtp_collection']
 rtp_collection = pack_rtp(repo_root / 'modules' / 'RTPCollection')
 module_data = [
@@ -18,7 +19,8 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=module_data + [
-        ('assets/icon.ico', 'assets')
+        ('assets/icon.ico', 'assets'),
+        (str(build_info), '.')
     ],
     hiddenimports=[
         'difflib',  # Imported by the external proofreading tool.

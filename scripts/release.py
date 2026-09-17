@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 
 
 def run(*args, timeout=120):
@@ -70,6 +71,18 @@ def main():
     for path in args.assets:
         if not path.is_file() or not 0 < path.stat().st_size < 100_000_000:
             raise ValueError(f"Missing, empty or >= 100 MB asset: {path}")
+    if len(args.assets) != 1:
+        raise ValueError("WindyTranslator publishes one complete Windows ZIP")
+    with zipfile.ZipFile(args.assets[0]) as package:
+        metadata_path = "WindyTranslator/_internal/build-info.json"
+        if package.getinfo(metadata_path).file_size > 16_384:
+            raise ValueError("Package build metadata is too large")
+        build_info = json.loads(package.read(metadata_path))
+    if (build_info.get("schemaVersion") != 1 or build_info.get("target") != "windows-x64"
+            or build_info.get("commit") != commit or build_info.get("version") != version
+            or not isinstance(build_info.get("applicationBuildId"), str)
+            or not build_info["applicationBuildId"].startswith(f"windy:{commit}:{os.environ['GITHUB_RUN_ID']}.")):
+        raise ValueError("Package identity does not match this workflow's source and version")
 
     def gh(*command, timeout=120):
         return run("gh", *command, timeout=timeout)
@@ -138,6 +151,7 @@ def main():
                 "project": args.project,
                 "repository": repo,
                 "version": version,
+                "applicationBuildId": build_info["applicationBuildId"],
                 "channel": channel,
                 "tag": tag,
                 "branch": args.branch,
