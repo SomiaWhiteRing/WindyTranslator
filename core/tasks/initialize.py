@@ -214,7 +214,7 @@ def run_initialize(game_path, rtp_options, source_encoding, message_queue):
             # 根据策略决定是否继续，这里选择继续
 
         # 2. 安装 RTP 文件
-        selected_rtps = [name + ".zip" for name, selected in rtp_options.items() if selected]
+        selected_rtps = [name for name, selected in rtp_options.items() if selected]
         if selected_rtps:
             message_queue.put(("log", ("normal", f"安装选定的 RTP 文件: {', '.join(selected_rtps)}")))
             success_rtp = rtp.install_rtp_files(game_path, selected_rtps)

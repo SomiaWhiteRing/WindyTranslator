@@ -1,11 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+import runpy
+
+repo_root = Path(SPECPATH)
+pack_rtp = runpy.run_path(str(repo_root / 'scripts' / 'pack_rtp.py'))['pack_rtp_collection']
+rtp_collection = pack_rtp(repo_root / 'modules' / 'RTPCollection')
+module_data = [
+    (str(path), f'modules/{path.name}' if path.is_dir() else 'modules')
+    for path in sorted((repo_root / 'modules').iterdir())
+    if path.name != 'RTPCollection'
+]
+module_data.append((str(rtp_collection), 'modules/RTPCollection'))
+
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('modules', 'modules'),
+    datas=module_data + [
         ('assets/icon.ico', 'assets')
     ],
     hiddenimports=[

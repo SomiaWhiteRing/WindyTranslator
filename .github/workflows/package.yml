@@ -63,6 +63,11 @@ jobs:
           Push-Location "dist"
           Compress-Archive -Path "$env:APP_NAME" -DestinationPath "..\\$zipName" -Force
           Pop-Location
+          $packageSize = (Get-Item -LiteralPath $zipName).Length
+          if ($packageSize -ge 100000000) {
+            throw "Distribution exceeds the 100 MB download limit: $packageSize bytes."
+          }
+          Write-Host "Distribution size: $packageSize bytes"
           "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Upload artifact

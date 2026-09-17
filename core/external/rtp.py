@@ -1,13 +1,13 @@
 import logging
 import os
 import re
-import shutil
 import struct
 import zipfile
 from pathlib import PurePosixPath
 
 from core.utils import file_system
 from core.utils.file_system import get_modules_path
+from core.external.rtp_collection import COLLECTION_FILENAME, RtpCollection
 
 log = logging.getLogger(__name__)
 
@@ -178,112 +178,81 @@ def _normalize_member_path(decoded_name):
     return os.path.join(*parts), is_dir
 
 
-def install_rtp_files(target_game_dir, selected_rtp_zips):
-    """
-    解压选定的 RTP zip 文件并将内容安装到游戏目录。
-
-    Args:
-        target_game_dir (str): 目标游戏目录路径。
-        selected_rtp_zips (list): 包含选定 RTP 文件名 (如 "2000.zip") 的列表。
-
-    Returns:
-        bool: 操作是否整体成功完成（所有选定RTP都处理完毕，即使部分文件跳过）。
-               返回 False 如果遇到解压错误或主要复制错误。
-    """
-    if not os.path.isdir(RTP_COLLECTION_DIR):
-        log.error(f"RTP 集合目录未找到: {RTP_COLLECTION_DIR}")
-        return False
+def install_rtp_files(target_game_dir, selected_rtps, *, collection_path=None):
+    """Install selected offline RTP packs without replacing existing game files."""
     if not os.path.isdir(target_game_dir):
         log.error(f"目标游戏目录不存在: {target_game_dir}")
         return False
-    if not selected_rtp_zips:
+    if not selected_rtps:
         log.warning("未选择任何 RTP 文件进行安装。")
         return True
 
+    path = collection_path or os.path.join(RTP_COLLECTION_DIR, COLLECTION_FILENAME)
     overall_success = True
-    log.info(f"开始安装 RTP 文件到 {target_game_dir}...")
+    try:
+        with RtpCollection(path) as collection:
+            for pack_id in selected_rtps:
+                try:
+                    if not _install_pack(collection, pack_id, target_game_dir):
+                        overall_success = False
+                except Exception:
+                    log.exception(f"安装 RTP {pack_id} 失败。")
+                    overall_success = False
+    except Exception:
+        log.exception(f"无法读取 RTP 资源库: {path}。源码运行前请执行 python scripts/pack_rtp.py。")
+        return False
+    return overall_success
 
-    for rtp_zip_name in selected_rtp_zips:
-        rtp_zip_path = os.path.join(RTP_COLLECTION_DIR, rtp_zip_name)
 
-        if not os.path.exists(rtp_zip_path):
-            log.error(f"找不到 RTP 文件: {rtp_zip_path}")
-            overall_success = False
+def _install_pack(collection, pack_id, target_game_dir):
+    copied = skipped = repaired_entries = 0
+    encoding_stats = {}
+    success = True
+    for entry, raw_name in collection.entries(pack_id):
+        decoded_name, encoding_used, repaired = _decode_raw_zip_name(raw_name, f"{pack_id}.zip")
+        encoding_stats[encoding_used] = encoding_stats.get(encoding_used, 0) + 1
+        repaired_entries += int(repaired)
+        try:
+            relative_path, is_dir = _normalize_member_path(decoded_name)
+        except ValueError as error:
+            log.warning(f"跳过非法 RTP 路径 {decoded_name!r}: {error}")
             continue
 
-        log.info(f"正在处理 RTP 文件: {rtp_zip_name}")
-        rtp_copied = 0
-        rtp_skipped = 0
-        encoding_stats = {}
-        repaired_entries = 0
+        destination_path = os.path.join(target_game_dir, relative_path)
+        if is_dir or entry["directory"]:
+            if not file_system.ensure_dir_exists(destination_path):
+                success = False
+            continue
+        if os.path.exists(destination_path):
+            skipped += 1
+            continue
+        # EasyRPG prefers PNG to XYZ; never shadow the game's existing XYZ.
+        if destination_path.lower().endswith('.png') and os.path.exists(destination_path[:-4] + '.xyz'):
+            skipped += 1
+            continue
+        if not file_system.ensure_dir_exists(os.path.dirname(destination_path)):
+            success = False
+            continue
 
+        created = False
         try:
-            raw_names = _read_raw_zip_filenames(rtp_zip_path)
+            data = collection.read(entry)
+            with open(destination_path, "xb") as destination:
+                created = True
+                destination.write(data)
+            copied += 1
+        except FileExistsError:
+            skipped += 1
+        except Exception as error:
+            if created:
+                try:
+                    os.remove(destination_path)
+                except OSError:
+                    log.exception(f"无法清理未完成的 RTP 文件: {destination_path}")
+            log.warning(f"复制 RTP 文件失败: {decoded_name!r} - {error}")
+            success = False
 
-            with zipfile.ZipFile(rtp_zip_path, "r") as zip_ref:
-                zip_infos = zip_ref.infolist()
-                if len(zip_infos) != len(raw_names):
-                    raise zipfile.BadZipFile(
-                        f"{rtp_zip_name} 的 ZipInfo 数量与原始目录条目数量不一致。"
-                    )
-
-                for info, raw_name in zip(zip_infos, raw_names):
-                    decoded_name, encoding_used, repaired = _decode_raw_zip_name(raw_name, rtp_zip_name)
-                    encoding_stats[encoding_used] = encoding_stats.get(encoding_used, 0) + 1
-                    if repaired:
-                        repaired_entries += 1
-
-                    try:
-                        relative_path, is_dir = _normalize_member_path(decoded_name)
-                    except ValueError as path_err:
-                        log.warning(f"跳过非法 RTP 路径 {decoded_name!r}: {path_err}")
-                        continue
-
-                    destination_path = os.path.join(target_game_dir, relative_path)
-
-                    if is_dir or info.is_dir():
-                        file_system.ensure_dir_exists(destination_path)
-                        continue
-
-                    parent_dir = os.path.dirname(destination_path)
-                    if parent_dir and not file_system.ensure_dir_exists(parent_dir):
-                        log.warning(f"创建 RTP 目标目录失败（但继续）: {parent_dir}")
-                        continue
-
-                    if os.path.exists(destination_path):
-                        rtp_skipped += 1
-                        continue
-
-                    # EasyRPG prioritises .png over .xyz when both share the same base name.
-                    # Skip installing a .png RTP file if the game already has the .xyz variant,
-                    # so the original game graphics are not shadowed.
-                    if destination_path.lower().endswith('.png'):
-                        xyz_counterpart = destination_path[:-4] + '.xyz'
-                        if os.path.exists(xyz_counterpart):
-                            rtp_skipped += 1
-                            continue
-
-                    try:
-                        with zip_ref.open(info, "r") as src, open(destination_path, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
-                        rtp_copied += 1
-                    except Exception as copy_err:
-                        log.warning(
-                            f"复制 RTP 文件失败（但继续）: {decoded_name!r} -> {destination_path} - {copy_err}"
-                        )
-
-            if encoding_stats:
-                stats_text = ", ".join(f"{encoding}={count}" for encoding, count in sorted(encoding_stats.items()))
-                log.info(f"{rtp_zip_name} 文件名解码统计: {stats_text}; 修复条目 {repaired_entries} 个。")
-
-            log.info(f"{rtp_zip_name} 处理完成: 复制 {rtp_copied} 个新文件，跳过 {rtp_skipped} 个已存在文件。")
-
-        except zipfile.BadZipFile:
-            log.error(f"解压 RTP 文件失败: {rtp_zip_path} 不是有效的 ZIP 文件。")
-            overall_success = False
-        except Exception as e:
-            log.exception(f"处理 RTP 文件 {rtp_zip_name} 时发生意外错误: {e}")
-            overall_success = False
-
-    log.info("所有选定的 RTP 文件处理完毕。")
-    return overall_success
+    stats_text = ", ".join(f"{encoding}={count}" for encoding, count in sorted(encoding_stats.items()))
+    log.info(f"{pack_id} 文件名解码统计: {stats_text}; 修复条目 {repaired_entries} 个。")
+    log.info(f"{pack_id} 处理完成: 复制 {copied} 个新文件，跳过 {skipped} 个已存在文件。")
+    return success

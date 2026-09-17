@@ -21,8 +21,11 @@
 
 4. 直接运行程序：
    ```
+   python scripts/pack_rtp.py
    python main.py
    ```
+
+   首次运行或更新 RTP 源文件后，先执行 `pack_rtp.py` 生成离线资源库。
 
 ## 打包发布
 
@@ -44,6 +47,8 @@
    ```
    python -m PyInstaller --noconfirm --clean WindyTranslator.spec
    ```
+
+   spec 自动将六套 RTP 源 ZIP 按内容去重，生成 `modules/RTPCollection/rtp-content.zip`；发行包只包含该资源库，保留六套资源各自的文件名和安装顺序。源码 ZIP 仍保留在仓库作为构建输入，无需联网安装 RTP。
 
 4. 产物位置与启动方式
    - 可执行文件：`dist/WindyTranslator/WindyTranslator.exe`
@@ -70,6 +75,8 @@
 7. 发布建议
    - 将 `dist/WindyTranslator/` 目录整体打包为 zip 分发。
    - 初次运行会在程序同级目录生成 `logs/`，日志与配置会写到可执行文件同级目录。
+   - 发行 ZIP 必须小于 100,000,000 字节；CI 会在上传和发布之前检查大小。
+   - “安装乱码 RTP”使用同一资源库中的 `2000fix`，仍只补充缺失文件，并保留已有 XYZ 图像。
 
 ## 贡献指南
 
