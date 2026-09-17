@@ -27,6 +27,19 @@
 
    首次运行或更新 RTP 源文件后，先执行 `pack_rtp.py` 生成离线资源库。
 
+## 版本与自动发布
+
+在仓库根目录编辑 [RELEASE.md](RELEASE.md)：第一行填写 `# 年.月.当月序号`（例如 `# 2026.9.1`），下面填写当前版本的 Markdown 更新日志。月份为 1–12，序号从 1 开始，均不补零；CI 会校验格式和非空日志。
+
+每次提交到 `main`，或在该分支手动运行 **Build and Release (Windows)**，都会构建并更新两类 GitHub Release：
+
+- `nightly`：跟随发布分支的最新成功构建，标记为预发布。
+- `RELEASE.md` 指定的版本：沿用 `v` 标签前缀，例如 `v2026.9.1`。版本号相同就覆盖标签、日志和下载文件；改成 `2026.9.2` 就新建 Release，并保留 `v2026.9.1`。数值最大的正式版本标记为 GitHub **Latest**。
+
+构建固定使用触发工作流的提交；过时构建会跳过发布，等待新提交的构建。正式版 ZIP 命名为 `WindyTranslator-windows-2026.9.1.zip`，与同次 Nightly 的包内容一致。Pull Request 只构建和上传 Actions 产物。
+
+每个 Release 附带 `release-manifest.json`，记录提交 SHA、工作流运行、版本、文件大小和 SHA-256，发布日志也包含这些校验值。同版本覆盖不会保留旧包，复现问题时请同时记录版本号与提交 SHA；历史构建另受 GitHub Actions 产物保留期限制。上传失败时工作流会失败，可在分支仍指向该提交时重跑失败任务；GitHub 对已有 Release 的多个附件替换不提供原子操作。
+
 ## 打包发布
 
 使用 PyInstaller 生成“分体式（onedir）”可执行文件（Windows 打包需在 Windows 上执行）。

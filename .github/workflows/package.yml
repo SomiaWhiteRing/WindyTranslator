@@ -1,21 +1,23 @@
-name: Package (Windows)
+name: Build and Release (Windows)
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: package-${{ github.ref }}
-  cancel-in-progress: true
+  group: windy-release-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
 
 jobs:
   build-windows:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: windows-latest
-    permissions:
-      contents: write
     env:
       APP_NAME: WindyTranslator
       SPEC_FILE: WindyTranslator.spec
@@ -24,12 +26,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
+
+      - name: Validate release metadata
+        run: python scripts/release.py validate
 
       - name: Install dependencies
         shell: pwsh
@@ -54,7 +61,7 @@ jobs:
         shell: pwsh
         run: |
           $shortSha = $env:GITHUB_SHA.Substring(0,7)
-          if ($env:GITHUB_EVENT_NAME -eq "push") {
+          if ($env:GITHUB_EVENT_NAME -ne "pull_request") {
             $zipName = "$env:APP_NAME-windows-nightly.zip"
           } else {
             $zipName = "$env:APP_NAME-windows-sha-$shortSha.zip"
@@ -77,35 +84,41 @@ jobs:
           path: dist/${{ env.APP_NAME }}
           if-no-files-found: error
 
-      - name: Update nightly tag
-        if: github.event_name == 'push'
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f nightly $env:GITHUB_SHA
-          git push -f origin nightly
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: ${{ steps.zip.outputs.zip_name }}
+          if-no-files-found: error
 
-      - name: Publish/Update Nightly Release
-        if: github.event_name == 'push'
-        shell: pwsh
+  publish:
+    name: Publish Nightly and versioned release
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build-windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout pinned commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download release package
+        uses: actions/download-artifact@v4
+        with:
+          name: release-package
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Publish releases
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $repo = $env:GITHUB_REPOSITORY
-          $tag = "nightly"
-          $zip = "${{ steps.zip.outputs.zip_name }}"
-          $notesFile = "release_notes.txt"
-          $notes = "Automated build from $env:GITHUB_SHA`n`nCommit: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/commit/$env:GITHUB_SHA`n"
-          $notes | Set-Content -Path $notesFile -Encoding utf8
-
-          $exists = $false
-          gh release view $tag --repo $repo *> $null
-          if ($LASTEXITCODE -eq 0) { $exists = $true }
-
-          if (-not $exists) {
-            gh release create $tag $zip --repo $repo --title "$env:APP_NAME Nightly" --notes-file $notesFile --prerelease --target $env:GITHUB_SHA
-          } else {
-            gh release edit $tag --repo $repo --title "$env:APP_NAME Nightly" --notes-file $notesFile --prerelease
-            gh release upload $tag $zip --repo $repo --clobber
-          }
+          python scripts/release.py publish \
+            --branch main --project WindyTranslator --tag-prefix v \
+            --assets "$RUNNER_TEMP/release-assets/WindyTranslator-windows-nightly.zip"
