@@ -4,33 +4,21 @@ import json
 import csv
 import re
 import time
-import datetime
 import logging
-import queue # 虽然主进度通信可能不再直接依赖它，但保留以防未来需要
 import threading
-import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed # 使用 as_completed
 from core.api_clients import deepseek
 from core.utils import file_system, text_processing, default_database, control_tokens
 from core.utils.engine_detection import detect_game_engine
-from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
+from core.config import DEFAULT_WORLD_DICT_CONFIG
 from collections import OrderedDict
+from core.tasks.translation_runtime import TranslationSession, TranslationPaused, translate_batch
+from core.tasks.translation_protocol import pack_batches
 
 log = logging.getLogger(__name__)
 
-TRANSLATION_METADATA_PREFIX_RE = re.compile(r'^(?:\s*\[(?:MARKER|FACE):[^\]]+\]\s*)+')
 WOLF_API_TAG_RE = re.compile(r"\{\{WINDY_WOLF_(\d+)_([0-9a-f]{8})\}\}", re.IGNORECASE)
 WOLF_API_MASK_RE = re.compile(r"\[\[W\d+:[0-9a-f]{4}\]\]", re.IGNORECASE)
-
-CONTROL_PLACEHOLDER_INSTRUCTION = """
-
-### 控制码占位符保护
-输入文本中的 PUA 字符（例如 \uE100、\uE101 以及同一区间的相似字符）代表游戏控制码。
-这些占位符不是文字内容，必须逐字保留，不能删除、复制、换序、替换、解释或翻译；占位符所在行也必须保持不变。
-普通日文引号（「」『』）不是控制码，可以按目标语言需要自然保留或调整。
-"""
-
-STRICT_LINE_MARKERS = {"StringPicture", "WOLFText"}
 
 
 def _mask_wolf_transport(text, optional_tags=()):
@@ -72,674 +60,16 @@ def _protected_literals_for_text(text, protected_literals):
 
 # --- 批量翻译工作单元 (与上一版几乎一致，增加了 current_processing_file_name 的使用) ---
 def _translate_batch_with_retry(
-    batch_metadata_items, 
-    context_metadata_items, 
-    character_dictionary,
-    entity_dictionary,
-    api_client,
-    config,
-    error_log_path, 
-    error_log_lock,
-    current_processing_file_name=None,
-    previous_failures=None,
+    batch_metadata_items, context_metadata_items, character_dictionary,
+    entity_dictionary, api_client, config, error_log_path, error_log_lock,
+    current_processing_file_name=None, previous_failures=None,
 ):
-    prompt_template = config.get("prompt_template", DEFAULT_TRANSLATE_CONFIG["prompt_template"])
-    model_name = config.get("model", "")
-    source_language = config.get("source_language", "日语")
-    target_language = config.get("target_language", "简体中文")
-    max_retries = config.get("max_retries", 3)
-    context_lines_config = config.get("context_lines", 10) 
-    apply_gbk_compatibility = config.get("_apply_gbk_compatibility_postprocess", True)
-    control_profile = config.get("_control_code_profile") or control_tokens.default_profile()
-    translation_validator = config.get("_translation_validator")
-    min_batch_size = 1
-    retry_failed_items_only = config.get("retry_failed_items_only", False)
-    original_keys = [item["original_json_key"] for item in batch_metadata_items]
-    completed_results = {}
-    previous_failures = dict(previous_failures or {})
-    
-    batch_original_texts_for_logging = [item["text_to_translate"] for item in batch_metadata_items]
-    current_batch_size = len(batch_metadata_items)
-
-    last_failed_raw_translation_block = None
-    last_failed_prompt = None
-    last_failed_api_messages = None
-    last_failed_api_kwargs = None
-    last_failed_response_content = None
-    last_validation_reason = "未知错误"
-    failure_context_for_batch_item = None
-    # 在批次范围内去重人物词典不一致的噪声告警（按 昵称-对应原名 配对）
-    warned_missing_main_names = set()
-
-    protected_literals = config.get("_protected_literals") or ()
-    item_protected_literals = [
-        _protected_literals_for_text(item["text_to_translate"], protected_literals)
-        for item in batch_metadata_items
-    ]
-    if config.get("_mask_wolf_transport"):
-        optional_wolf_tags = config.get("_optional_wolf_transport_tags") or ()
-        masked_batch_texts = [
-            _mask_wolf_transport(item["text_to_translate"], optional_wolf_tags)
-            for item in batch_metadata_items
-        ]
-    else:
-        masked_batch_texts = [
-            (item["text_to_translate"], ())
-            for item in batch_metadata_items
-        ]
-    protected_batch_texts = [
-        control_tokens.protect_text(
-            masked_batch_texts[index][0],
-            control_profile,
-            extra_literals=item_protected_literals[index],
-        )
-        for index, item in enumerate(batch_metadata_items)
-    ]
-    processed_original_texts_for_glossary_matching = [protected.text for protected in protected_batch_texts]
-    combined_processed_lower_for_glossary = "\n".join(processed_original_texts_for_glossary_matching).lower()
-
-    for attempt in range(max_retries + 1):
-        actual_context_items_to_use = context_metadata_items[-context_lines_config:]
-        context_text_lines_for_prompt = [item_data["text_to_translate"] for item_data in actual_context_items_to_use]
-        context_section = ""
-        if context_text_lines_for_prompt:
-            context_section = f"### 上文内容 ({source_language})\n<context>\n" + "\n".join(context_text_lines_for_prompt) + "\n</context>\n"
-
-        relevant_char_entries = []
-        originals_to_include_in_glossary = set()
-        char_lookup = {}
-        if character_dictionary:
-            char_lookup = {entry.get('原文'): entry for entry in character_dictionary if entry.get('原文')}
-            for entry in character_dictionary:
-                char_original = entry.get('原文')
-                if not char_original:
-                    continue
-                if char_original.lower() in combined_processed_lower_for_glossary:
-                    originals_to_include_in_glossary.add(char_original)
-                    main_name_ref = entry.get('对应原名')
-                    if main_name_ref and main_name_ref in char_lookup:
-                        originals_to_include_in_glossary.add(main_name_ref)
-                    elif main_name_ref and main_name_ref not in char_lookup:
-                        pair_key = (char_original, main_name_ref)
-                        if pair_key not in warned_missing_main_names:
-                            log.warning(
-                                f"人物词典不一致(文件: {current_processing_file_name or 'N/A'}): 昵称 '{char_original}' 的对应原名 '{main_name_ref}' 未找到。"
-                            )
-                            warned_missing_main_names.add(pair_key)
-            char_cols_for_prompt = ['原文', '译文', '对应原名', '性别', '年龄', '性格', '口吻', '描述']
-            for char_original in sorted(list(originals_to_include_in_glossary)):
-                entry = char_lookup.get(char_original)
-                if entry:
-                    values = [str(entry.get(col, '')) for col in char_cols_for_prompt]
-                    entry_line = "|".join(values)
-                    relevant_char_entries.append(entry_line)
-        character_glossary_section = ""
-        if relevant_char_entries:
-            character_glossary_section = f"### 人物术语参考 (格式: {'|'.join(char_cols_for_prompt)})\n" + "\n".join(relevant_char_entries) + "\n"
-
-        relevant_entity_entries = []
-        if entity_dictionary:
-            for entry in entity_dictionary:
-                entity_original = entry.get('原文')
-                if entity_original and entity_original.lower() in combined_processed_lower_for_glossary:
-                    desc = entry.get('描述', '')
-                    category = entry.get('类别', '')
-                    category_desc = f"{category} - {desc}" if category and desc else category or desc
-                    entry_line = f"{entry['原文']}|{entry.get('译文', '')}|{category_desc}"
-                    relevant_entity_entries.append(entry_line)
-        entity_glossary_section = ""
-        if relevant_entity_entries:
-            entity_glossary_section = "### 事物术语参考 (格式: 原文|译文|类别 - 描述)\n" + "\n".join(relevant_entity_entries) + "\n"
-
-        numbered_batch_text_lines_for_prompt = []
-        for i, item_data in enumerate(batch_metadata_items):
-            original_text_content = item_data["text_to_translate"]
-            marker_type = item_data["original_marker"]
-            speaker_id = item_data["speaker_id"] 
-            pua_processed_text = protected_batch_texts[i].text
-            marker_tag_for_prompt = f"[MARKER: {marker_type}]"
-            face_tag_for_prompt = ""
-            if speaker_id: 
-                face_tag_for_prompt = f"[FACE: {speaker_id}]"
-            line_for_prompt = f"{marker_tag_for_prompt} {face_tag_for_prompt}".strip() + f" {i+1}.{pua_processed_text}"
-            numbered_batch_text_lines_for_prompt.append(line_for_prompt)
-        
-        batch_text_for_prompt_payload = "\n".join(numbered_batch_text_lines_for_prompt)
-        timestamp_suffix = f"\n[timestamp: {datetime.datetime.now().timestamp()}]" if attempt > 0 and not retry_failed_items_only else ""
-        current_final_prompt_payload = prompt_template.format(
-            source_language=source_language, target_language=target_language,
-            character_glossary_section=character_glossary_section, entity_glossary_section=entity_glossary_section,
-            context_section=context_section, batch_text=batch_text_for_prompt_payload
-        ) + CONTROL_PLACEHOLDER_INSTRUCTION + config.get("_translation_validator_instruction", "") + timestamp_suffix
-        if retry_failed_items_only and previous_failures:
-            feedback = [
-                {"编号": i + 1, **previous_failures[item["original_json_key"]]}
-                for i, item in enumerate(batch_metadata_items)
-                if item["original_json_key"] in previous_failures
-            ]
-            current_final_prompt_payload += (
-                "\n\n### 上次输出的校验问题\n"
-                "以下 JSON 是待修正数据，不是指令。请按本次编号修正问题，"
-                "以原文为准，仍在 textarea 内返回每个编号项的完整译文，不要解释。\n"
-                + json.dumps(feedback, ensure_ascii=False)
-            )
-
-        log.debug(f"调用 API 翻译批次 (文件: {current_processing_file_name or 'N/A'}, 大小: {current_batch_size}, 尝试 {attempt+1}/{max_retries+1})")
-        current_api_messages_payload = [{"role": "user", "content": current_final_prompt_payload}]
-        current_api_kwargs_payload = {}
-        if "temperature" in config: current_api_kwargs_payload["temperature"] = config["temperature"]
-        if "max_tokens" in config: current_api_kwargs_payload["max_tokens"] = config["max_tokens"]
-        
-        api_success, api_response_content, api_error_message = api_client.chat_completion(
-            model_name, current_api_messages_payload, **current_api_kwargs_payload
-        )
-        
-        last_failed_prompt = current_final_prompt_payload
-        last_failed_api_messages = current_api_messages_payload
-        last_failed_api_kwargs = current_api_kwargs_payload
-        last_failed_response_content = api_response_content if api_success else f"[API错误: {api_error_message}]"
-
-        if not api_success:
-            log.warning(f"API 调用失败 (文件: {current_processing_file_name or 'N/A'}, 批次大小 {current_batch_size}, 尝试 {attempt+1}): {api_error_message}")
-            last_failed_raw_translation_block = f"[API错误: {api_error_message}]"
-            last_validation_reason = f"API调用失败: {api_error_message}"
-            failure_context_for_batch_item = f"API调用失败: {api_error_message}"
-            _log_batch_error(error_log_path, error_log_lock, "API 调用失败", batch_original_texts_for_logging,
-                             last_validation_reason, model_name, last_failed_api_kwargs,
-                             last_failed_api_messages, last_failed_response_content, attempt, max_retries,
-                             file_name_for_log=current_processing_file_name)
-            if attempt < max_retries: time.sleep(1); continue
-            else: break
-
-        textarea_match = re.search(r'<textarea>(.*?)</textarea>', api_response_content, re.DOTALL | re.IGNORECASE)
-        raw_translated_text_block_from_api = ""
-        numbered_translations_from_api = {}
-        max_number_found_in_response = 0
-        seen_numbers = set()
-        duplicate_numbers = set()
-        if textarea_match:
-            raw_translated_text_block_from_api = textarea_match.group(1).strip()
-            raw_lines_from_api = raw_translated_text_block_from_api.split('\n')
-            current_collecting_number = -1; current_collecting_text_parts = []
-            expected_number = 1
-            for line_from_api in raw_lines_from_api:
-                line_without_meta = line_from_api
-                leading_meta_match = TRANSLATION_METADATA_PREFIX_RE.match(line_without_meta)
-                removed_only_meta = False
-                if leading_meta_match:
-                    line_without_meta = line_without_meta[leading_meta_match.end():]
-                    removed_only_meta = line_without_meta == ""
-                stripped_line_for_num_match = line_without_meta.lstrip()
-                # 兼容多种编号分隔符：1. / 1: / 1：/ 1、/ 1) / 1]
-                num_line_match = re.match(r'^(\d+)[\.:：、\)\]]\s*(.*)', stripped_line_for_num_match)
-                if num_line_match:
-                    num_val = int(num_line_match.group(1)); text_after_num = num_line_match.group(2)
-                    if retry_failed_items_only or num_val == expected_number:
-                        if retry_failed_items_only:
-                            if num_val in seen_numbers:
-                                duplicate_numbers.add(num_val)
-                            seen_numbers.add(num_val)
-                        if current_collecting_number != -1:
-                            numbered_translations_from_api[current_collecting_number] = "\n".join(current_collecting_text_parts).rstrip()
-                        current_collecting_number = num_val; current_collecting_text_parts = [text_after_num]
-                        max_number_found_in_response = max(max_number_found_in_response, current_collecting_number)
-                        expected_number += 1
-                        continue
-                if current_collecting_number != -1:
-                    if removed_only_meta and line_without_meta == "":
-                        continue
-                    current_collecting_text_parts.append(line_without_meta)
-            if current_collecting_number != -1:
-                numbered_translations_from_api[current_collecting_number] = "\n".join(current_collecting_text_parts).rstrip()
-            if retry_failed_items_only:
-                for number in duplicate_numbers:
-                    numbered_translations_from_api.pop(number, None)
-        else:
-            log.warning(f"API 响应未找到 <textarea> (文件: {current_processing_file_name or 'N/A'}). 响应: '{api_response_content[:100]}...'")
-            last_failed_raw_translation_block = api_response_content.strip()
-            last_validation_reason = "响应格式错误：未找到 <textarea>"
-            failure_context_for_batch_item = "响应格式错误：未找到 <textarea>"
-            if retry_failed_items_only:
-                for item in batch_metadata_items:
-                    previous_failures[item["original_json_key"]] = {"失败原因": last_validation_reason}
-            _log_batch_error(error_log_path, error_log_lock, "响应格式错误", batch_original_texts_for_logging,
-                             last_validation_reason, model_name, last_failed_api_kwargs,
-                             last_failed_api_messages, last_failed_response_content, attempt, max_retries,
-                             file_name_for_log=current_processing_file_name)
-            if attempt < max_retries: continue
-            else: break
-        last_failed_raw_translation_block = raw_translated_text_block_from_api
-
-        missing_numbers_in_response = []
-        all_expected_numbers_found = True
-        final_translated_lines_from_api = [] 
-        for i in range(1, current_batch_size + 1):
-            if i not in numbered_translations_from_api:
-                missing_numbers_in_response.append(i); all_expected_numbers_found = False
-                final_translated_lines_from_api.append(None)
-            else: final_translated_lines_from_api.append(numbered_translations_from_api[i])
-
-        if all_expected_numbers_found or retry_failed_items_only:
-            log.info(f"批次翻译响应包含 {current_batch_size - len(missing_numbers_in_response)}/{current_batch_size} 个预期编号 (文件: {current_processing_file_name or 'N/A'}, 尝试 {attempt+1})")
-            batch_is_fully_valid = True; temp_results_for_this_attempt = {}
-            for i, original_item_data in enumerate(batch_metadata_items):
-                result_key = original_item_data["original_json_key"] 
-                original_text_for_validation = original_item_data["text_to_translate"] # 这个仍然是用于翻译和验证的文本
-                raw_translation_for_this_item = final_translated_lines_from_api[i] 
-                if raw_translation_for_this_item is None:
-                    batch_is_fully_valid = False
-                    last_validation_reason = "编号重复，无法确定译文" if i + 1 in duplicate_numbers else "缺少编号"
-                    failure_context_for_batch_item = last_validation_reason
-                    previous_failures[result_key] = {"失败原因": last_validation_reason}
-                    _log_batch_error(
-                        error_log_path, error_log_lock, last_validation_reason,
-                        batch_original_texts_for_logging, last_validation_reason, model_name,
-                        last_failed_api_kwargs, last_failed_api_messages,
-                        last_failed_response_content, attempt, max_retries,
-                        failed_item_index=i, file_name_for_log=current_processing_file_name,
-                    )
-                    continue
-                protected_text_for_item = protected_batch_texts[i]
-                restore_ok, restored_text_for_validation, restore_reason = control_tokens.restore_protected_text(
-                    raw_translation_for_this_item, protected_text_for_item
-                )
-                if restore_ok:
-                    restore_ok, restored_text_for_validation, restore_reason = _restore_wolf_transport_masks(
-                        restored_text_for_validation,
-                        masked_batch_texts[i][1],
-                    )
-                if restore_ok:
-                    # 在验证前进行最小化修复；控制码相关内容由 control_tokens 精确校验，不做猜测式修复。
-                    repaired_text_for_validation = text_processing.repair_translation_format(
-                        original_text_for_validation, restored_text_for_validation
-                    )
-                    post_processed_text_for_validation = text_processing.post_process_translation(
-                        repaired_text_for_validation,
-                        original_text_for_validation,
-                        apply_gbk_compatibility=apply_gbk_compatibility
-                    )
-                else:
-                    repaired_text_for_validation = restored_text_for_validation
-                    post_processed_text_for_validation = restored_text_for_validation
-                # 方案A：StringPicture 强制行数一致校验（包含空行）
-                marker_for_item = original_item_data.get("original_marker")
-                if not restore_ok:
-                    is_line_valid = False
-                    line_validation_reason = f"控制码占位符还原失败: {restore_reason}"
-                elif marker_for_item in STRICT_LINE_MARKERS:
-                    orig_lines = original_text_for_validation.splitlines()
-                    tran_lines = post_processed_text_for_validation.splitlines()
-                    if len(orig_lines) != len(tran_lines):
-                        is_line_valid = False
-                        line_validation_reason = f"StringPicture 行数不一致: 原文 {len(orig_lines)} 行, 译文 {len(tran_lines)} 行"
-                    else:
-                        is_line_valid, line_validation_reason = text_processing.validate_translation(
-                            original_text_for_validation,
-                            repaired_text_for_validation,
-                            post_processed_text_for_validation,
-                            allowed_source_literals=item_protected_literals[i],
-                        )
-                else:
-                    is_line_valid, line_validation_reason = text_processing.validate_translation(
-                        original_text_for_validation,
-                        repaired_text_for_validation,
-                        post_processed_text_for_validation,
-                        allowed_source_literals=item_protected_literals[i],
-                    )
-                if is_line_valid and callable(translation_validator):
-                    is_line_valid, line_validation_reason = translation_validator(
-                        original_text_for_validation,
-                        post_processed_text_for_validation,
-                    )
-                if not is_line_valid:
-                    log.warning(f"批次内单行验证失败 (文件: {current_processing_file_name or 'N/A'}, 尝试 {attempt+1}): '{original_text_for_validation[:30]}...' 原因: {line_validation_reason}")
-                    # 方案B：如果是 StringPicture 且因行数失败，尝试按行回退翻译
-                    if marker_for_item in STRICT_LINE_MARKERS and (line_validation_reason and '行数不一致' in line_validation_reason):
-                        success_linewise, repaired_block, post_processed_block, fallback_reason = _translate_strict_block_by_lines(
-                            original_text_for_validation,
-                            marker_for_item,
-                            original_item_data.get('speaker_id'),
-                            api_client,
-                            model_name,
-                            config,
-                            prompt_template,
-                            character_glossary_section,
-                            entity_glossary_section,
-                            context_section,
-                            current_processing_file_name,
-                            error_log_path,
-                            error_log_lock,
-                        )
-                        if success_linewise:
-                            temp_results_for_this_attempt[result_key] = {
-                                "text": post_processed_block,
-                                "status": "success",
-                                "failure_context": None,
-                                "original_marker": original_item_data["original_marker"],
-                                "speaker_id": original_item_data["speaker_id"]
-                            }
-                            continue
-                        else:
-                            last_validation_reason = f"单行验证失败(行数)且回退失败: {fallback_reason}"
-                            failure_context_for_batch_item = f"按行回退失败: {fallback_reason}"
-                    else:
-                        last_validation_reason = f"单行验证失败: {line_validation_reason} (原文: {original_text_for_validation[:30]}...)"
-                        failure_context_for_batch_item = f"单行验证失败 ({line_validation_reason}): \"{repaired_text_for_validation[:50]}...\""
-                    batch_is_fully_valid = False
-                    _log_batch_error(error_log_path, error_log_lock, "单行验证失败", batch_original_texts_for_logging,
-                                     last_validation_reason, model_name, last_failed_api_kwargs,
-                                     last_failed_api_messages, last_failed_response_content, attempt, max_retries,
-                                     failed_item_index=i, raw_item_translation=raw_translation_for_this_item,
-                                     file_name_for_log=current_processing_file_name)
-                    if retry_failed_items_only:
-                        previous_failures[result_key] = {
-                            "失败原因": last_validation_reason,
-                            "上次译文": raw_translation_for_this_item,
-                        }
-                        continue
-                    break
-                temp_results_for_this_attempt[result_key] = {
-                    "text": post_processed_text_for_validation, 
-                    "status": "success", 
-                    "failure_context": None,
-                    "original_marker": original_item_data["original_marker"], 
-                    "speaker_id": original_item_data["speaker_id"]
-                }
-            if retry_failed_items_only:
-                completed_results.update(temp_results_for_this_attempt)
-                if batch_is_fully_valid:
-                    return {key: completed_results[key] for key in original_keys}
-                pending_indexes = [
-                    i for i, item in enumerate(batch_metadata_items)
-                    if item["original_json_key"] not in completed_results
-                ]
-                batch_metadata_items = [batch_metadata_items[i] for i in pending_indexes]
-                protected_batch_texts = [protected_batch_texts[i] for i in pending_indexes]
-                masked_batch_texts = [masked_batch_texts[i] for i in pending_indexes]
-                item_protected_literals = [item_protected_literals[i] for i in pending_indexes]
-                current_batch_size = len(batch_metadata_items)
-                batch_original_texts_for_logging = [item["text_to_translate"] for item in batch_metadata_items]
-                log.info("保留 %s 条成功译文，剩余 %s 条待处理 (文件: %s)。",
-                         len(completed_results), current_batch_size, current_processing_file_name)
-                if attempt < max_retries:
-                    continue
-                break
-            if batch_is_fully_valid: return temp_results_for_this_attempt
-            if attempt < max_retries: log.info(f"由于批次内单行验证失败，准备重试整个批次 (文件: {current_processing_file_name or 'N/A'}, 尝试 {attempt+1} 失败)..."); continue
-            else: log.error(f"由于批次内单行验证失败，且已达到最大重试次数 (文件: {current_processing_file_name or 'N/A'}, {max_retries+1})。"); break
-        else:
-            log.warning(f"验证失败 (文件: {current_processing_file_name or 'N/A'}, 尝试 {attempt+1}): API响应未能包含所有预期编号。")
-            log.warning(f"  期望: 1-{current_batch_size}, 找到最大: {max_number_found_in_response}, 缺失: {missing_numbers_in_response}")
-            last_validation_reason = f"响应缺少编号 (期望 1-{current_batch_size}, 缺失: {missing_numbers_in_response})"
-            failure_context_for_batch_item = f"响应缺少编号: {missing_numbers_in_response}"
-            _log_batch_error(error_log_path, error_log_lock, "响应缺少编号", batch_original_texts_for_logging,
-                             last_validation_reason, model_name, last_failed_api_kwargs,
-                             last_failed_api_messages, last_failed_response_content, attempt, max_retries,
-                             file_name_for_log=current_processing_file_name)
-            if attempt < max_retries: log.info(f"准备重试批次 (文件: {current_processing_file_name or 'N/A'}, 因响应缺少编号)..."); continue
-            else: log.error(f"因API响应缺少编号，且已达到最大重试次数 (文件: {current_processing_file_name or 'N/A'}, {max_retries+1})。"); break
-            
-    if current_batch_size > min_batch_size:
-        log.warning(f"批次翻译和重试均失败 (文件: {current_processing_file_name or 'N/A'}, 大小: {current_batch_size})，原因: '{last_validation_reason}'。尝试拆分批次...")
-        mid_point = (current_batch_size + 1) // 2
-        first_half_metadata_items = batch_metadata_items[:mid_point]
-        second_half_metadata_items = batch_metadata_items[mid_point:]
-        log.info(f"拆分批次 (文件: {current_processing_file_name or 'N/A'}) 为: {len(first_half_metadata_items)} 和 {len(second_half_metadata_items)}")
-        first_half_results = _translate_batch_with_retry(
-            first_half_metadata_items, context_metadata_items, character_dictionary, entity_dictionary, 
-            api_client, config, error_log_path, error_log_lock, current_processing_file_name,
-            previous_failures=previous_failures if retry_failed_items_only else None,
-        )
-        second_half_results = _translate_batch_with_retry(
-            second_half_metadata_items, context_metadata_items, character_dictionary, entity_dictionary, 
-            api_client, config, error_log_path, error_log_lock, current_processing_file_name,
-            previous_failures=previous_failures if retry_failed_items_only else None,
-        )
-        combined_results = {**first_half_results, **second_half_results}
-        if retry_failed_items_only:
-            combined_results.update(completed_results)
-            combined_results = {key: combined_results[key] for key in original_keys}
-        log.info(f"完成拆分批次处理 (文件: {current_processing_file_name or 'N/A'}, 原大小: {current_batch_size})")
-        return combined_results
-    else:
-        log.error(f"批次翻译失败，且无法进一步拆分 (文件: {current_processing_file_name or 'N/A'}, 大小: {current_batch_size})。批内所有项目将回退。最终原因: '{last_validation_reason}'")
-        final_fallback_reason = failure_context_for_batch_item or last_validation_reason or "[最终回退，未知具体原因]"
-        _log_batch_error(error_log_path, error_log_lock, "最终回退(无法拆分或单项失败)", batch_original_texts_for_logging,
-                         last_validation_reason, model_name, last_failed_api_kwargs,
-                         last_failed_api_messages, last_failed_response_content, max_retries, max_retries,
-                         file_name_for_log=current_processing_file_name)
-        fallback_results = {}
-        for item_data in batch_metadata_items:
-            original_text_key = item_data["original_json_key"]
-            fallback_results[original_text_key] = {
-                "text": item_data["text_to_translate"],
-                "status": "fallback", 
-                "failure_context": previous_failures.get(original_text_key, {}).get("失败原因", final_fallback_reason) if retry_failed_items_only else final_fallback_reason,
-                "original_marker": item_data["original_marker"], 
-                "speaker_id": item_data["speaker_id"]
-            }
-        if retry_failed_items_only:
-            fallback_results.update(completed_results)
-            return {key: fallback_results[key] for key in original_keys}
-        return fallback_results
-
-# --- 辅助函数：记录批次错误日志 (添加文件名参数) ---
-def _log_batch_error(
-    error_log_path, error_log_lock, error_type, batch_keys, reason,
-    model_name, api_kwargs, api_messages, response_content,
-    attempt, max_retries, failed_item_index=None, raw_item_translation=None,
-    file_name_for_log=None 
-):
-    try:
-        with error_log_lock:
-            with open(error_log_path, 'a', encoding='utf-8') as elog:
-                elog.write(f"[{datetime.datetime.now().isoformat()}] {error_type} (尝试 {attempt+1}/{max_retries+1})\n")
-                if file_name_for_log: 
-                    elog.write(f"  所属文件: {file_name_for_log}\n")
-                elog.write(f"  批次大小: {len(batch_keys)}\n")
-                elog.write(f"  失败原因: {reason}\n")
-                if failed_item_index is not None:
-                    elog.write(f"  失败原文 (索引 {failed_item_index}): {batch_keys[failed_item_index]}\n")
-                    if raw_item_translation:
-                        elog.write(f"  失败原文的原始译文: {raw_item_translation}\n")
-                elog.write(f"  涉及原文 Keys (最多显示5条):\n")
-                for i, key in enumerate(batch_keys[:5]):
-                    elog.write(f"    - {key[:80]}...\n")
-                if len(batch_keys) > 5:
-                    elog.write(f"    - ... (等 {len(batch_keys) - 5} 个)\n")
-                elog.write(f"  模型: {model_name}\n")
-                if api_kwargs: elog.write(f"  API Kwargs: {json.dumps(api_kwargs, ensure_ascii=False)}\n")
-                if response_content: elog.write(f"  原始 API 响应体 (截断):\n{response_content[:500]}...\n")
-                if api_messages: elog.write(f"  API Messages (Prompt):\n{json.dumps(api_messages, indent=2, ensure_ascii=False)}\n")
-                elog.write("-" * 20 + "\n")
-    except Exception as log_err:
-        log.error(f"写入批次错误日志失败: {log_err}")
+    return translate_batch(
+        batch_metadata_items, context_metadata_items, character_dictionary,
+        entity_dictionary, api_client, config, current_processing_file_name,
+    )
 
 
-# --- 辅助函数：当 StringPicture 块行数不一致时，按“逐行”进行回退翻译 ---
-def _translate_strict_block_by_lines(
-    original_block_text,
-    marker_type,
-    speaker_id,
-    api_client,
-    model_name,
-    config,
-    prompt_template,
-    character_glossary_section,
-    entity_glossary_section,
-    context_section,
-    current_processing_file_name,
-    error_log_path,
-    error_log_lock,
-):
-    try:
-        control_profile = config.get("_control_code_profile") or control_tokens.default_profile()
-        orig_lines = original_block_text.splitlines()
-        # 仅对“有实质内容”的行送翻译：排除纯空白（含全角空格）
-        non_empty_lines = [line for line in orig_lines if line.strip() != ""]
-        if len(non_empty_lines) == 0:
-            return True, original_block_text, original_block_text, ""
-
-        protected_literals = config.get("_protected_literals") or ()
-        line_protected_literals = [
-            _protected_literals_for_text(line, protected_literals) for line in non_empty_lines
-        ]
-        if config.get("_mask_wolf_transport"):
-            optional_wolf_tags = config.get("_optional_wolf_transport_tags") or ()
-            masked_lines = [_mask_wolf_transport(line, optional_wolf_tags) for line in non_empty_lines]
-        else:
-            masked_lines = [(line, ()) for line in non_empty_lines]
-        protected_lines = [
-            control_tokens.protect_text(
-                masked_lines[index][0],
-                control_profile,
-                extra_literals=line_protected_literals[index],
-            )
-            for index, line in enumerate(non_empty_lines)
-        ]
-        numbered_lines_for_prompt = []
-        for idx, line in enumerate(non_empty_lines):
-            pua_processed = protected_lines[idx].text
-            marker_tag = f"[MARKER: {marker_type}]"
-            face_tag = f"[FACE: {speaker_id}]" if speaker_id else ""
-            numbered_lines_for_prompt.append(f"{marker_tag} {face_tag} {idx+1}.{pua_processed}".strip())
-
-        batch_text_for_prompt_payload = "\n".join(numbered_lines_for_prompt)
-        final_prompt = prompt_template.format(
-            source_language=config.get("source_language", "日语"),
-            target_language=config.get("target_language", "简体中文"),
-            character_glossary_section=character_glossary_section or "",
-            entity_glossary_section=entity_glossary_section or "",
-            context_section=context_section or "",
-            batch_text=batch_text_for_prompt_payload
-        ) + CONTROL_PLACEHOLDER_INSTRUCTION + config.get("_translation_validator_instruction", "")
-
-        api_messages = [{"role": "user", "content": final_prompt}]
-        api_kwargs = {}
-        if "temperature" in config: api_kwargs["temperature"] = config["temperature"]
-        if "max_tokens" in config: api_kwargs["max_tokens"] = config["max_tokens"]
-
-        ok, api_resp_content, api_err_msg = api_client.chat_completion(model_name, api_messages, **api_kwargs)
-        if not ok:
-            _log_batch_error(error_log_path, error_log_lock, "按行回退(API失败)", non_empty_lines, f"API调用失败: {api_err_msg}", model_name, api_kwargs, api_messages, api_resp_content or "", 0, 0, file_name_for_log=current_processing_file_name)
-            return False, None, None, f"API失败: {api_err_msg}"
-
-        textarea_match = re.search(r'<textarea>(.*?)</textarea>', api_resp_content, re.DOTALL | re.IGNORECASE)
-        if not textarea_match:
-            _log_batch_error(error_log_path, error_log_lock, "按行回退(响应格式错误)", non_empty_lines, "未找到<textarea>", model_name, api_kwargs, api_messages, api_resp_content or "", 0, 0, file_name_for_log=current_processing_file_name)
-            return False, None, None, "响应格式错误: 缺少<textarea>"
-
-        raw_textarea = textarea_match.group(1).strip()
-        raw_lines = raw_textarea.splitlines()
-        numbered_translations = {}
-        current_num = -1; parts = []; expected_number = 1
-        for ln in raw_lines:
-            line_without_meta = ln
-            leading_meta_match = TRANSLATION_METADATA_PREFIX_RE.match(line_without_meta)
-            removed_only_meta = False
-            if leading_meta_match:
-                line_without_meta = line_without_meta[leading_meta_match.end():]
-                removed_only_meta = line_without_meta == ""
-            stripped = line_without_meta.lstrip()
-            num_match = re.match(r'^(\d+)[\.:：、\)\]]\s*(.*)', stripped)
-            if num_match:
-                num_val = int(num_match.group(1)); text_after_num = num_match.group(2)
-                if num_val == expected_number:
-                    if current_num != -1:
-                        numbered_translations[current_num] = "\n".join(parts).rstrip()
-                    current_num = num_val; parts = [text_after_num]
-                    expected_number += 1
-                    continue
-            if current_num != -1:
-                if removed_only_meta and line_without_meta == "":
-                    continue
-                parts.append(line_without_meta)
-        if current_num != -1:
-            numbered_translations[current_num] = "\n".join(parts).rstrip()
-
-        for n in range(1, len(non_empty_lines) + 1):
-            if n not in numbered_translations:
-                reason = f"响应缺少编号: {n}"
-                _log_batch_error(error_log_path, error_log_lock, "按行回退(编号缺失)", non_empty_lines, reason, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
-                return False, None, None, reason
-
-        repaired_lines = []; post_processed_lines = []
-        for idx, orig_line in enumerate(non_empty_lines, start=1):
-            raw_tran = numbered_translations[idx]
-            restore_ok, restored, restore_reason = control_tokens.restore_protected_text(raw_tran, protected_lines[idx - 1])
-            if restore_ok:
-                restore_ok, restored, restore_reason = _restore_wolf_transport_masks(
-                    restored,
-                    masked_lines[idx - 1][1],
-                )
-            if not restore_ok:
-                _log_batch_error(error_log_path, error_log_lock, "按行回退(控制码还原失败)", non_empty_lines, restore_reason, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, failed_item_index=idx-1, raw_item_translation=raw_tran, file_name_for_log=current_processing_file_name)
-                return False, None, None, f"控制码还原失败: {restore_reason}"
-            repaired = text_processing.repair_translation_format(orig_line, restored)
-            postp = text_processing.post_process_translation(
-                repaired,
-                orig_line,
-                apply_gbk_compatibility=config.get("_apply_gbk_compatibility_postprocess", True)
-            )
-            is_valid, reason = text_processing.validate_translation(
-                orig_line,
-                repaired,
-                postp,
-                allowed_source_literals=line_protected_literals[idx - 1],
-            )
-            if not is_valid:
-                _log_batch_error(error_log_path, error_log_lock, "按行回退(单行验证失败)", non_empty_lines, reason, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, failed_item_index=idx-1, raw_item_translation=raw_tran, file_name_for_log=current_processing_file_name)
-                return False, None, None, f"单行验证失败: {reason}"
-            repaired_lines.append(repaired); post_processed_lines.append(postp)
-
-        # 重组为原始行数，空行保留
-        repaired_full = []; post_full = []; j = 0
-        for line in orig_lines:
-            if line.strip() == "":
-                # 纯空白行：不消耗译行，原样保留（含全角空格等）
-                repaired_full.append(line); post_full.append(line)
-            else:
-                repaired_full.append(repaired_lines[j]); post_full.append(post_processed_lines[j]); j += 1
-
-        repaired_block_text = "\n".join(repaired_full)
-        post_processed_block_text = "\n".join(post_full)
-
-        # 硬行数校验
-        orig_cnt = len(original_block_text.splitlines())
-        tran_cnt = len(post_processed_block_text.splitlines())
-        if orig_cnt != tran_cnt:
-            reason_len = f"按行回退后行数不一致: 原文 {orig_cnt} 行, 译文 {tran_cnt} 行"
-            _log_batch_error(error_log_path, error_log_lock, "按行回退(整体验证-行数不一致)", [original_block_text], reason_len, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
-            return False, None, None, reason_len
-
-        block_literals = _protected_literals_for_text(original_block_text, protected_literals)
-        ok_final, reason_final = text_processing.validate_translation(
-            original_block_text,
-            repaired_block_text,
-            post_processed_block_text,
-            allowed_source_literals=block_literals,
-        )
-        if not ok_final:
-            _log_batch_error(error_log_path, error_log_lock, "按行回退(整体验证失败)", [original_block_text], reason_final, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
-            return False, None, None, f"整体验证失败: {reason_final}"
-
-        translation_validator = config.get("_translation_validator")
-        if callable(translation_validator):
-            ok_final, reason_final = translation_validator(
-                original_block_text,
-                post_processed_block_text,
-            )
-            if not ok_final:
-                _log_batch_error(error_log_path, error_log_lock, "按行回退(专用验证失败)", [original_block_text], reason_final, model_name, api_kwargs, api_messages, raw_textarea, 0, 0, file_name_for_log=current_processing_file_name)
-                return False, None, None, f"专用验证失败: {reason_final}"
-
-        return True, repaired_block_text, post_processed_block_text, ""
-    except Exception as e:
-        _log_batch_error(error_log_path, error_log_lock, "按行回退(异常)", [original_block_text], str(e), model_name, None, None, "", 0, 0, file_name_for_log=current_processing_file_name)
-        return False, None, None, f"异常: {e}"
-
-
-# --- 线程工作函数 (返回文件名和结果) ---
 def _translation_worker(
     batch_metadata_items,
     context_metadata_items_for_batch,
@@ -761,7 +91,6 @@ def _translation_worker(
         log.warning(f"工作线程收到来自文件 '{source_file_name_for_worker or 'N/A'}' 的空批次，跳过。")
         return source_file_name_for_worker, {} # 返回空结果
 
-    original_texts_in_batch_for_logging = [item["text_to_translate"] for item in batch_metadata_items]
     batch_processing_result = {} # 用于存储此worker处理的结果
 
     try:
@@ -777,24 +106,15 @@ def _translation_worker(
             source_file_name_for_worker 
         )
         log.debug(f"工作线程完成文件 '{source_file_name_for_worker or 'N/A'}' 的批次处理，大小: {len(batch_metadata_items)}。")
-    except Exception as worker_exception:
-        log.exception(f"工作线程处理文件 '{source_file_name_for_worker or 'N/A'}' 的批次时发生意外顶层错误: {worker_exception} - 批内所有项目将回退")
-        final_fallback_reason_worker_ex = f"[工作线程顶层异常({source_file_name_for_worker or 'N/A'}): {worker_exception}]"
-        _log_batch_error(error_log_path, error_log_lock, "工作线程意外错误", original_texts_in_batch_for_logging,
-                         str(worker_exception), config.get("model"), {}, [], "无响应体", 0, 0,
-                         file_name_for_log=source_file_name_for_worker)
-        
-        batch_processing_result = {} # 确保出错时返回的是字典
-        for item_data in batch_metadata_items:
-            original_text_key = item_data["original_json_key"]
-            batch_processing_result[original_text_key] = {
-                "text": item_data["text_to_translate"],
-                "status": "fallback", 
-                "failure_context": final_fallback_reason_worker_ex,
-                "original_marker": item_data["original_marker"], 
-                "speaker_id": item_data["speaker_id"]
-            }
-    
+    except TranslationPaused:
+        raise
+    except Exception as error:
+        session = config.get("_translation_session")
+        if session:
+            session.pause(f"翻译处理异常: {error}")
+        log.exception("翻译工作线程异常，保留已经保存的结果")
+        raise TranslationPaused(str(error)) from error
+
     # 返回源文件名和这个批次的结果
     return source_file_name_for_worker, batch_processing_result
 
@@ -891,8 +211,8 @@ def _discard_translation_cache_if_dictionaries_changed(translated_json_path, dic
     translated_mtime = os.path.getmtime(translated_json_path)
     if not any(os.path.exists(path) and os.path.getmtime(path) > translated_mtime for path in dictionary_paths):
         return False
-    _discard_stale_translation_outputs(outputs)
-    return True
+    log.info("词典已更新：保留已有成功译文，新词典用于剩余条目。需要重译时请明确移除对应译文。")
+    return False
 
 
 # --- 主任务函数 ---
@@ -933,15 +253,11 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         )
         
         if not file_system.ensure_dir_exists(translated_dir): raise OSError(f"无法创建目录: {translated_dir}")
-        # ponytail: dictionary edits invalidate the completed cache; failed runs still keep checkpoints.
-        if _discard_translation_cache_if_dictionaries_changed(
+        _discard_translation_cache_if_dictionaries_changed(
             translated_json_path, dictionary_paths, stale_wolf_outputs
-        ):
-            log.info("检测到字典晚于翻译结果，已清理旧翻译暂存并重新翻译。")
-        if os.path.exists(error_log_path):
-            log.info(f"删除旧翻译错误日志: {error_log_path}")
-            file_system.safe_remove(error_log_path)
-        
+        )
+        # Keep legacy error logs for diagnosis; new requests append to JSONL.
+
         if not os.path.exists(untranslated_json_path):
             if is_wolf_game:
                 _discard_stale_translation_outputs(stale_wolf_outputs)
@@ -1179,8 +495,10 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             all_files_translated_data.setdefault(file_name, {})
 
 
-            for i in range(0, num_items_in_file, batch_size_config):
-                batch_metadata_for_task = all_metadata_items_for_this_file[i : i + batch_size_config]
+            i = 0
+            for batch_metadata_for_task in pack_batches(
+                all_metadata_items_for_this_file, batch_size_config,
+            ):
                 if not batch_metadata_for_task: continue
 
                 context_start_idx = max(0, i - context_lines_count)
@@ -1193,6 +511,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     "source_file": file_name,
                     # 其他参数可以作为字典传递给worker，或者worker直接从config取
                 })
+                i += len(batch_metadata_for_task)
         
         if not global_translation_tasks:
             try:
@@ -1234,6 +553,25 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         completed_batches_count = 0 # 按批次计数
         processed_items_count = 0   # 仅统计需要翻译的条目数（不含预填）
 
+        session = TranslationSession(
+            current_translate_config, os.path.join(translated_dir, "translation_requests.jsonl")
+        )
+        current_translate_config["_translation_session"] = session
+        checkpoint_lock = threading.Lock()
+
+        def checkpoint(source_file, results):
+            nonlocal all_files_translated_data
+            with checkpoint_lock:
+                all_files_translated_data.setdefault(source_file, {}).update(results)
+                try:
+                    all_files_translated_data = _save_translation_results_atomic(
+                        translated_json_path, untranslated_data_per_file, all_files_translated_data
+                    )
+                except Exception as error:
+                    session.pause(f"保存失败，已停止后续请求: {error}")
+                    raise TranslationPaused(session.reason) from error
+
+        current_translate_config["_checkpoint_translation"] = checkpoint
         with ThreadPoolExecutor(max_workers=concurrency_config) as executor:
             # 提交所有任务
             future_to_task_info = {
@@ -1264,43 +602,14 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     # _translation_worker 现在返回 (source_file_name, batch_result_dict)
                     processed_file_name, batch_result_dict_from_worker = future.result()
                     
-                    # 将批次结果合并到对应文件的结果中
-                    # 注意：这里需要确保 all_files_translated_data[processed_file_name] 已经存在
-                    # 在预切分阶段，我们已经用 setdefault 初始化了
-                    if processed_file_name in all_files_translated_data:
-                        all_files_translated_data[processed_file_name].update(batch_result_dict_from_worker)
-                    else:
-                        # 理论上不应该发生，因为预切分时已初始化
-                        log.error(f"严重错误：尝试将批次结果存入未初始化的文件条目 '{processed_file_name}'")
-                        all_files_translated_data[processed_file_name] = batch_result_dict_from_worker # 尝试补救
-
+                    checkpoint(processed_file_name, batch_result_dict_from_worker)
+                except TranslationPaused:
+                    # Successful records have already been checkpointed by the worker.
+                    continue
                 except Exception as exc:
-                    log.exception(f"处理文件 '{source_file_of_this_batch}' 的一个批次时发生异常: {exc}")
-                    # 即使worker内部有回退，如果worker本身抛出异常，也需要在这里处理
-                    # 构建回退结果并合并
-                    fallback_reason_exc = f"[Future执行异常({source_file_of_this_batch}): {exc}]"
-                    for item_data_in_failed_batch in task_info_for_this_future["batch_items"]:
-                        original_text_key = item_data_in_failed_batch["original_json_key"]
-                        if source_file_of_this_batch not in all_files_translated_data:
-                            all_files_translated_data[source_file_of_this_batch] = {}
-                        all_files_translated_data[source_file_of_this_batch][original_text_key] = {
-                            "text": item_data_in_failed_batch["text_to_translate"],
-                            "status": "fallback", 
-                            "failure_context": fallback_reason_exc,
-                            "original_marker": item_data_in_failed_batch["original_marker"], 
-                            "speaker_id": item_data_in_failed_batch["speaker_id"]
-                        }
+                    session.pause(f"翻译任务异常: {exc}")
+                    continue
 
-                try:
-                    all_files_translated_data = _save_translation_results_atomic(
-                        translated_json_path,
-                        untranslated_data_per_file,
-                        all_files_translated_data
-                    )
-                except Exception as checkpoint_save_err:
-                    log.exception(f"保存翻译续跑检查点失败: {checkpoint_save_err}")
-                    message_queue.put(("warning", f"保存翻译续跑检查点失败，本轮会继续但下次可能需要重翻最近批次: {checkpoint_save_err}"))
-                
                 completed_batches_count += 1
                 processed_items_count += num_items_in_this_batch
 
@@ -1314,11 +623,27 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     
                     status_update_msg = (f"已处理批次: {completed_batches_count}/{total_batches_to_process} "
                                          f"| 需译原文: {processed_items_count}/{total_need_translate} ({progress_percentage:.1f}%) "
-                                         f"| 预填: {overall_default_db_prefilled_count} "
+                                         f"| 请求: {session.stats['requests']} | token: {session.stats['input_tokens'] + session.stats['output_tokens']} "
                                           f"- 预计剩余: {remaining_processing_time:.0f}s")
                     message_queue.put(("status", status_update_msg))
                     message_queue.put(("progress", progress_percentage))
                     last_status_update_time = current_time
+
+        summary_path = os.path.join(translated_dir, "translation_run_summary.json")
+        summary = {"run_id": session.run_id, "paused": session.stop.is_set(),
+                   "reason": session.reason, **session.stats,
+                   "saved_success": sum(
+                       result.get("status") == "success"
+                       for entries in all_files_translated_data.values() for result in entries.values()
+                   )}
+        with open(summary_path, "w", encoding="utf-8") as summary_file:
+            json.dump(summary, summary_file, ensure_ascii=False, indent=2)
+        message_queue.put(("log", ("normal", f"实际请求 {session.stats['requests']} 次；输入 {session.stats['input_tokens']} / 输出 {session.stats['output_tokens']} token；拆批 {session.stats['splits']} 次。")))
+        if session.stop.is_set():
+            message_queue.put(("error", f"翻译已暂停，成功译文已保存，可续跑。{session.reason}"))
+            message_queue.put(("status", "翻译暂停(已保存进度)"))
+            message_queue.put(("done", None))
+            return
 
         message_queue.put(("log", ("normal", f"所有 {total_batches_to_process} 个翻译批次已提交处理。等待完成...")))
         # （as_completed 循环结束后，所有任务都已完成或异常）
@@ -1329,15 +654,6 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         # --- 后续处理：错误日志检查、回退CSV生成、最终JSON保存 ---
         # (这部分逻辑与上一版类似，但现在是基于 all_files_translated_data 和全局回退列表)
-        errors_found_in_log_file = 0 # 与之前相同
-        if os.path.exists(error_log_path):
-            try:
-                with open(error_log_path, 'r', encoding='utf-8') as elog_read:
-                    errors_found_in_log_file = elog_read.read().count("-" * 20)
-                if errors_found_in_log_file > 0:
-                    message_queue.put(("log", ("warning", f"翻译共检测到 {errors_found_in_log_file} 次错误，详情见日志: {error_log_path}")))
-            except Exception as e_read_log: log.error(f"读取错误日志失败: {e_read_log}")
-
         # --- 整理最终结果并生成回退CSV ---
         all_fallback_items_for_csv_global = [] 
         overall_explicit_fallback_count_global = 0

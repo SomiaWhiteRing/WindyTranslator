@@ -7,7 +7,8 @@ import logging
 # 导入 API 客户端模块用于连接测试
 from core.api_clients import gemini, deepseek
 # 导入默认配置以获取默认 Prompt 值
-from core.config import DEFAULT_WORLD_DICT_CONFIG
+from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
+from ui.model_selector import ModelSelector
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +43,8 @@ class WorldDictConfigWindow(tk.Toplevel):
         self.provider_display_var = tk.StringVar(value=self.provider_display_map[provider_value])
         self.api_key_var = tk.StringVar(value=self.config.get("api_key", ""))
         self.api_url_var = tk.StringVar(value=self.config.get("api_url", ""))
-        self.model_var = tk.StringVar(value=self.config.get("model", DEFAULT_WORLD_DICT_CONFIG["model"]))
+        default_model = DEFAULT_WORLD_DICT_CONFIG["model"] if provider_value == PROVIDER_GEMINI else ""
+        self.model_var = tk.StringVar(value=self.config.get("model", default_model))
         self.openai_temp_var = tk.StringVar(value=str(self.config.get("openai_temperature", DEFAULT_WORLD_DICT_CONFIG["openai_temperature"])))
         max_tokens_cfg = self.config.get("openai_max_tokens", DEFAULT_WORLD_DICT_CONFIG["openai_max_tokens"])
         self.openai_max_tokens_var = tk.StringVar(value="" if max_tokens_cfg in (None, "") else str(max_tokens_cfg))
@@ -99,8 +101,13 @@ class WorldDictConfigWindow(tk.Toplevel):
             "gemini-1.5-flash-latest",
             "gemini-pro",
         ]
-        self.model_combobox = ttk.Combobox(frame, textvariable=self.model_var, values=model_values, width=48)
-        self.model_combobox.grid(row=row_idx, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        self.model_selector = ModelSelector(
+            frame, self.api_url_var, self.api_key_var, self.model_var,
+            status_callback=self._set_status,
+            provider_var=self.provider_var, native_models=model_values,
+        )
+        self.model_selector.grid(row=row_idx, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        self.model_combobox = self.model_selector.combobox
         row_idx += 1
 
         self.openai_params_row = row_idx
@@ -267,7 +274,8 @@ class WorldDictConfigWindow(tk.Toplevel):
                 continue
             try:
                 if isinstance(control, ttk.Combobox):
-                    control.config(state='readonly' if enabled else tk.DISABLED)
+                    enabled_state = tk.NORMAL if control is self.model_combobox else 'readonly'
+                    control.config(state=enabled_state if enabled else tk.DISABLED)
                 elif isinstance(control, (tk.Entry, ttk.Entry, scrolledtext.ScrolledText, tk.Text, ttk.Spinbox)):
                     control.config(state=state)
                 elif isinstance(control, (ttk.Button, ttk.Checkbutton)):
@@ -331,6 +339,7 @@ class WorldDictConfigWindow(tk.Toplevel):
             messagebox.showerror("错误", "请选择或输入模型名称", parent=self)
             return
 
+        self.model_selector.suspend_status_updates()
         self._set_status("正在测试连接...", "blue")
         self.test_button.config(state=tk.DISABLED)
         self.save_button.config(state=tk.DISABLED)
@@ -451,7 +460,7 @@ class TranslateConfigWindow(tk.Toplevel):
 
         # --- 窗口设置 ---
         self.title("翻译JSON文件配置 (OpenAI兼容 API)")
-        self.geometry("600x580") # 保持原大小
+        self.geometry("780x700")
         self.transient(parent)
         self.grab_set()
 
@@ -469,7 +478,7 @@ class TranslateConfigWindow(tk.Toplevel):
         self.batch_var = tk.IntVar(value=self.config.get("batch_size", DEFAULT_TRANSLATE_CONFIG["batch_size"]))
         self.context_var = tk.IntVar(value=self.config.get("context_lines", DEFAULT_TRANSLATE_CONFIG["context_lines"]))
         self.concur_var = tk.IntVar(value=self.config.get("concurrency", DEFAULT_TRANSLATE_CONFIG["concurrency"]))
-        self.retry_failed_items_var = tk.BooleanVar(value=self.config.get("retry_failed_items_only", False))
+        self.retry_failed_items_var = tk.BooleanVar(value=self.config.get("retry_failed_items_only", DEFAULT_TRANSLATE_CONFIG["retry_failed_items_only"]))
         self.source_lang_var = tk.StringVar(value=self.config.get("source_language", DEFAULT_TRANSLATE_CONFIG["source_language"]))
         self.target_lang_var = tk.StringVar(value=self.config.get("target_language", DEFAULT_TRANSLATE_CONFIG["target_language"]))
         self.show_key_var = tk.BooleanVar(value=False)
@@ -497,13 +506,12 @@ class TranslateConfigWindow(tk.Toplevel):
 
         # Model Name
         ttk.Label(frame, text="模型名称:").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-        model_combobox = ttk.Combobox(frame, textvariable=self.model_var, values=[
-            "deepseek-chat", "deepseek-coder", # DeepSeek 官方模型示例
-            "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview", "gpt-4o", # OpenAI 模型示例 (加入 gpt-4o)
-            "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", # Moonshot 模型示例
-            # 添加其他你可能使用的 OpenAI 兼容模型
-        ], width=48)
-        model_combobox.grid(row=row_idx, column=1, columnspan=3, padx=5, pady=5, sticky="ew")
+        self.model_selector = ModelSelector(
+            frame, self.api_url_var, self.api_key_var, self.model_var,
+            status_callback=self._set_status,
+        )
+        self.model_selector.grid(row=row_idx, column=1, columnspan=3, padx=5, pady=5, sticky="ew")
+        self.model_combobox = self.model_selector.combobox
         row_idx += 1
 
         # Spinboxes in a subframe for better layout
@@ -511,7 +519,7 @@ class TranslateConfigWindow(tk.Toplevel):
         spinbox_frame.grid(row=row_idx, column=0, columnspan=4, padx=0, pady=5, sticky="w")
 
         # Batch Size
-        ttk.Label(spinbox_frame, text="批次大小:").pack(side=tk.LEFT, padx=(5, 2))
+        ttk.Label(spinbox_frame, text="每批最多条数:").pack(side=tk.LEFT, padx=(5, 2))
         self.batch_spinbox = ttk.Spinbox(spinbox_frame, from_=1, to=100, textvariable=self.batch_var, width=5)
         self.batch_spinbox.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -547,18 +555,31 @@ class TranslateConfigWindow(tk.Toplevel):
         target_lang_combo.grid(row=0, column=3, padx=5, sticky="ew")
         row_idx += 1
 
-        # Prompt Template
-        prompt_frame = ttk.LabelFrame(frame, text="Prompt 模板", padding="5")
+        # Both message roles are configurable; no hidden translation policy.
+        prompt_frame = ttk.LabelFrame(frame, text="提示词", padding="5")
         prompt_frame.grid(row=row_idx, column=0, columnspan=4, padx=5, pady=5, sticky="nsew")
         frame.rowconfigure(row_idx, weight=1)
         prompt_frame.columnconfigure(0, weight=1)
         prompt_frame.rowconfigure(0, weight=1)
 
-        self.prompt_text = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD, height=8) # 减少默认高度
-        self.prompt_text.grid(row=0, column=0, sticky="nsew")
-        # 加载时使用配置值，若无则用默认值
-        self.prompt_text.insert(tk.END, self.config.get("prompt_template", DEFAULT_TRANSLATE_CONFIG["prompt_template"]))
-        self.prompt_text.edit_modified(False)
+        prompt_tabs = ttk.Notebook(prompt_frame)
+        prompt_tabs.grid(row=0, column=0, sticky="nsew")
+        self.prompt_editors = {}
+        for key, title, description in (
+            ("system_prompt", "核心翻译提示词", "翻译原则、人物表达和输出要求均可编辑。请保留 JSON 输出和控制标记约定。"),
+            ("user_prompt_template", "输入模板", "可用变量：{source_language}、{target_language}、{character_glossary_section}、{entity_glossary_section}、{context_section}、{batch_text}。"),
+        ):
+            page = ttk.Frame(prompt_tabs, padding=5)
+            page.columnconfigure(0, weight=1)
+            page.rowconfigure(1, weight=1)
+            prompt_tabs.add(page, text=title)
+            ttk.Label(page, text=description, wraplength=700).grid(row=0, column=0, sticky="w", pady=(0, 5))
+            editor = scrolledtext.ScrolledText(page, wrap=tk.WORD, height=12)
+            editor.grid(row=1, column=0, sticky="nsew")
+            editor.insert(tk.END, self.config.get(key, DEFAULT_TRANSLATE_CONFIG[key]))
+            editor.edit_modified(False)
+            self.prompt_editors[key] = editor
+            ttk.Button(page, text="恢复此页默认提示词", command=lambda field=key: self._reset_prompt(field)).grid(row=2, column=0, sticky="e", pady=(5, 0))
         row_idx += 1
 
         # Status Label
@@ -586,12 +607,11 @@ class TranslateConfigWindow(tk.Toplevel):
             tk.Label(
                 tooltip,
                 text=(
-                    "针对DeepSeek模型迭代后高报错率的情况，\n提供实验性的回退重试新逻辑。\n\n"
-                    "开启时每轮保留通过校验的译文，仅重试失败条目；\n"
-                    "重试时附上具体错误，已有回复时一并提供，帮助模型修正。\n"
-                    "重试耗尽后，仅对剩余失败项拆批或回退原文。\n\n"
-                    "实验性功能的效果取决于模型和文本，可能改变译文结果与请求次数，\n"
-                    "不保证降低失败率或费用；效果不理想时可关闭。"
+                    "开启：每轮保存成功项，仅重试失败项，并附上具体错误和上次译文。\n"
+                    "关闭：批次全部通过后保存；校验失败时整批重试，仍失败则拆批。\n\n"
+                    "此开关只控制内容重试策略，不改变提示词配置。\n"
+                    "两种模式均支持已完成批次续跑、长文分段和接口兼容处理；\n"
+                    "达到预算、额度不足或持续失败时暂停并保留已保存进度。"
                 ),
                 justify=tk.LEFT, wraplength=360, padx=10, pady=8,
                 background="#ffffe1", foreground="#202020",
@@ -639,7 +659,8 @@ class TranslateConfigWindow(tk.Toplevel):
         source_lang_combo.bind("<<ComboboxSelected>>", self._on_config_change)
         target_lang_combo.bind("<<ComboboxSelected>>", self._on_config_change)
         # Prompt 文本变化
-        self.prompt_text.bind("<<Modified>>", self._on_prompt_modified)
+        for editor in self.prompt_editors.values():
+            editor.bind("<<Modified>>", self._on_prompt_modified)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         # --- Initialization Complete ---
@@ -658,10 +679,15 @@ class TranslateConfigWindow(tk.Toplevel):
 
     def _on_prompt_modified(self, event=None):
         """Handle Prompt text modification."""
-        # TranslateConfigWindow 只有一个 prompt_text，逻辑不变
-        if not self.initializing and self.prompt_text.edit_modified():
-            self.prompt_text.edit_modified(False)
+        editor = event.widget if event else None
+        if not self.initializing and editor and editor.edit_modified():
+            editor.edit_modified(False)
             self._on_config_change()
+
+    def _reset_prompt(self, key):
+        editor = self.prompt_editors[key]
+        editor.delete("1.0", tk.END)
+        editor.insert(tk.END, DEFAULT_TRANSLATE_CONFIG[key])
 
     def _on_config_change(self, *args):
         """仅连接参数变化时撤销已通过的连接检查。"""
@@ -692,6 +718,7 @@ class TranslateConfigWindow(tk.Toplevel):
              messagebox.showerror("错误", "请输入模型名称", parent=self)
              return
 
+        self.model_selector.suspend_status_updates()
         self._set_status("正在测试连接...", "blue")
         self.test_button.config(state=tk.DISABLED)
         self.save_button.config(state=tk.DISABLED)
@@ -757,7 +784,10 @@ class TranslateConfigWindow(tk.Toplevel):
         self.config["retry_failed_items_only"] = self.retry_failed_items_var.get()
         self.config["source_language"] = self.source_lang_var.get()
         self.config["target_language"] = self.target_lang_var.get()
-        self.config["prompt_template"] = self.prompt_text.get("1.0", tk.END).strip()
+        for obsolete in ("prompt_template", "max_context_chars", "max_batch_chars", "max_tokens", "max_task_tokens"):
+            self.config.pop(obsolete, None)
+        for key, editor in self.prompt_editors.items():
+            self.config[key] = editor.get("1.0", tk.END).strip()
         # 确保 max_retries 也被保存 (如果之前没有，从默认值添加)
         from core.config import DEFAULT_TRANSLATE_CONFIG
         self.config["max_retries"] = self.config.get("max_retries", DEFAULT_TRANSLATE_CONFIG["max_retries"])

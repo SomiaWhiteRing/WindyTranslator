@@ -3,6 +3,7 @@ import os
 import logging
 from core.utils import file_system # 导入文件系统工具以确保目录存在
 from core.updates import DEFAULT_SITE_URL
+from core.tasks.translation_protocol import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
 
 log = logging.getLogger(__name__)
 
@@ -61,94 +62,26 @@ DEFAULT_WORLD_DICT_CONFIG = {
 
 # --- 默认翻译配置 ---
 DEFAULT_TRANSLATE_CONFIG = {
-    "api_url": "https://generativelanguage.googleapis.com/v1beta", # 更新为gemini的API地址
+    "api_url": "",
     "api_key": "",
-    "model": "gemini-2.5-flash-preview-05-20", # 更新为gemini模型
-    "batch_size": 32, 
-    "context_lines": 8, 
-    "concurrency": 16,
+    "model": "",
+    "batch_size": 32,
+    "context_lines": 8,
+    "concurrency": 4,
     "max_retries": 1,
     "retry_failed_items_only": False,
     "source_language": "日语",
     "target_language": "简体中文",
-    # 更新Prompt模板
-    "prompt_template": """你是一名专业的游戏翻译家，你的任务是将以下从游戏中提取的{source_language}文本翻译成{target_language}。
-请严格遵守以下翻译原则和格式要求。
-
-**重要**: 请将你的所有翻译结果严格地包裹在 <textarea> 和 </textarea> 标签内部，每一个译文编号项对应原文的一个编号项，并保持项内的行数与原文一致。
-
-### 翻译原则
-1.  **忠实准确**: 忠实于原文含义，准确表达。如果原文是伟大的艺术作品，允许使用直白或粗俗的描述，不应随意删减或篡改，不应回避或淡化，以保持作品的原貌。
-2.  **上下文理解**: 充分利用提供的上下文信息（包括上文、人物术语、事物术语、以及文本自身的元数据标记）来辅助翻译。
-3.  **格式保留**: 严格保留文本中的编号、游戏内特殊标记符 (如 \\N[1], \\C[2], \\! 等)、PUA占位符 (如 \uE000, \uE001 等)、换行符、以及行首的空格（用于缩进），保持原来的格式。**禁止合并原文中的多行内容到译文的单行中。**
-4.  **禁止保留源语言专有字符**: 在翻译成{target_language}时，**禁止**在译文中出现源语言的专有字符（例如，当源语言为日语时，禁止在译文中出现平假名或片假名）。特别是那些指代外语单词但没有标准中文译名的片假名，**务必**将其音译或翻译成对应的外语单词（通常是英文）。
-5.  **角色口癖翻译**: 对于原文中角色特有的句尾口癖（如 `～でち`、`～なのだ` 等），请不要直接保留。应根据角色的性格和说话风格，尝试将其翻译成自然的中文语气后缀或表达方式，目标是传达原文语气，而非生硬复制。
-6.  **不翻译非指定语言**: 对于文本中出现的非{source_language}语言（如英语、韩语等），直接保留原文，而不是翻译成{target_language}。但如果是片假名或平假名指代的外语单词（如 `アメリカ`），则保持音译。
-
-### 文本元数据说明
-你将收到的每一行待翻译原文都可能包含以下元数据前缀：
-- `[MARKER: <marker_type>]`: 指示文本的原始类型，例如 `Message`, `Choice`, `Name`, `Title`, `Victory` 等。
-- `[FACE: <identifier>]`: 指示与该文本关联的脸图标识符。`<identifier>` 可能是脸图文件名 (如 `Actor1_face`, `monster_01_0`)，也可能是特殊值 (如 `NARRATION`, `SYSTEM`, `NONE`)，或者此标记可能不存在。
-
-### 根据元数据调整翻译策略
-1.  **对话类文本 (`[MARKER: Message]`)**:
-    *   **有脸图 (`[FACE: <文件名>]`)**: 
-        *   这通常表示一个角色正在说话。请结合对话内容和下方的人物术语表（特别是“口吻”和“性格”字段），尝试推断出该脸图标识符可能对应的角色。
-        *   在翻译时，请使用符合该角色身份、性格和当前情境的口吻及人称代词。
-        *   在台词内容前有时存在角色名称描述，如“王様\n「ちょっと魔王倒してこいや。」”。若存在，则**必须**保留角色名称描述，并将其翻译为对应的角色名称（如“国王\n「去打倒魔王吧。」”）。
-    *   **无明确脸图 (`[FACE: NARRATION]`, `[FACE: NONE]` 或无 `[FACE]` 标记)**:
-        *   这通常表示**旁白、场景描述、背景介绍或角色不明确的叙述**。
-        *   请使用**严格的第三人称叙述**（例如，避免使用“我”、“我们”、“你”、“你们”），除非原文中明确出现了这些代词。
-        *   语气应保持**客观、中立**，如同故事的叙述者或解说者。
-        *   如果文本内容明显是某个角色的内心独白，则可以根据上下文和人物术语表判断并使用第一人称。**但如果 `[FACE: NARRATION]` 标记存在，优先考虑其非角色直接发言的性质。**
- 
-2.  **系统/UI/词条类文本 (例如 `[MARKER: Name]`, `[MARKER: Choice]`, `[MARKER: Victory]`, `[MARKER: LevelUp]`, `[MARKER: ShopA:BuyScreen]`, 等其他非 Message 类型)**:
-    *   这些通常是游戏界面上的元素、菜单选项、物品名称、技能名称、战斗提示、状态信息等。
-    *   翻译时应力求**简洁、准确、书面化**，符合游戏术语或UI文本的常见风格。
-
-### 人物术语参考 (格式: 原文|译文|对应原名|性别|年龄|性格|口吻|描述)
-如果提供了此部分，请务必参考。它可以帮助你识别角色、理解他们的特征，并保持译名和称呼的一致性。
-{character_glossary_section}
-
-### 事物术语参考 (格式: 原文|译文|类别 - 描述)
-如果提供了此部分，请务必参考以确保非角色名词（如地点、物品、技能等）翻译的准确性和一致性。
-{entity_glossary_section}
-
-### 上文内容 ({source_language})
-如果提供了此部分，它可以帮助你理解当前对话发生的背景。
-<context>
-{context_section}
-</context>
-
-### 翻译任务：将以下所有编号的 {source_language} 文本翻译为 {target_language}
-请仔细阅读每一行的元数据标记和原文内容，然后给出翻译。
-<textarea>
-{batch_text}
-</textarea>
-
-**请注意：原文的每个编号项内部可能包含多行文本或特定缩进，这些格式都是重要的结构信息，请务必在译文中**逐行对应、精确保留**原文的换行符和前导空格。禁止合并原文中的多行内容。**
-
-**输出要求**：
-请严格按照下面的格式，在 `<textarea>` 和 `</textarea>` 标签内部输出**所有编号项**的译文列表，确保译文的行数与原文列表中的编号项数完全一致。每一行译文对应原文的一个编号项。
-<textarea>
-1. 这是译文的第一行。
-这是译文的第二行，与原文对应。
-2. 这是另一个条目的译文。
-...
-N. 译文行N
-</textarea>
-
-### 输出前自我检查
-请在生成最终输出前，再次检查以下几点：
-1.  是否严格保留了原文中所有的特殊代码（如 `\\N[1]`, `\\C[0]`, `\\>`, `\uE000` 等）及其位置？（目标：是）
-2.  译文中是否还有残留的日语假名（包括指代英文单词的片假名）？（目标：无）
-3.  输出的编号数是否与输入的编号数完全一致，且一一对应？（目标：是）
-4.  对于对话类文本，是否根据推断的发言人使用了恰当的人称和语气？（目标：是）
-5.  对于系统/UI/词条类文本，翻译是否简洁、准确、书面化？（目标：是）
-6.  是否所有翻译内容都包含在 `<textarea>` 和 `</textarea>` 标签内？（目标：是）
-"""
+    # New fields deliberately supersede every old prompt_template value.
+    "system_prompt": DEFAULT_SYSTEM_PROMPT,
+    "user_prompt_template": DEFAULT_USER_PROMPT,
+    "temperature": 0.7,
+    "request_timeout": 120,
+    "thinking_mode": "auto",
+    "stream_mode": "auto",
+    "max_requests_per_batch": 16,
+    "max_task_requests": 20000,
 }
-
 
 # --- 默认专业模式配置 ---
 DEFAULT_PRO_MODE_SETTINGS = {
@@ -265,6 +198,8 @@ class ConfigManager:
             translate_node = final_config['translate_config'] = json.loads(json.dumps(DEFAULT_TRANSLATE_CONFIG))
         for key, default_value in DEFAULT_TRANSLATE_CONFIG.items():
             translate_node.setdefault(key, default_value)
+        for obsolete in ("prompt_template", "max_context_chars", "max_batch_chars", "max_tokens", "max_task_tokens"):
+            translate_node.pop(obsolete, None)
 
         # 对 pro_mode_settings 进行检查和填充默认值
         pro_node = final_config.setdefault('pro_mode_settings', {})

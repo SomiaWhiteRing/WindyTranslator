@@ -20,6 +20,9 @@ STRUCTURAL_CONTROL_NAME_RE = re.compile(
     re.I,
 )
 INLINE_CONTROL_NAME_RE = re.compile(r"\\(?:C|V|N|P|G|I|PX|PY|FS|FN|FSZ|FST|OC|OW|RC|FB|FI|FR)(?:\[|$)", re.I)
+# These standard commands take one bracketed argument. A following [caption]
+# is visible text, unlike additional argument groups of an unknown plugin code.
+SINGLE_ARGUMENT_CONTROLS = {"C", "V", "N", "P", "I", "S"}
 
 
 @dataclass(frozen=True)
@@ -334,11 +337,14 @@ def _scan_backslash_token(text: str, start: int) -> int:
         i += 1
         while i < length and text[i].isascii() and (text[i].isalnum() or text[i] == "_"):
             i += 1
+        single_argument = text[start + 1:i].upper() in SINGLE_ARGUMENT_CONTROLS
         while i < length and text[i] == "[":
             bracket_end = _consume_bracket_group(text, i)
             if bracket_end <= i:
                 break
             i = bracket_end
+            if single_argument:
+                break
         return i
 
     # A backslash followed by non-command text (for example "\ティサ") is not a

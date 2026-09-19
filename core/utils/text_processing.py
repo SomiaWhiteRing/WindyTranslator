@@ -38,7 +38,7 @@ def contains_japanese_kana(text):
 
 # --- 文本验证 ---
 
-def validate_translation(original, translated, post_processed_translation, allowed_source_literals=()):
+def validate_translation(original, translated, post_processed_translation, allowed_source_literals=(), allow_japanese=False):
     """
     验证译文是否符合特定规则（如保留标记、无假名等）。
 
@@ -76,9 +76,12 @@ def validate_translation(original, translated, post_processed_translation, allow
         text_for_kana_check = control_tokens.strip_token_literals(post_processed_translation)
         for literal in sorted({item for item in allowed_source_literals if item}, key=len, reverse=True):
             text_for_kana_check = text_for_kana_check.replace(literal, "")
-        if contains_japanese_kana(text_for_kana_check):
+        if not allow_japanese and contains_japanese_kana(text_for_kana_check):
+            examples = list(dict.fromkeys(line.strip()[:120] for line in text_for_kana_check.splitlines()
+                                         if contains_japanese_kana(line)))[:8]
             reason = (
-                f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 处理后译文: '{post_processed_translation[:50]}...'"
+                "验证失败: 译文残留日语假名。请按配置的翻译要求检查以下片段: "
+                + repr(examples)
             )
             log.warning(reason)
             return False, reason
@@ -204,9 +207,37 @@ def repair_translation_format(original_text: str, restored_translation: str) -> 
 
     return text
 
-def post_process_translation(text, original_text, apply_gbk_compatibility=True):
+def repair_translation_quotes(text, original_text):
+    """Clean up quotes using a complete item's source, never a fragment."""
+    if not isinstance(text, str):
+        return text
+    processed_text = text
+
+    for quote in ('「', '」', '『', '』'):
+        if quote not in original_text and quote in processed_text:
+            log.debug("Removing extra %r from translation: %r", quote, processed_text[:50])
+            processed_text = processed_text.replace(quote, '')
+
+    processed_text = processed_text.replace('“『', '『')
+    processed_text = processed_text.replace('“「', '「')
+    processed_text = processed_text.replace('』”', '』')
+    processed_text = processed_text.replace('」”', '」')
+
+    for opening, closing in (('「', '」'), ('『', '』')):
+        missing_count = processed_text.count(opening) - processed_text.count(closing)
+        if missing_count > 0:
+            log.debug("Adding %s missing %r to translation: %r", missing_count, closing, processed_text[:50])
+            processed_text = _append_before_trailing_structural_controls(processed_text, closing * missing_count)
+
+    if isinstance(original_text, str) and '『“' not in original_text and '”』' not in original_text:
+        processed_text = re.sub(r'『“([\s\S]*?)”』', r'『\1』', processed_text)
+    return processed_text
+
+
+def post_process_translation(text, original_text, apply_gbk_compatibility=True, *, process_quotes=True):
     """
     对翻译后的、已还原 PUA 的文本进行最终的清理和格式调整。
+    分段翻译时关闭引号处理，待整条拼接完成后再调用 repair_translation_quotes。
     """
     if not isinstance(text, str): return text
 
@@ -244,46 +275,9 @@ def post_process_translation(text, original_text, apply_gbk_compatibility=True):
         processed_text = processed_text.replace('≪', '《') # 日语左尖括号 -> 全角左尖括号
         processed_text = processed_text.replace('⇒', '→') # 日语右箭头 -> 全角右箭头
 
-    # 规则 2: 移除不必要的引号 (如果原文没有，译文却有)
-    # 这个逻辑比较微妙，需要基于还原 PUA 后的引号
-    if '「' not in original_text and '「' in processed_text:
-         log.debug(f"Removing extra '「' from translation: '{processed_text[:50]}...'")
-         processed_text = processed_text.replace('「', '')
-    if '」' not in original_text and '」' in processed_text:
-         log.debug(f"Removing extra '」' from translation: '{processed_text[:50]}...'")
-         processed_text = processed_text.replace('」', '')
-    if '『' not in original_text and '『' in processed_text:
-         log.debug(f"Removing extra '『' from translation: '{processed_text[:50]}...'")
-         processed_text = processed_text.replace('『', '')
-    if '』' not in original_text and '』' in processed_text:
-         log.debug(f"Removing extra '』' from translation: '{processed_text[:50]}...'")
-         processed_text = processed_text.replace('』', '')
-
-    # 规则 2.1: 移除重复出现的引号
-    processed_text = processed_text.replace('“『', '『')
-    processed_text = processed_text.replace('“「', '「')
-    processed_text = processed_text.replace('』”', '』')
-    processed_text = processed_text.replace('」”', '」')
-
-    # 规则 3: 引号平衡 (确保 「」 和 『』 成对出现，如果缺结尾，则补上)
-    # 分别检查两种引号
-    open_bracket_count = processed_text.count('「')
-    close_bracket_count = processed_text.count('」')
-    if open_bracket_count > close_bracket_count:
-        missing_count = open_bracket_count - close_bracket_count
-        log.debug(f"Adding {missing_count} missing '」' to translation: '{processed_text[:50]}...'")
-        processed_text = _append_before_trailing_structural_controls(processed_text, '」' * missing_count)
-
-    open_double_bracket_count = processed_text.count('『')
-    close_double_bracket_count = processed_text.count('』')
-    if open_double_bracket_count > close_double_bracket_count:
-        missing_count = open_double_bracket_count - close_double_bracket_count
-        log.debug(f"Adding {missing_count} missing '』' to translation: '{processed_text[:50]}...'")
-        processed_text = _append_before_trailing_structural_controls(processed_text, '』' * missing_count)
-
-    # 规则 3.1: 移除『“xxx”』这种多余引号（仅处理两侧都多出且原文没有的狭窄情况）
-    if isinstance(original_text, str) and '『“' not in original_text and '”』' not in original_text:
-        processed_text = re.sub(r'『“([\s\S]*?)”』', r'『\1』', processed_text)
+    # 规则 2–3: 引号清理和平衡只针对完整条目处理。
+    if process_quotes:
+        processed_text = repair_translation_quotes(processed_text, original_text)
 
     # 规则 4: 恢复前导排版空白行。
     # RPG Maker 文本常用“全角空格组成的空白行 + 正文行”做标题居中。

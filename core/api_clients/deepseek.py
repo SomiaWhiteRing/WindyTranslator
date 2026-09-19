@@ -1,8 +1,93 @@
 # core/api_clients/deepseek.py
 import logging
+import re
+import json
+import httpx
+from urllib.parse import urlsplit
+from dataclasses import dataclass, field
+from typing import Optional
 from openai import OpenAI, APIConnectionError, AuthenticationError, RateLimitError, BadRequestError, OpenAIError
 
 log = logging.getLogger(__name__)
+
+
+def translation_thinking_options(model_name, mode="auto", reasoning_effort=None):
+    """DeepSeek V4 defaults to high thinking, which can exhaust text budgets.
+
+    Only known switchable DeepSeek families receive the vendor parameter.
+    Explicit reasoning settings take precedence over the translation default.
+    """
+    if mode not in ("auto", "enabled", "disabled"):
+        raise ValueError("thinking_mode 必须为 auto、enabled 或 disabled")
+    model = str(model_name).lower().rsplit("/", 1)[-1]
+    switchable = re.match(r"deepseek-(?:chat|flash|v4(?:\.\d+)?-(?:flash|pro))(?:$|[-:])", model)
+    if mode == "auto":
+        if not switchable or reasoning_effort:
+            return {}
+        mode = "disabled"
+    return {"thinking": {"type": mode}}
+
+
+@dataclass(frozen=True)
+class CompletionResult:
+    """Per-request metadata; never stored on the shared client instance."""
+
+    content: str = ""
+    finish_reason: str = ""
+    usage: dict = field(default_factory=dict)
+    request_id: str = ""
+    response_model: str = ""
+    error_kind: str = ""
+    error: str = ""
+    status_code: Optional[int] = None
+    retry_with_stream: bool = False
+
+
+def _read_unexpected_stream(body, api_key):
+    """Some gateways return SSE even when stream=False; retain text and usage."""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", errors="replace")
+    chunks, usage, request_id, model, finish = [], {}, "", "", ""
+    done = False
+    try:
+        for line in body.splitlines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                done = True
+                break
+            event = json.loads(payload)
+            if not isinstance(event, dict):
+                raise ValueError("invalid event")
+            usage = event.get("usage") or usage
+            request_id = event.get("id") or request_id
+            model = event.get("model") or model
+            for choice in event.get("choices") or []:
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta") or choice.get("message") or {}
+                content = delta.get("content")
+                if isinstance(content, str):
+                    chunks.append(content)
+                finish = choice.get("finish_reason") or finish
+    except (ValueError, TypeError, AttributeError):
+        done = False
+    text = "".join(chunks)
+    if text and finish and done:
+        return CompletionResult(content=text, finish_reason=finish, usage=usage,
+                                request_id=request_id, response_model=model, status_code=200)
+    if finish == "length" and done:
+        return CompletionResult(finish_reason=finish, usage=usage, request_id=request_id,
+                                response_model=model, status_code=200, error_kind="empty",
+                                error="流式响应耗尽输出预算但没有返回译文")
+    if usage or chunks or done:
+        return CompletionResult(usage=usage, request_id=request_id, response_model=model, status_code=200,
+                                error_kind="transient", error="中转站返回不完整流式响应或仅用量，未取得完整译文",
+                                retry_with_stream=bool(done and usage and not chunks and not finish))
+    detail = body.replace(api_key, "[REDACTED]")[:240]
+    return CompletionResult(error_kind="transient", error="接口返回非 JSON 响应: " + detail, status_code=200)
+
 
 class DeepSeekClient:
     """封装与 DeepSeek (或任何 OpenAI 兼容) API 的交互。"""
@@ -28,6 +113,73 @@ class DeepSeekClient:
         except Exception as e:
             log.exception(f"初始化 OpenAI 兼容客户端失败: {e}")
             raise ConnectionError(f"初始化 OpenAI 兼容客户端失败: {e}") from e
+
+    def complete(self, model_name, messages, **kwargs):
+        """One HTTP attempt. The translation scheduler owns retry and cost limits."""
+        if not model_name or not messages:
+            return CompletionResult(error_kind="configuration", error="模型或消息为空")
+        timeout = kwargs.pop("timeout", 120)
+        stream = kwargs.pop("stream", False)
+        thinking_mode = kwargs.pop("thinking_mode", "auto")
+        try:
+            options = translation_thinking_options(model_name, thinking_mode, kwargs.get("reasoning_effort"))
+        except ValueError as error:
+            return CompletionResult(error_kind="configuration", error=str(error))
+        # Model aliases do not imply that a proxy forwards vendor parameters.
+        # The official API documents this switch; proxy users can opt in.
+        if thinking_mode == "auto" and urlsplit(getattr(self, "base_url", "")).hostname != "api.deepseek.com":
+            options = {}
+        if options:
+            # Preserve an explicitly supplied vendor body, including thinking.
+            kwargs["extra_body"] = {**options, **(kwargs.get("extra_body") or {})}
+        try:
+            if stream:
+                kwargs.setdefault("stream_options", {"include_usage": True})
+                # Read the wire format so [DONE], visible text and final billing
+                # are checked together. The SDK iterator hides [DONE].
+                lines = []
+                with self.client.with_options(max_retries=0, timeout=timeout).chat.completions.with_streaming_response.create(
+                    model=model_name, messages=messages, stream=True, **kwargs
+                ) as response:
+                    try:
+                        for line in response.iter_lines():
+                            lines.append(line)
+                    except httpx.TransportError:
+                        # Preserve any usage received before a disconnected stream.
+                        pass
+                return _read_unexpected_stream("\n".join(lines), self.api_key)
+            response = self.client.with_options(max_retries=0, timeout=timeout).chat.completions.create(
+                model=model_name, messages=messages, stream=False, **kwargs
+            )
+            if isinstance(response, (str, bytes)):
+                return _read_unexpected_stream(response, self.api_key)
+            choice = response.choices[0] if response.choices else None
+            content = choice.message.content if choice and choice.message else ""
+            finish = choice.finish_reason if choice else ""
+            usage = response.usage.model_dump() if response.usage else {}
+            return CompletionResult(
+                content=content or "", finish_reason=finish or "", usage=usage,
+                request_id=response.id or "", response_model=getattr(response, "model", "") or "", status_code=200,
+                error_kind="" if content else ("refusal" if finish == "content_filter" else "empty"),
+                error="" if content else f"接口未返回译文 (finish_reason={finish})",
+            )
+        except OpenAIError as error:
+            status = getattr(error, "status_code", None)
+            body = getattr(error, "body", None)
+            # Do not log request headers or credentials, including those echoed by a gateway.
+            detail = str(body or error).replace(self.api_key, "[REDACTED]")[:1000]
+            lower = detail.lower()
+            if status in (401, 403):
+                kind = "authentication"
+            elif status == 402 or any(s in lower for s in ("insufficient_quota", "insufficient balance", "余额不足", "额度不足", "credit balance", "quota_exceeded")):
+                kind = "quota"
+            elif status == 429 or isinstance(error, (APIConnectionError, RateLimitError)) or (status and status >= 500):
+                kind = "transient"
+            elif status == 400 and "response_format" in lower:
+                kind = "unsupported_format"
+            else:
+                kind = "configuration"
+            return CompletionResult(error_kind=kind, error=detail, status_code=status)
 
     def chat_completion(self, model_name, messages, temperature=0.7, max_tokens=None, **kwargs):
         """
@@ -103,31 +255,14 @@ class DeepSeekClient:
             return False, None, error_msg
 
     def test_connection(self, model_name):
-        """
-        尝试与 API 进行简单的连接和认证测试。
-
-        Args:
-            model_name (str): 用于测试的模型名称。
-
-        Returns:
-            tuple: (success, message)
-                   success (bool): 连接和认证测试是否成功。
-                   message (str): 测试结果或错误信息。
-        """
-        log.info(f"测试与 OpenAI 兼容 API (模型: {model_name}, URL: {self.base_url}) 的连接...")
-        # 使用一个模仿翻译的简单消息进行测试
-        test_messages = [{"role": "user", "content": "请将以下文本的简体中文翻译结果包裹在<textarea>标签中并返回：「私は！　しまむらが知らないとこで笑っているとか！　嫌で、他の子と手を繫ぐのも！　私だけがよくて！　私と一緒にいてほしくて！　祭りだって、行きたかったし！　しまむらが楽しそうにしていると、笑っていると、その側に私がいて！　そういうのがよくて！　頭が痛いの、苦しいの！　しまむらのことばっかり考えて、どうかしそうに、なって……しまむらが電話してくれるのも待っているの！　たまには話してよ、私に話しかけてよ、私ばっかりじゃやだ、しまむらも、少しぐらい……少しは私のこと気にならない？　ちょっとも？　まったく？　なんでもないの？　友達だけ？　普通の友達なの？　普通じゃなくなりたいの、普通より一個でもいいから、普通じゃないのが、いい……ねぇ、しまむら、どうすればいいかな、ねぇ。しまむら聞いてる？　聞いて。私の声を聞いてなにか思う？　思ってくれる？　安心でもいいよなんでもいい、なにか思って。そういうのがほしい、そういうの求めちゃだめ？　しまむら！　しまむらなんだよぉ、私ね、しまむらがいいの。しまむら以外いらないし、いらない……しまむらだけでいいから。わがまま言ってないよ、一個だから、一個じゃん。みんななんてどうでもいいしいらないしあっちいっててほしいのになんでしまむらはそっちいくの、こっち来て、こっちに来て、側にいて、離れないで。嫌だ、しまむらの隣にいるのは私、私がいい、私がいたい、いさせて……だれあの子、私知らないよ。知らないしまむらになるのはやだ、しまむらのこと全部知っていたいし、知りたくないことあるのも嫌だし、でも知らないのはもっと嫌だし苦しいの。苦しい、痛い、痛い……しまむらぁ。しまむらと遊びに行こうって、言いたいのにお祭りだって行こうと思ってたんだよ、行きたいよ、でもしまむらあの子と行くの、遊んでいるの？　今どこにいるのしまむら、誰かといるの、しまむら、しまむらぁ……ねぇ聞いてる？　さっきから私ばっかりだよ喋ってるの。いつものしまむらはもっと喋ってくれるよね、ねぇなんで？　いつもみたいじゃない？　私おかしい？　おかしいよね、それは分かるんだよでも、知りたくて、しまむらのこと知りたくて、変になるの。しまむらと離れたくないのいつも一緒にいたいのどこでもいいの一緒ならどこでもいいから、しまむらと会ってないよ、会いたいよでも今会ったら泣きそうだし、泣いてるし、あの子とどうなんだろうなんなんだろうってそればかり気になっているしねぇ聞いてる？　私と一緒にいるよりあの子の方がいいの？　私だめ？　どこがだめ？　直すから言ってよ、直す絶対に直すだからお願い教えて、聞きたいの。しまむらはね、私、しまむらだから……しまむらだからっていうのがあるの、他の人がしまむらそっくりでも関係ないのいるはずないけど、ねぇそういうのじゃなくて、しまむらじゃないとダメなの。だから仲良くなりたいのに、なんか……こういうのじゃなくてもっと違う話したいけど、気になって……だってしまむら、笑顔だったよ？　私以外に笑うの、嫌だよ。嫌じゃない？　そうじゃない？　しまむらそういうのない？　しまむらって誰が好き？　好きな人いる？　好きになれる？　好きってなにか分かる？　時々ね、怖いの。しまむらはなんで隣にいてくれるんだろうって。しまむらと私ってそもそも友達だよね？　友達ぐらいにはなっているよね。友達と思ってくれてる？　しまむらは、そういうの……うぅう、ぇえ、しまむら、声聞かせて。声聞きたい、私のこと話して。しまむらが一番、私のこと分かって……分かってほしい。分かりたいし分かってほしい。一番になってほしい、なりたいの。なって、でも……ちょっと嫌なことがあるとくじけそうで……だってしまむらは、なんか、私を大事にしている感じがないから……大事、大事って変だけど、でも大事にしてほしい。大事がいいの！　他のと一緒にされるのやなの、本当に少しで、いいから……しまむら私のこと考えたことある？　夏休みに、ずっと会ってないけど、一回ぐらいは考えてくれた？　私ね、ずっと考えてた。しまむらのことしか考えてなかったよ。全部しまむら。だから、しまむらも！　私のこと、けっこう、考えて……しまむらと私は違うよ？　違うよね、分かってる、でも！　期待はするし、しちゃうし、こうしてうらぎ、られても……しまむらに電話したいって思うの。でも電話したってこうなって、どうにもならなくて、どうすればいいかな。ねぇ、しまむら、しまむら？　電話、繫がってるよね？　しまむらと繫がってるよね？　でも遠い、遠くて、会いたい。しまむらに直接会いたいの。笑ってほしいの、しまむらに頭を撫でてね、大丈夫って言ってほしいの。今どこにいるの？　どこ？　誰かといる？　あの子？　あの子だれ？　さっきから何回も聞いたよね、答えられないような相手なの？　どんな仲？　私より？　やだ、そんなのやだ、私よりなんて、やだって。やだ……違うって、違うって言って！　私、しまむらのこといっぱい考えてるよ！　足りない？　それじゃだめ？　もっと？　なにすればいい？　分かんないし、いつも考えても失敗するし、どういう私がいいのか教えて、教えてくれたら、私がんばるよ。絶対がんばるよ、だから、そんな子ほんとは、どっちでもいい。私が会いたいしまむらはもっと、別で、私が変わればいいだけって、わかってるけど……しまむら、ねぇ、しまむら。今なに考えてる？　私おかしい？　私へん？　しまむらの話をして。しまむらから私に声をかけて、しまむらから近づいて。いつも私ばっかり、ばっかり、ばっかり……一方通行じゃあ、こうなっちゃうよ！　こういうふうになっちゃうから、しまむらもこっち、に来て。しまむらは私嫌い？　違うよね？　やだよ、嫌いにならないで。嫌いいやだ。嫌いなのいやだ……好きに、好きになってほしい。だれか、好きになって。違うしまむらが好きに……嫌いなの？　お母さんみたいに私のこと嫌いなの？　声かけなくなるの？　知らない顔されるの？　私なんて言えばいいの？　なにすればいいの、飛べばいいの、跳ねればいいの、手を繫げばいいの、みんなやろうとしてでもやったら見てなくて……どうすればよかったの。どうすれば、誰も……しまむら、声、聞きたい……なにか言って、安心させて、でも他の人に笑うのやだ、私に笑って、笑って……頭痛い、お腹も、痛い……気になってたのになんで連絡、してくれなかったの。私に教えてよ、私知りたいの。しまむらのこと知りたいの、さっきからなんか、もう、気持ちぐるぐるで……同じこと言ってるけど、仕方ないよ、仕方ないじゃん、しまむらのことしか考えてないんだから……しまむらのことだけだから、ずっと、しまむらになっても……しまむらが、大事で、大事にしたくて、大事じゃないとやで、だから、私を見て。しまむら、見てないとやだ……他の子、なんてやだぁ……やなの。また行くの？　どこか行くの？　一緒に町行くの？　私と遊んだとこに、他の子と！　そんなの、やだよ。上書きしないでよ！　私、ずっと覚えてるのに、上書きされて……また行ったら、今度は違うの？　同じとこ見て違うもの見るの？　そんなのやだ、やだ、やだ。しまむらと一緒に、一緒のもの、分けて、分かって……おかしいよそんなの。違うよね私おかしいの、おかしいの分かるよ、でもおかしくなって……しまむらのこと、頭から離れなくて……今も……しまむら、しまむら、しま、むら……うぇう、う、うううう、しまむら、しまむら……っほ、げ、うぅ……しまむらの、しまむら？　しまむら、しまむら、しまむら……しまむらがいい、私は、いいから、だからしまむらも……ねぇお願い、しまむら……しまむらも、しまむら……」"}]
-        success, content, error = self.chat_completion(model_name, test_messages)
-
-        if success and content is not None: # 确保 content 不是空字符串等
-            msg = "OpenAI 兼容 API 连接测试成功！"
-            log.info(msg)
-            return True, msg
-        elif error:
-            msg = f"OpenAI 兼容 API 连接测试失败: {error}"
-            log.error(msg)
-            return False, msg
-        else: # success is False, but no specific error (e.g., empty response)
-            msg = "OpenAI 兼容 API 连接测试失败: 未收到有效响应。"
-            log.error(msg)
-            return False, msg
+        """Use a small translation to check both connectivity and response format."""
+        from core.tasks.translation_protocol import build_messages, encode, parse_records
+        source = "ゲームを開始する"
+        messages = build_messages([{"text_to_translate": source}], [encode(source)], [], [], [], {})
+        result = self.complete(model_name, messages, max_tokens=2048, temperature=0.2)
+        if result.retry_with_stream:
+            result = self.complete(model_name, messages, max_tokens=2048, temperature=0.2, stream=True)
+        records, error = parse_records(result.content, {1})
+        if records.get(1) and result.finish_reason != "length":
+            return True, "连接和翻译格式检查成功"
+        return False, result.error or f"接口响应未通过格式检查: {error or result.finish_reason}"
