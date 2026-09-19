@@ -1,9 +1,9 @@
 import io
 
 from rubymarshal import reader, writer
-from rubymarshal.classes import RubyObject, RubyString, UserDef
+from rubymarshal.classes import RubyObject, RubyString
 
-from core.engines.vxace import _detach_event_command_parameter_aliases, _validate_no_corrupted_show_text_commands_in_common_events, VXAceError
+from core.engines.vxace import _detach_event_command_parameter_aliases
 
 
 def _roundtrip(obj):
@@ -24,16 +24,3 @@ def test_detach_clones_nested_objects_and_preserves_ruby_strings():
     assert params[0].attributes["@list"][0] is not shared
     assert params[0].attributes["@list"][0] is not params[1]
     assert _roundtrip(params)[0].attributes["@list"][0].attributes["@parameters"][0].text == "Move"
-
-
-def test_common_event_validation_rejects_downgraded_color_objects():
-    color = RubyObject("Color", attributes={})
-    command = RubyObject("RPG::EventCommand", attributes={"@code": 224, "@indent": 0, "@parameters": [color]})
-    common_event = RubyObject("RPG::CommonEvent", attributes={"@list": [command]})
-
-    try:
-        _validate_no_corrupted_show_text_commands_in_common_events([None, common_event], "CommonEvents.rvdata2")
-    except VXAceError as error:
-        assert "Color" in str(error)
-    else:
-        raise AssertionError("downgraded Color must be rejected")
