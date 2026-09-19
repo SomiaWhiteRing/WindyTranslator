@@ -1,0 +1,21 @@
+{
+  "manifest_version": 1,
+  "id": "rm2k3_save_refresh",
+  "name": "RM2K3 存档地图重载",
+  "version": "1.2.0",
+  "author": "WindyTranslator",
+  "description": "让旧存档在读档时重新加载当前地图和事件，用于处理汉化后仍显示旧对话的情况。",
+  "category": "cli",
+  "runtime": "host_python",
+  "entry": "save_refresh.py",
+  "working_directory": ".",
+  "arguments": [
+    {
+      "name": "project",
+      "flag": "--project",
+      "type": "game_path",
+      "required": true,
+      "label": "当前游戏目录"
+    }
+  ]
+}
