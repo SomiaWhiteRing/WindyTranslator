@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish the checked-out commit using RELEASE.md and already-built assets."""
+"""Update Nightly and publish a new release only when RELEASE.md's version increases."""
 
 import argparse
 from datetime import datetime, timezone
@@ -69,8 +69,8 @@ def main():
     if len(set(names)) != len(names) or "release-manifest.json" in names:
         raise ValueError("Asset names must be unique and cannot use release-manifest.json")
     for path in args.assets:
-        if not path.is_file() or not 0 < path.stat().st_size < 100_000_000:
-            raise ValueError(f"Missing, empty or >= 100 MB asset: {path}")
+        if not path.is_file() or not 0 < path.stat().st_size <= 95_000_000:
+            raise ValueError(f"Missing, empty or > 95 MB asset: {path}")
     if len(args.assets) != 1:
         raise ValueError("WindyTranslator publishes one complete Windows ZIP")
     with zipfile.ZipFile(args.assets[0]) as package:
@@ -79,6 +79,7 @@ def main():
             raise ValueError("Package build metadata is too large")
         build_info = json.loads(package.read(metadata_path))
     if (build_info.get("schemaVersion") != 1 or build_info.get("target") != "windows-x64"
+            or build_info.get("autoUpdateProtocol") != 1
             or build_info.get("commit") != commit or build_info.get("version") != version
             or not isinstance(build_info.get("applicationBuildId"), str)
             or not build_info["applicationBuildId"].startswith(f"windy:{commit}:{os.environ['GITHUB_RUN_ID']}.")):
@@ -123,10 +124,19 @@ def main():
         return
     releases = paginated("releases?per_page=100")
     numbered_tag = args.tag_prefix + version
-    latest = not any(
-        version_key(release["tag_name"]) > version_key(numbered_tag)
-        for release in releases if not release["prerelease"] and not release["draft"]
+    latest_version = max(
+        (version_key(release["tag_name"])
+         for release in releases if not release["prerelease"] and not release["draft"]),
+        default=(),
     )
+    numbered_release = next((release for release in releases if release["tag_name"] == numbered_tag), None)
+    channels = [("nightly", "nightly")]
+    if numbered_release is not None and not numbered_release["draft"]:
+        summary(f"Skipped {numbered_tag}: already published; only Nightly will be updated.")
+    elif version_key(numbered_tag) <= latest_version:
+        summary(f"Skipped {numbered_tag}: version must exceed all published stable versions; only Nightly will be updated.")
+    else:
+        channels.append(("release", numbered_tag))
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     run_url = f"{server}/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
     run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
@@ -135,7 +145,7 @@ def main():
     release_file_hash = digest(Path("RELEASE.md"))
 
     with tempfile.TemporaryDirectory(prefix="github-release-") as temp:
-        for channel, tag in (("nightly", "nightly"), ("release", numbered_tag)):
+        for channel, tag in channels:
             if not current():
                 return
             staging = Path(temp) / channel
@@ -169,6 +179,10 @@ def main():
                 f"自动构建：跟随 `{args.branch}` 的最新成功构建。版本文件：`{version}`。"
                 if channel == "nightly" else f"{args.project} {version}"
             )
+            update_policy = (
+                "Nightly 会被后续成功构建覆盖，请同时记录提交 SHA 和文件 SHA-256。"
+                if channel == "nightly" else "正式版本发布后不再自动覆盖；后续正式发布须由人类手动提高版本号。"
+            )
             checksums = "\n".join(f"| `{item['name']}` | {item['size']} | `{item['sha256']}` |" for item in assets)
             notes.write_text(
                 f"{introduction}\n\n{changelog}\n\n## 构建来源\n\n"
@@ -176,16 +190,20 @@ def main():
                 f"- 提交说明：{subject}\n"
                 f"- 构建：[运行 {os.environ['GITHUB_RUN_ID']}，第 {run_attempt} 次]({run_url}/attempts/{run_attempt})\n"
                 f"- 发布于：{published_at}\n\n"
-                "同版本会被后续提交覆盖；请同时记录提交 SHA 和文件 SHA-256。完整构建信息见 `release-manifest.json`。\n\n"
+                f"{update_policy}完整构建信息见 `release-manifest.json`。\n\n"
                 "| 文件 | 字节数 | SHA-256 |\n| --- | ---: | --- |\n" + checksums + "\n",
                 encoding="utf-8",
             )
             existing = next((release for release in releases if release["tag_name"] == tag), None)
             title = f"{args.project} {'Nightly' if channel == 'nightly' else version}"
             ref = f"refs/tags/{tag}"
-            expected = remote_ref(ref)
-            # Only replace the exact tag state observed by this run.
-            run("git", "push", f"--force-with-lease={ref}:{expected}", "origin", f"{commit}:{ref}")
+            if channel == "nightly":
+                expected = remote_ref(ref)
+                # Only replace the exact Nightly tag state observed by this run.
+                run("git", "push", f"--force-with-lease={ref}:{expected}", "origin", f"{commit}:{ref}")
+            else:
+                # Never move a version tag, including when retrying an unpublished draft.
+                run("git", "push", "origin", f"{commit}:{ref}")
             if existing is None:
                 gh("release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
                    "--title", title, "--notes-file", str(notes))
@@ -213,7 +231,7 @@ def main():
             gh("release", "edit", tag, "--repo", repo, "--verify-tag", "--target", commit,
                "--title", title, "--notes-file", str(notes), "--draft=false",
                f"--prerelease={'true' if channel == 'nightly' else 'false'}",
-               f"--latest={'true' if channel == 'release' and latest else 'false'}")
+               f"--latest={'true' if channel == 'release' else 'false'}")
             summary(f"Published [{title}]({server}/{repo}/releases/tag/{tag}) from `{commit}`.")
 
 

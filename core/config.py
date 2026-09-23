@@ -2,7 +2,6 @@ import json
 import os
 import logging
 from core.utils import file_system # 导入文件系统工具以确保目录存在
-from core.updates import DEFAULT_SITE_URL
 from core.tasks.translation_protocol import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
 
 log = logging.getLogger(__name__)
@@ -112,7 +111,7 @@ DEFAULT_CONFIG = {
     "selected_mode": "easy", # 默认启动模式
     "enable_completion_notification": False,
     "completion_notification_identity_registered": False,
-    "updates": {"site_url": DEFAULT_SITE_URL, "check_on_startup": False},
+    "updates": {"check_on_startup": True},
     # 使用深拷贝确保子字典独立
     "world_dict_config": DEFAULT_WORLD_DICT_CONFIG.copy(),
     "translate_config": DEFAULT_TRANSLATE_CONFIG.copy(),

@@ -23,6 +23,7 @@ jobs:
       SPEC_FILE: WindyTranslator.spec
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
+      WINDY_UPDATE_SITE: "https://staging.viprpg.org"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,7 +49,13 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean $env:SPEC_FILE
+          if ($LASTEXITCODE -ne 0) { throw "Application build failed." }
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name WindyUpdater --paths . scripts/update_helper.py
+          if ($LASTEXITCODE -ne 0) { throw "Updater build failed." }
+          Copy-Item -LiteralPath "dist/WindyUpdater.exe" -Destination "dist/$env:APP_NAME/WindyUpdater.exe"
           Copy-Item -Path "tools" -Destination "dist/$env:APP_NAME/tools" -Recurse -Force
+          python scripts/package_manifest.py "dist/$env:APP_NAME"
+          if ($LASTEXITCODE -ne 0) { throw "Distribution verification failed." }
           if (-not (Test-Path "dist/$env:APP_NAME/tools")) {
             throw "Expected tools directory beside the executable in the onedir package."
           }
@@ -73,9 +80,11 @@ jobs:
           Push-Location "dist"
           Compress-Archive -Path "$env:APP_NAME" -DestinationPath "..\\$zipName" -Force
           Pop-Location
+          python scripts/package_manifest.py --verify-zip $zipName
+          if ($LASTEXITCODE -ne 0) { throw "ZIP verification failed." }
           $packageSize = (Get-Item -LiteralPath $zipName).Length
-          if ($packageSize -ge 100000000) {
-            throw "Distribution exceeds the 100 MB download limit: $packageSize bytes."
+          if ($packageSize -gt 95000000) {
+            throw "Distribution exceeds the 95 MB download limit: $packageSize bytes."
           }
           Write-Host "Distribution size: $packageSize bytes"
           "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -95,7 +104,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish Nightly and versioned release
+    name: Publish Nightly and new versions
     timeout-minutes: 30
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build-windows

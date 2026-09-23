@@ -5,11 +5,9 @@ import logging
 import sys
 import os
 import datetime
-from core.tools.manager import run_tool_host
 from core.utils.file_system import get_application_path, get_executable_dir  # 导入路径辅助函数
 
-# 导入主应用程序类
-from app import RPGTranslatorApp
+from core import update_install
 
 def setup_logging():
     """配置全局日志记录。"""
@@ -61,6 +59,7 @@ def _run_tool_mode(argv):
     """Run a source tool in an isolated child process before creating Tk."""
     if len(argv) < 4 or argv[1] != "--run-tool":
         return None
+    from core.tools.manager import run_tool_host
     try:
         return run_tool_host(argv[2], argv[3], argv[4:])
     except SystemExit as exc:
@@ -76,6 +75,23 @@ if __name__ == "__main__":
     tool_exit_code = _run_tool_mode(sys.argv)
     if tool_exit_code is not None:
         sys.exit(tool_exit_code)
+    installation_lock = None
+    if getattr(sys, "frozen", False):
+        try:
+            if not os.environ.get("WINDY_UPDATE_TASK"):
+                pending = update_install.pending_update(get_executable_dir())
+                if pending:
+                    workspace, task = pending
+                    if update_install.process_alive(task.get("helperPid", -1)):
+                        raise update_install.InstallError("正在完成更新，请稍候。")
+                    update_install.start_helper(workspace, recover=True)
+                    sys.exit(0)
+            installation_lock = update_install.InstallationLock(get_executable_dir())
+        except Exception as error:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, str(error), "WindyTranslator", 0x10)
+            sys.exit(1)
+    from app import RPGTranslatorApp
     # 配置日志
     setup_logging()
 
@@ -137,6 +153,13 @@ if __name__ == "__main__":
         pass
 
     # 启动 Tkinter 事件循环
+    def acknowledge_update():
+        try:
+            update_install.acknowledge_startup(app.build_info.get("applicationBuildId", ""))
+        except Exception:
+            logging.exception("确认更新启动失败")
+            root.destroy()
+    root.after_idle(acknowledge_update)
     logging.info("启动 Tkinter 主事件循环...")
     try:
         root.mainloop()

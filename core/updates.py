@@ -17,11 +17,11 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 
 
-DEFAULT_SITE_URL = "https://viprpg-zh-archive.q578235562.workers.dev"
+DEFAULT_SITE_URL = "https://staging.viprpg.org"
 TOOL = "windy-translator"
 CHANNEL = "stable"
 TARGET = "windows-x64"
-MAX_PACKAGE_BYTES = 100_000_000
+MAX_PACKAGE_BYTES = 95_000_000
 MAX_MANIFEST_BYTES = 256 * 1024
 log = logging.getLogger(__name__)
 
@@ -53,13 +53,13 @@ def load_build_info():
     return {"version": f"{version}（源码）", "applicationBuildId": "", "target": TARGET}
 
 
-def _https_url(value):
+def _https_url(value, *, allow_fragment=False):
     if not isinstance(value, str) or not value or len(value) > 4096 or re.search(r"[\s\\\x00-\x1f\x7f]", value):
         raise UpdateError("网站地址必须是有效的 HTTPS 地址。")
     try:
         parsed = urlsplit(value)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
-                or parsed.password is not None or parsed.fragment):
+                or parsed.password is not None or (parsed.fragment and not allow_fragment)):
             raise ValueError()
         port = parsed.port or 443
     except ValueError as error:
@@ -77,8 +77,8 @@ def normalize_site_url(value):
     return f"https://{parsed.netloc.lower()}"
 
 
-def _site_link(value, site_url):
-    _, origin = _https_url(value)
+def _site_link(value, site_url, *, allow_fragment=False):
+    _, origin = _https_url(value, allow_fragment=allow_fragment)
     _, expected = _https_url(site_url)
     if origin != expected:
         raise UpdateError("更新信息包含其他网站的链接，已停止处理。")
@@ -140,6 +140,7 @@ class Artifact:
     filename: str
     size: int
     sha256: str
+    build_id: str
 
 
 @dataclass(frozen=True)
@@ -170,7 +171,7 @@ def parse_manifest(data, site_url, build_id=""):
     release_id = _text(data, "releaseId")
     sequence = _number(data, "releaseSequence")
     version = _text(data, "version")
-    notes_url = _site_link(_text(data, "notesUrl", 4096), site_url)
+    notes_url = _site_link(_text(data, "notesUrl", 4096), site_url, allow_fragment=True)
     published_at = _text(data, "publishedAt", 80)
     notes = data.get("notes", "")
     if not isinstance(notes, str) or len(notes) > 60_000:
@@ -184,12 +185,13 @@ def parse_manifest(data, site_url, build_id=""):
             or re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", filename.split(".")[0])):
         raise UpdateError("更新包文件名无效。")
     size = _number(raw, "sizeBytes")
-    if size >= MAX_PACKAGE_BYTES:
-        raise UpdateError("此更新包超过客户端支持的 100 MB 上限。")
+    if size > MAX_PACKAGE_BYTES:
+        raise UpdateError("此更新包超过客户端支持的 95 MB 上限。")
     sha256 = _text(raw, "sha256", 64).lower()
     if not re.fullmatch(r"[0-9a-f]{64}", sha256):
         raise UpdateError("更新包缺少有效的 SHA-256 校验信息。")
-    artifact = Artifact(_text(raw, "id"), _site_link(_text(raw, "url", 4096), site_url), filename, size, sha256)
+    artifact = Artifact(_text(raw, "id"), _site_link(_text(raw, "url", 4096), site_url), filename, size, sha256,
+                        _text(raw, "applicationBuildId", 200))
     comparison, installed_version = "unknown", ""
     installed = data.get("installedRelease")
     if installed is not None:
@@ -232,7 +234,7 @@ def check_update(site_url, build_id="", cancel=None):
     return parse_manifest(data, site_url, build_id)
 
 
-def download_update(info, destination, cancel=None, progress=None, build_id=""):
+def download_update(info, destination, cancel=None, progress=None, build_id="", phase=None):
     if info.status != "available" or info.artifact is None:
         raise UpdateError("请先检查并选择可用的更新版本。")
     # Recheck withdrawal and recommendation changes before opening a local file.
@@ -273,6 +275,8 @@ def download_update(info, destination, cancel=None, progress=None, build_id=""):
                         progress(received, artifact.size)
                         last_progress = time.monotonic()
             _cancelled(cancel)
+            if phase:
+                phase()
             if received != artifact.size or checksum.hexdigest() != artifact.sha256:
                 raise UpdateError("下载文件不完整或 SHA-256 校验失败，请重新下载。")
             if not zipfile.is_zipfile(temporary):

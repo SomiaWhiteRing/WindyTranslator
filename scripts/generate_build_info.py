@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import uuid
+from urllib.parse import urlsplit
 
 
 def write_build_info(repo_root):
@@ -25,8 +26,13 @@ def write_build_info(repo_root):
         identity = f"windy:{commit}:{os.environ['GITHUB_RUN_ID']}.{os.environ['GITHUB_RUN_ATTEMPT']}"
     else:
         identity = f"windy:local:{uuid.uuid4().hex}"
+    site = os.environ.get("WINDY_UPDATE_SITE", "https://staging.viprpg.org").rstrip("/")
+    url = urlsplit(site)
+    if url.scheme != "https" or not url.hostname or url.path or url.query or url.fragment or url.username or url.password:
+        raise ValueError("WINDY_UPDATE_SITE must be an HTTPS origin")
     data = {"schemaVersion": 1, "version": heading[2:], "applicationBuildId": identity,
-            "commit": commit, "target": "windows-x64", "updaterProtocol": 1}
+            "commit": commit, "target": "windows-x64", "updaterProtocol": 1,
+            "autoUpdateProtocol": 1, "updateSite": site}
     destination = repo_root / "build" / "build-info.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

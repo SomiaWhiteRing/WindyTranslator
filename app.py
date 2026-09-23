@@ -128,6 +128,34 @@ class RPGTranslatorApp:
     def show_updates(self):
         self.update_controller.show()
 
+    def update_blocker(self, update_dialog):
+        if self.is_processing or (self.current_task_thread and self.current_task_thread.is_alive()):
+            return "请先等待当前任务完成，再更新 WindyTranslator。"
+        manager = self.main_window.tools_panel.manager
+        if any(tool.process.poll() is None for tool in manager.running.values()):
+            return "请先关闭运行中的工具，再更新 WindyTranslator。"
+        font = self.main_window.font_panel
+        if font._loading or font._font_apply_active:
+            return "请先等待字体操作完成，再更新 WindyTranslator。"
+        def open_windows(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, tk.Toplevel) and child is not update_dialog:
+                    return True
+                if child is not update_dialog and open_windows(child):
+                    return True
+            return False
+        if open_windows(self.root):
+            return "请先保存并关闭其他编辑窗口，再更新 WindyTranslator。"
+        return ""
+
+    def exit_for_update(self):
+        if not self.update_controller.updating:
+            raise RuntimeError("没有正在准备的更新")
+        self.main_window.font_panel.close()
+        self.thread_pool.shutdown(wait=True)
+        self.update_controller.close()
+        self.root.destroy()
+
     def browse_game_path(self):
         """弹出目录选择对话框，更新游戏路径。"""
         path = filedialog.askdirectory(title="选择游戏目录", parent=self.root)
@@ -161,6 +189,8 @@ class RPGTranslatorApp:
             task_id_for_callback (str, optional): 用于回调的唯一任务 ID，通常用于编辑器实例。
             task_payload (object, optional): 独立工具任务需要的结构化参数。
         """
+        if self.update_controller.updating:
+            return
         if self.is_processing:
             self.log_message("请等待当前操作完成。", "error")
             parent_window_for_msg = self.root
@@ -318,12 +348,15 @@ class RPGTranslatorApp:
         try:
             # 更新当前选择的模式
             self.config['selected_mode'] = self.main_window.get_current_mode()
-            self.config_manager.save_config(self.config)
+            if not self.config_manager.save_config(self.config):
+                return False
             self.log_message("配置已保存。", "success")
+            return True
         except Exception as e:
             log.exception("保存配置失败。")
             self.log_message(f"保存配置失败: {e}", "error")
             messagebox.showerror("保存失败", f"无法保存配置文件。\n错误: {e}", parent=self.root)
+            return False
 
     def completion_notifications_enabled(self):
         """返回是否启用任务完成提醒。"""
@@ -790,6 +823,8 @@ class RPGTranslatorApp:
 
     def _on_close(self):
         """应用程序关闭时的处理。"""
+        if self.update_controller.updating:
+            return
         log.info("应用程序正在关闭...")
         if self.is_processing:
             if messagebox.askyesno("确认退出", "有后台任务正在运行，确定要强制退出吗？", parent=self.root):
