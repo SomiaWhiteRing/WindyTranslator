@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core.update_install import MANIFEST, digest, extract_package, load_manifest, managed_name, verify_files, write_json
+from core.update_install import HELPER, HELPER_PATH, MANIFEST, digest, extract_package, load_manifest, managed_name, verify_files, write_json
 
 
 def main():
@@ -30,6 +30,8 @@ def main():
             extract_package(root, staged, build_id, lambda *_: None)
         print(f"Verified distribution ZIP: {root.stat().st_size} bytes")
         return
+    if not (root / HELPER_PATH).is_file() or (root / HELPER).exists():
+        raise ValueError(f"Updater must be packaged only at {HELPER_PATH}")
     build = json.loads((root / "_internal/build-info.json").read_text(encoding="utf-8"))
     files = {}
     for path in sorted(root.rglob("*")):

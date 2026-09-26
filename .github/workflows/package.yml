@@ -52,7 +52,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Application build failed." }
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name WindyUpdater --paths . scripts/update_helper.py
           if ($LASTEXITCODE -ne 0) { throw "Updater build failed." }
-          Copy-Item -LiteralPath "dist/WindyUpdater.exe" -Destination "dist/$env:APP_NAME/WindyUpdater.exe"
+          Copy-Item -LiteralPath "dist/WindyUpdater.exe" -Destination "dist/$env:APP_NAME/_internal/WindyUpdater.exe"
           Copy-Item -Path "tools" -Destination "dist/$env:APP_NAME/tools" -Recurse -Force
           python scripts/package_manifest.py "dist/$env:APP_NAME"
           if ($LASTEXITCODE -ne 0) { throw "Distribution verification failed." }

@@ -71,7 +71,9 @@ PyInstaller 自动生成 `_internal/build-info.json`，含 schemaVersion、versi
 
 网站浏览器读取元数据用于填表，服务器通过 R2 范围读取 ZIP 索引及小型 build-info.json，再核对登记身份；同样用于恢复确认和发布校验。重复构建定位原记录，不产生第二个发布身份。旧包仍可登记历史映射，但没有自动安装协议与文件清单的客户端须先手动安装完整新版。
 
-CI 在主程序外构建独立的 onefile/windowed `WindyUpdater.exe`，复制到发行根目录；全部程序文件完成后生成 `package-files.json`。清单包括 build ID 以及每个发行文件的路径、长度、SHA-256，排除清单自身。构建和客户端均校验清单。ZIP 必须包含一个 `WindyTranslator/` 根目录，不使用 GitHub artifact 外层 ZIP。
+CI 在主程序外构建独立的 onefile/windowed `WindyUpdater.exe`，复制到发行目录的 `_internal/WindyUpdater.exe`，不再放在根目录；全部程序文件完成后生成 `package-files.json`，生成时检查助手位置。清单包括 build ID 以及每个发行文件的路径、长度、SHA-256，排除清单自身。构建和客户端均校验清单。ZIP 必须包含一个 `WindyTranslator/` 根目录，不使用 GitHub artifact 外层 ZIP。
+
+更新时将助手复制到 `.windy-update-*` 临时目录后启动，保持其独立于被替换文件。新版兼容旧布局的文件清单，以便校验、备份和恢复；旧版客户端要求更新包根目录存在助手，无法自动安装新布局，须先手动安装一次完整新版。手动安装请使用新目录，避免覆盖解压留下旧的根目录助手。
 
 每次下载前重新检查推荐版本，确认 release ID、序号与文件身份未变化；随后校验原始字节长度、SHA-256、ZIP 结构及包内 build ID。主程序和更新助手仅管理 EXE、_internal 与清单中的 tools 文件；保护 app_config.json、Works、dict、logs、自装工具和额外文件。已修改的受管文件或新文件与额外文件冲突时停止。不同大小写路径、路径越界、链接、重复条目和超过 2 GiB 的解压内容均拒绝。
 

@@ -18,6 +18,7 @@ import zipfile
 MANIFEST = "package-files.json"
 PROGRAM = "WindyTranslator.exe"
 HELPER = "WindyUpdater.exe"
+HELPER_PATH = "_internal/" + HELPER
 MAX_UNPACKED = 2 * 1024**3
 MAX_FILES = 40000
 MAX_MANIFEST = 8 * 1024**2
@@ -102,7 +103,9 @@ def load_manifest(root):
         parents = PurePosixPath(name).parents
         if any(str(parent).casefold() in seen for parent in parents if str(parent) != "."):
             raise InstallError("安装包文件与目录冲突。")
-    if total > MAX_UNPACKED or not {PROGRAM, HELPER, "_internal/build-info.json"}.issubset(files):
+    # Accept historical manifests for verification, backup and recovery.
+    if (total > MAX_UNPACKED or not {PROGRAM, "_internal/build-info.json"}.issubset(files)
+            or not any(name in files for name in (HELPER_PATH, HELPER))):
         raise InstallError("安装包文件不完整或过大。")
     build = read_json(contained(root, "_internal/build-info.json"), 16384)
     if build.get("autoUpdateProtocol") != 1 or data.get("applicationBuildId") != build.get("applicationBuildId"):
@@ -199,7 +202,8 @@ def prepare_update(install, info, build_id, download, progress):
         preflight(install, staged)
         progress(98, "正在准备重启…")
         helper = workspace / HELPER
-        shutil.copy2(contained(install, HELPER), helper)
+        helper_name = HELPER_PATH if HELPER_PATH in old["files"] else HELPER
+        shutil.copy2(contained(install, helper_name), helper)
         task = {"schemaVersion": 1, "install": str(install), "parentPid": os.getpid(),
                 "buildId": info.artifact.build_id, "state": "prepared"}
         write_json(workspace / "task.json", task)
