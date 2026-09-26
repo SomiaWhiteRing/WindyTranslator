@@ -41,7 +41,7 @@ WindyTranslator 默认在启动时检查一次更新，仅当网站发布序号�
 
 GitHub 自动构建的完整 ZIP 含构建身份、发行文件清单和独立更新助手。管理员下载 ZIP 后上传网站，后台自动识别，无需手工填写构建标识。首个支持自动安装的版本需要手动安装一次。详情见[网站更新接口说明](docs/website-updates.md)。
 
-当前构建统一连接 `https://staging.viprpg.org`；地址由 CI 的 `WINDY_UPDATE_SITE` 写入安装包，不在普通窗口中编辑，不回退 GitHub。正式域名须另行核实后配置。
+当前构建统一连接 `https://viprpg.org`；地址由 CI 的 `WINDY_UPDATE_SITE` 写入安装包，不在普通窗口中编辑，不回退 GitHub。此前指向预生产的旧安装包需手动安装一次新版，之后由正式站提供更新。
 
 ## 版本与自动发布
 

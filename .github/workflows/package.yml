@@ -23,7 +23,7 @@ jobs:
       SPEC_FILE: WindyTranslator.spec
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
-      WINDY_UPDATE_SITE: "https://staging.viprpg.org"
+      WINDY_UPDATE_SITE: "https://viprpg.org"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

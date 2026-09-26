@@ -26,7 +26,7 @@ def write_build_info(repo_root):
         identity = f"windy:{commit}:{os.environ['GITHUB_RUN_ID']}.{os.environ['GITHUB_RUN_ATTEMPT']}"
     else:
         identity = f"windy:local:{uuid.uuid4().hex}"
-    site = os.environ.get("WINDY_UPDATE_SITE", "https://staging.viprpg.org").rstrip("/")
+    site = os.environ.get("WINDY_UPDATE_SITE", "https://viprpg.org").rstrip("/")
     url = urlsplit(site)
     if url.scheme != "https" or not url.hostname or url.path or url.query or url.fragment or url.username or url.password:
         raise ValueError("WINDY_UPDATE_SITE must be an HTTPS origin")

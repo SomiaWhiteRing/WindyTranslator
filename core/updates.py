@@ -17,7 +17,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 
 
-DEFAULT_SITE_URL = "https://staging.viprpg.org"
+DEFAULT_SITE_URL = "https://viprpg.org"
 TOOL = "windy-translator"
 CHANNEL = "stable"
 TARGET = "windows-x64"

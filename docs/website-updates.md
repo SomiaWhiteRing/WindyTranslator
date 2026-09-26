@@ -1,6 +1,6 @@
 # 本站更新接口与客户端接入
 
-网站管理软件发布，GitHub 仅负责构建。管理员从 GitHub 下载原始 ZIP，再上传网站并发布；网站自动读取包身份。客户端检查、校验、锁定主窗口、自动替换并重启。当前开发构建连接 https://staging.viprpg.org，由构建变量 WINDY_UPDATE_SITE 写入包内 updateSite；不使用旧 Workers.dev 地址，普通更新窗口不提供地址编辑。
+网站管理软件发布，GitHub 仅负责构建。管理员从 GitHub 下载原始 ZIP，再上传网站并发布；网站自动读取包身份。客户端检查、校验、锁定主窗口、自动替换并重启。当前默认构建连接 https://viprpg.org，由构建变量 WINDY_UPDATE_SITE 写入包内 updateSite；普通更新窗口不提供地址编辑。预生产调试可在单独构建时显式设置 WINDY_UPDATE_SITE=https://staging.viprpg.org。此前指向预生产的旧安装包需手动安装一次新版；正式站仍须上传软件包并发布频道后才能提供更新。
 
 ## 请求
 
