@@ -179,7 +179,10 @@ def _call_world_dict_model_with_retry_limit(request_callable, stage_desc, messag
     last_error = None
     wait_seconds = DEFAULT_RETRY_WAIT
     max_retries = max(1, _coerce_int(max_retries, MAX_WORLD_DICT_RETRIES, minimum=1))
+    stop_event = getattr(message_queue, "stop_event", None)
     for attempt in range(1, max_retries + 1):
+        if stop_event is not None and stop_event.is_set():
+            return False, None, "用户已请求停止任务"
         success, response_text, error_message = request_callable()
         if success:
             if attempt > 1:
@@ -198,7 +201,11 @@ def _call_world_dict_model_with_retry_limit(request_callable, stage_desc, messag
             reason_label = "配额限制" if is_rate_limited else "临时 API 错误"
             message_queue.put(('log', ('warning', f"{stage_desc} 因{reason_label}暂停 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{max_retries})...")))
             log.warning(f"{stage_desc} 命中{reason_label}，等待 {wait_seconds:.1f} 秒后重试 (尝试 {attempt}/{max_retries})。错误: {last_error}")
-            time.sleep(wait_seconds)
+            if stop_event is not None:
+                if stop_event.wait(wait_seconds):
+                    return False, None, "用户已请求停止任务"
+            else:
+                time.sleep(wait_seconds)
             wait_seconds = min(wait_seconds * 2, MAX_RETRY_WAIT)
             continue
         break

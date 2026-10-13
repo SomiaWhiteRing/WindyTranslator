@@ -20,11 +20,11 @@ class TranslationPaused(RuntimeError):
 
 
 class TranslationSession:
-    def __init__(self, config, diagnostics_path=None):
+    def __init__(self, config, diagnostics_path=None, stop_event=None):
         self.config = config
         self.lock = threading.Lock()
-        self.stop = threading.Event()
-        self.reason = ""
+        self.stop = stop_event if stop_event is not None else threading.Event()
+        self._reason = ""
         self.stats = Counter()
         self.bad_streak = 0
         self.json_format = True
@@ -48,6 +48,14 @@ class TranslationSession:
                     except (ValueError, KeyError, TypeError):
                         # A crash may leave only the final journal line incomplete.
                         continue
+
+    @property
+    def reason(self):
+        return self._reason or ("用户已请求停止任务，成功译文已保存" if self.stop.is_set() else "")
+
+    @reason.setter
+    def reason(self, value):
+        self._reason = value
 
     def save_fragment(self, key, text):
         with self.lock:
@@ -107,7 +115,7 @@ class TranslationSession:
                 self.bad_streak = 0
             elif response.error_kind != "unsupported_format":
                 self.bad_streak += 1
-            if self.bad_streak >= int(self.config.get("max_consecutive_failures", 12)):
+            if self.bad_streak >= int(self.config.get("max_consecutive_failures", 12)) and not self.stop.is_set():
                 self.reason = "连续请求未取得有效译文，已暂停以避免继续消耗额度；检查接口或降低批量后续跑"
                 self.stop.set()
             row = dict(run_id=self.run_id, request=request_number, request_id=response.request_id,
@@ -235,7 +243,8 @@ def translate_batch(items, context, characters, entities, client, config, file_n
         messages = protocol.build_messages(pending, transports, context, characters, entities, config, feedback)
         request_number = session.begin_request()
         request_budget["used"] += 1
-        kwargs = dict(temperature=config.get("temperature", 0.7), timeout=config.get("request_timeout", 120), stream=session.stream)
+        kwargs = dict(temperature=config.get("temperature", 0.7), timeout=config.get("request_timeout", 120),
+                      stream=session.stream, cancel_event=session.stop)
         if session.json_format:
             kwargs["response_format"] = {"type": "json_object"}
         if config.get("reasoning_effort"):
@@ -249,7 +258,7 @@ def translate_batch(items, context, characters, entities, client, config, file_n
                            request_number, file_name, len(pending), 0, {}, pending, stream=kwargs["stream"])
             session.pause("接口调用发生未分类异常，已停止后续请求")
             raise
-        if response.error_kind in ("authentication", "quota", "configuration"):
+        if response.error_kind in ("authentication", "quota", "configuration", "cancelled"):
             session.record(response, request_number, file_name, len(pending), 0, {}, stream=kwargs["stream"])
             session.pause(f"接口错误 ({response.error_kind}): {response.error}")
             raise TranslationPaused(session.reason)
@@ -297,7 +306,8 @@ def translate_batch(items, context, characters, entities, client, config, file_n
                 remainder.append(item)
         # Normal mode accepts a batch together; the experimental mode commits
         # its successful subset before sending only the failed items again.
-        accepted = successes if retry_failed_only or not remainder else {}
+        # On shutdown retain valid in-flight results even if their batch is incomplete.
+        accepted = successes if retry_failed_only or not remainder or session.stop.is_set() else {}
         session.record(response, request_number, file_name, len(pending), len(accepted), issues, pending, stream=kwargs["stream"])
         completed.update(accepted)
         if accepted and checkpoint:

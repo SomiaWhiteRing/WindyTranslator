@@ -123,6 +123,9 @@ class DeepSeekClient:
 
         timeout = kwargs.pop("timeout", 120)
         stream = kwargs.pop("stream", False)
+        cancel_event = kwargs.pop("cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            return CompletionResult(error_kind="cancelled", error="任务已停止")
         thinking_mode = kwargs.pop("thinking_mode", "auto")
         try:
             options = translation_thinking_options(model_name, thinking_mode, kwargs.get("reasoning_effort"))
@@ -147,6 +150,13 @@ class DeepSeekClient:
                     try:
                         for line in response.iter_lines():
                             lines.append(line)
+                            if cancel_event is not None and cancel_event.is_set():
+                                partial = _read_unexpected_stream("\n".join(lines), self.api_key)
+                                return CompletionResult(
+                                    error_kind="cancelled", error="任务已停止，流式接收已关闭",
+                                    usage=partial.usage, request_id=partial.request_id,
+                                    response_model=partial.response_model, status_code=partial.status_code,
+                                )
                     except httpx.TransportError:
                         # Preserve any usage received before a disconnected stream.
                         pass

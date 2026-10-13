@@ -334,7 +334,9 @@ def post_process_translation(text, original_text, apply_gbk_compatibility=True, 
                 
         final_processed_lines.append(current_p_line)
         
-    processed_text = '\n'.join(final_processed_lines)
+    processed_text = control_tokens.restore_blank_control_lines(
+        original_text, '\n'.join(final_processed_lines)
+    )
 
     # log.debug(f"Post-processed: '{text[:50]}...' -> '{processed_text[:50]}...'")
     return processed_text

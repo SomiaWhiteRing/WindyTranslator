@@ -79,6 +79,10 @@ def run_easy_flow(
 
     try:
         for i, step_info in enumerate(steps):
+            stop_event = getattr(message_queue, "stop_event", None)
+            if stop_event is not None and stop_event.is_set():
+                message_queue.put(("status", "轻松模式已停止"))
+                return False
             current_step = i + 1
             step_name = step_info["name"]
             step_func = step_info["func"]

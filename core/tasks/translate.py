@@ -6,7 +6,7 @@ import re
 import time
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed # 使用 as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, CancelledError
 from core.api_clients import deepseek
 from core.utils import file_system, text_processing, default_database, control_tokens
 from core.utils.engine_detection import detect_game_engine
@@ -216,6 +216,17 @@ def _discard_translation_cache_if_dictionaries_changed(translated_json_path, dic
 
 
 # --- 主任务函数 ---
+def _completed_futures(futures, stop_event):
+    pending = set(futures)
+    while pending:
+        if stop_event.is_set():
+            for future in pending:
+                future.cancel()
+        finished, _ = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+        pending.difference_update(finished)
+        yield from finished
+
+
 def run_translate(game_path, works_dir, translate_config, world_dict_config, message_queue):
     start_time = time.time()
     character_dictionary = [] 
@@ -554,7 +565,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         processed_items_count = 0   # 仅统计需要翻译的条目数（不含预填）
 
         session = TranslationSession(
-            current_translate_config, os.path.join(translated_dir, "translation_requests.jsonl")
+            current_translate_config, os.path.join(translated_dir, "translation_requests.jsonl"),
+            stop_event=getattr(message_queue, "stop_event", None),
         )
         current_translate_config["_translation_session"] = session
         checkpoint_lock = threading.Lock()
@@ -602,7 +614,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             last_status_update_time = time.time()
             status_update_interval_sec = 0.5
 
-            for future in as_completed(future_to_task_info):
+            for future in _completed_futures(future_to_task_info, session.stop):
                 task_info_for_this_future = future_to_task_info[future]
                 source_file_of_this_batch = task_info_for_this_future["source_file"]
                 num_items_in_this_batch = len(task_info_for_this_future["batch_items"])
@@ -612,7 +624,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     processed_file_name, batch_result_dict_from_worker = future.result()
                     
                     checkpoint(processed_file_name, batch_result_dict_from_worker)
-                except TranslationPaused:
+                except (TranslationPaused, CancelledError):
                     # Successful records have already been checkpointed by the worker.
                     continue
                 except Exception as exc:

@@ -256,6 +256,25 @@ def validate_restored_text(
     return True, ""
 
 
+def restore_blank_control_lines(original: str, translated: str) -> str:
+    """Restore source layout only on blank lines with identical control tokens."""
+    source_lines, lines = original.split("\n"), translated.split("\n")
+    # Only restore existing lines. The validator still rejects missing/extra lines;
+    # final empty suffixes are separately restored by the translation runtime.
+    for index, (source, target) in enumerate(zip(source_lines, lines)):
+        if source == target:
+            continue
+        source_tokens = list(iter_token_occurrences(source, include_quotes=False))
+        if not source_tokens:
+            continue
+        target_tokens = list(iter_token_occurrences(target, include_quotes=False))
+        if [token.literal for token in source_tokens] != [token.literal for token in target_tokens]:
+            continue
+        if not strip_token_literals(source).strip() and not strip_token_literals(target).strip():
+            lines[index] = source
+    return "\n".join(lines)
+
+
 def iter_token_occurrences(
     text: str,
     profile: Optional[ControlCodeProfile] = None,

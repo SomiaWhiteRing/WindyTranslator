@@ -27,6 +27,7 @@ from ui.dict_editor import DictEditorWindow
 from core.utils.file_system import get_executable_dir, ensure_dir_exists  # 导入路径辅助函数
 from core.utils.engine_detection import detect_game_engine
 from core.utils import windows_notifications
+from core.utils.task_control import exclusive_work, WorkBusyError
 from core.updates import load_build_info
 from ui.update_dialog import UpdateController
 
@@ -50,8 +51,9 @@ FAILURE_STATUS_KEYWORDS = ("失败", "中止", "错误")
 class TaskMessageProxy:
     """Forward task messages while tracking whether the task reported a problem."""
 
-    def __init__(self, target_queue):
+    def __init__(self, target_queue, stop_event=None):
         self.target_queue = target_queue
+        self.stop_event = stop_event if stop_event is not None else threading.Event()
         self.has_problem = False
         self._lock = threading.Lock()
 
@@ -102,7 +104,9 @@ class RPGTranslatorApp:
         self.game_path = tk.StringVar()
         self.is_processing = False # 标记是否有后台任务在运行
         self.current_task_thread = None # 引用当前运行的任务线程 (可选)
-        self._stop_requested = False # 用于请求停止当前任务 (可选)
+        self._task_stop = threading.Event()
+        self._closing = False
+        self._closed = False
 
         # --- 后台任务处理 ---
         self.message_queue = queue.Queue()
@@ -154,6 +158,7 @@ class RPGTranslatorApp:
         self.main_window.font_panel.close()
         self.thread_pool.shutdown(wait=True)
         self.update_controller.close()
+        self._closing = self._closed = True
         self.root.destroy()
 
     def browse_game_path(self):
@@ -189,9 +194,9 @@ class RPGTranslatorApp:
             task_id_for_callback (str, optional): 用于回调的唯一任务 ID，通常用于编辑器实例。
             task_payload (object, optional): 独立工具任务需要的结构化参数。
         """
-        if self.update_controller.updating:
+        if self._closing or self.update_controller.updating:
             return
-        if self.is_processing:
+        if self.is_processing or self.current_task_thread is not None:
             self.log_message("请等待当前操作完成。", "error")
             parent_window_for_msg = self.root
             # 如果此任务是由编辑器发起的，错误提示应相对于编辑器
@@ -453,8 +458,8 @@ class RPGTranslatorApp:
         """在后台线程中运行给定的任务函数。"""
         self.set_processing_state(True)
         self.update_status(f"正在执行: {task_name}...")
-        self._stop_requested = False # 重置停止标志
-        task_message_proxy = TaskMessageProxy(self.message_queue)
+        self._task_stop = threading.Event()
+        task_message_proxy = TaskMessageProxy(self.message_queue, self._task_stop)
         tracked_args = self._replace_message_queue_arg(args, task_message_proxy)
 
         # 从 kwargs 中提取 task_id_for_callback，以便在异常时使用
@@ -465,9 +470,17 @@ class RPGTranslatorApp:
             task_start_time = time.time()
             task_succeeded = False
             try:
-                task_result = task_func(*tracked_args, **kwargs)
-                task_succeeded = bool(task_result)
+                with exclusive_work(args[0], self.works_dir):
+                    if not self._task_stop.is_set():
+                        task_result = task_func(*tracked_args, **kwargs)
+                        task_succeeded = bool(task_result)
                 # 注意：任务成功完成的消息由任务自身通过队列发送 ("success", ...)
+            except WorkBusyError as e:
+                task_message_proxy.has_problem = True
+                self.message_queue.put(("error", str(e)))
+                self.message_queue.put(("status", "作品任务未启动"))
+                if task_id_from_kwargs_for_exception_handling:
+                    self.message_queue.put(("done", (task_id_from_kwargs_for_exception_handling, (False, str(e)))))
             except Exception as e:
                 task_message_proxy.has_problem = True
                 # 捕获任务函数本身抛出的未处理异常（理论上不应发生）
@@ -476,39 +489,37 @@ class RPGTranslatorApp:
                 self.message_queue.put(("error", f"任务 '{task_name}' 失败: {traceback.format_exc()}")) # 发送完整 traceback
                 self.message_queue.put(("status", f"{task_name} 执行失败"))
                 # --- 如果任务因异常而终止，并且它有关联的回调ID，则尝试通知编辑器 ---
-                if task_id_from_kwargs_for_exception_handling and task_id_from_kwargs_for_exception_handling in self._editor_callbacks_registry:
-                    editor_to_notify = self._editor_callbacks_registry.pop(task_id_from_kwargs_for_exception_handling, None)
-                    if editor_to_notify and editor_to_notify.winfo_exists():
-                        error_message_for_callback = f"任务 '{task_name}' 执行时发生意外错误: {e}"
-                        log.info(f"任务 {task_id_from_kwargs_for_exception_handling} (异常结束) 将通知编辑器。消息: {error_message_for_callback}")
-                        self.root.after(0, lambda w=editor_to_notify, msg=error_message_for_callback: w.handle_apply_base_dict_result(False, msg))
-                    elif editor_to_notify: # 编辑器存在但窗口已关闭
-                        log.info(f"任务 {task_id_from_kwargs_for_exception_handling} (异常结束) 的编辑器回调被跳过，因为窗口已关闭。")
+                if task_id_from_kwargs_for_exception_handling:
+                    error_message_for_callback = f"任务 '{task_name}' 执行时发生意外错误: {e}"
+                    self.message_queue.put(("done", (task_id_from_kwargs_for_exception_handling, (False, error_message_for_callback))))
             finally:
                 elapsed = time.time() - task_start_time
                 log.info(f"任务 '{task_name}' (ID: {task_id_from_kwargs_for_exception_handling if task_id_from_kwargs_for_exception_handling else 'N/A'}) 线程执行完毕，耗时: {elapsed:.2f} 秒。")
-                if task_name == 'apply_wolf_fonts' and hasattr(self.main_window, "font_panel"):
-                    self.root.after(0, self.main_window.font_panel.finish_apply)
-                # 确保发送 'done' 信号，即使任务内部忘记发送或出错中断
-                # 但为了避免重复发送，最好还是依赖任务自身发送
-                # self.message_queue.put(("done", None))
-                # 在主线程中更新状态
-                self.root.after(0, lambda: self.set_processing_state(False))
-                auto_import_pending = task_name == 'release_json' and task_succeeded and self._should_auto_import_after_release()
-                if self._should_emit_completion_notification(task_name, mode, task_succeeded) and not auto_import_pending:
-                    self.root.after(
-                        50,
-                        lambda problem=task_message_proxy.has_problem: self._maybe_send_completion_notification(problem)
-                    )
-                if auto_import_pending:
-                    release_game_path = args[0] if args else None
-                    self.root.after(100, lambda gp=release_game_path, m=mode: self._auto_import_after_release(gp, m))
-                # 移除对线程的引用
-                self.current_task_thread = None
+                # All Tk calls run on the main thread, after the work lock is released.
+                self.message_queue.put(("task_finished", (
+                    task_name, mode, task_succeeded, task_message_proxy.has_problem, args[0],
+                )))
 
         # 启动线程
         self.current_task_thread = threading.Thread(target=wrapper, daemon=True)
         self.current_task_thread.start()
+
+    def _finish_task(self, task_name, mode, task_succeeded, has_problem, game_path):
+        # A queued completion can arrive just before the worker returns.
+        if self.current_task_thread and self.current_task_thread.is_alive():
+            self.root.after(10, lambda: self._finish_task(task_name, mode, task_succeeded, has_problem, game_path))
+            return
+        self.current_task_thread = None
+        if self._closing:
+            return
+        if task_name == 'apply_wolf_fonts' and hasattr(self.main_window, "font_panel"):
+            self.main_window.font_panel.finish_apply()
+        self.set_processing_state(False)
+        auto_import_pending = task_name == 'release_json' and task_succeeded and self._should_auto_import_after_release()
+        if self._should_emit_completion_notification(task_name, mode, task_succeeded) and not auto_import_pending:
+            self.root.after(50, lambda: self._maybe_send_completion_notification(has_problem))
+        if auto_import_pending:
+            self.root.after(100, lambda: self._auto_import_after_release(game_path, mode))
 
     def _replace_message_queue_arg(self, args, replacement_queue):
         """Replace the task's message queue argument with a tracking proxy."""
@@ -617,6 +628,10 @@ class RPGTranslatorApp:
                 callback_success = False
                 callback_message = ""
                 
+                if msg_type == "task_finished":
+                    self._finish_task(*content)
+                    self.message_queue.task_done()
+                    continue
                 if msg_type == "done":
                     # 检查 content 是否是 (task_id, (success_bool, message_str)) 的格式
                     if isinstance(content, tuple) and len(content) == 2 and isinstance(content[0], str):
@@ -646,7 +661,7 @@ class RPGTranslatorApp:
                 elif msg_type == "log":
                     level, text = content
                     self.log_message(text, level)
-                elif msg_type == "status":
+                elif msg_type == "status" and not self._closing:
                     self.update_status(content)
                 elif msg_type == "success":
                     self.log_message(content, "success") # 在日志中也显示成功信息
@@ -697,7 +712,8 @@ class RPGTranslatorApp:
             log.exception(f"处理消息队列时出错: {e}")
         finally:
             # 无论如何，100ms 后再次检查队列
-            self.root.after(100, self._process_messages)
+            if not self._closed:
+                self.root.after(100, self._process_messages)
 
     def start_task_for_editor_callback(self, task_name, game_path, editor_instance):
         """
@@ -823,26 +839,29 @@ class RPGTranslatorApp:
 
     def _on_close(self):
         """应用程序关闭时的处理。"""
-        if self.update_controller.updating:
+        if self._closing or self.update_controller.updating:
             return
         log.info("应用程序正在关闭...")
-        if self.is_processing:
-            if messagebox.askyesno("确认退出", "有后台任务正在运行，确定要强制退出吗？", parent=self.root):
-                log.warning("用户强制退出，后台任务可能未完成。")
-                # 可以尝试更优雅地停止线程，但 Popen 启动的外部进程无法直接停止
-                # self._stop_requested = True # 设置停止标志 (需要任务支持)
-                # self.thread_pool.shutdown(wait=False) # 不等待线程结束
-                if hasattr(self.main_window, "font_panel"):
-                    self.main_window.font_panel.close()
-                self.update_controller.close()
-                self.root.destroy()
-            else:
-                return # 用户取消退出
+        if self.is_processing or self.current_task_thread is not None:
+            if not messagebox.askyesno("确认退出", "有后台任务正在运行，确定停止任务并退出吗？", parent=self.root):
+                return
+            log.info("用户请求停止任务，等待在途请求和结果保存后退出。")
         else:
-             # 尝试保存最后的配置
-             self.save_config()
-             if hasattr(self.main_window, "font_panel"):
-                 self.main_window.font_panel.close()
-             self.update_controller.close()
-             self.thread_pool.shutdown(wait=True) # 等待线程池关闭
-             self.root.destroy()
+            self.save_config()
+        self._closing = True
+        self._task_stop.set()
+        self.set_processing_state(True)
+        self.update_status("正在停止并保存…")
+        self._finish_close()
+
+    def _finish_close(self):
+        if self.current_task_thread and self.current_task_thread.is_alive():
+            self.root.after(100, self._finish_close)
+            return
+        self.current_task_thread = None
+        if hasattr(self.main_window, "font_panel"):
+            self.main_window.font_panel.close()
+        self.update_controller.close()
+        self.thread_pool.shutdown(wait=True)
+        self._closed = True
+        self.root.destroy()
