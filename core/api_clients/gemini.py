@@ -1,9 +1,5 @@
 # core/api_clients/gemini.py
 import logging
-from google import genai
-# **** 新增：导入 types 用于配置 ****
-from google.genai import types
-from google.api_core import exceptions as google_exceptions
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +21,8 @@ class GeminiClient:
             raise ValueError("API Key 不能为空。")
         self.api_key = api_key
         try:
+            from google import genai
+
             # **** 修改：创建 Client 实例 ****
             # 显式传递 api_key
             self.client = genai.Client(api_key=self.api_key)
@@ -56,6 +54,8 @@ class GeminiClient:
             return False, None, "模型名称不能为空。"
         if not prompt:
             return False, None, "Prompt (contents) 不能为空。"
+
+        from google.api_core import exceptions as google_exceptions
 
         # **** 修改：将所有可选配置合并到 config 字典中 ****
         api_config_params = {}

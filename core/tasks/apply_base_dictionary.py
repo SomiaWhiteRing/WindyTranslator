@@ -8,22 +8,21 @@ from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
-def _count_term_in_json_originals(json_path, term):
+def _load_json_originals(json_path):
     """
-    计算指定术语在 JSON 文件所有原文 Key 中出现的次数。
+    一次读取 JSON 中用于术语计数的原文，保持原有格式处理规则。
 
     Args:
         json_path (str): translation.json 文件路径。
-        term (str): 要搜索的术语。
 
     Returns:
-        int: 术语出现的总次数。
+        list: 原文字符串列表。
     """
-    count = 0
+    originals = []
     if not os.path.exists(json_path):
         log.warning(f"用于计数的 JSON 文件未找到: {json_path}")
         # 此函数内部不直接发消息给UI，由调用者决定如何处理
-        return 0
+        return originals
     try:
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -33,30 +32,30 @@ def _count_term_in_json_originals(json_path, term):
                 if isinstance(item, dict):
                     for original_text in item.keys():
                         if isinstance(original_text, str):
-                            count += original_text.count(term)
+                            originals.append(original_text)
                 elif isinstance(item, list):
                     for sub_item in item:
                         if isinstance(sub_item, str):
-                            count += sub_item.count(term)
+                            originals.append(sub_item)
                         elif isinstance(sub_item, dict):
                             for original_text in sub_item.keys():
                                 if isinstance(original_text, str):
-                                    count += original_text.count(term)
+                                    originals.append(original_text)
                 elif isinstance(item, str):
-                    count += item.count(term)
+                    originals.append(item)
         elif isinstance(data, list):
             for item in data:
                 if isinstance(item, str):
-                    count += item.count(term)
+                    originals.append(item)
                 elif isinstance(item, dict):
                     for original_text in item.keys():
                         if isinstance(original_text, str):
-                            count += original_text.count(term)
+                            originals.append(original_text)
 
     except Exception as e:
         log.exception(f"读取或解析 JSON 文件进行术语计数时出错 ({json_path}): {e}")
-        return 0 # 出错则返回0
-    return count
+        return []
+    return originals
 
 
 def _select_applicable_base_items(base_items, existing_originals, term_counter):
@@ -189,10 +188,20 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
             for item in game_char_data_list + game_entity_data_list
             if item.get('原文')
         }
+        original_texts = None
+        term_counts = {}
+        def count_term(term):
+            nonlocal original_texts
+            if original_texts is None:
+                original_texts = _load_json_originals(untranslated_json_path)
+            if term not in term_counts:
+                term_counts[term] = sum(text.count(term) for text in original_texts)
+            return term_counts[term]
+
         applicable_base_items = _select_applicable_base_items(
             base_char_dict + base_entity_dict,
             existing_gen_originals,
-            lambda term: _count_term_in_json_originals(untranslated_json_path, term),
+            count_term,
         )
         applicable_base_item_ids = {id(item) for item in applicable_base_items}
 
@@ -278,7 +287,7 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
             for base_item in base_char_dict:
                 base_original = base_item.get('原文')
                 if id(base_item) in applicable_base_item_ids and base_original and base_original not in existing_gen_originals:
-                    term_count = _count_term_in_json_originals(untranslated_json_path, base_original)
+                    term_count = count_term(base_original)
                     if term_count >= 3:
                         log.info(f"添加基础人物词条: '{base_original}' (出现 {term_count} 次) 到游戏人物字典。")
                         new_entry = {header: base_item.get(header, '') for header in game_char_headers}
@@ -289,7 +298,7 @@ def run_apply_base_dictionary(game_path, works_dir, world_dict_config, message_q
             for base_item in base_entity_dict:
                 base_original = base_item.get('原文')
                 if id(base_item) in applicable_base_item_ids and base_original and base_original not in existing_gen_originals:
-                    term_count = _count_term_in_json_originals(untranslated_json_path, base_original)
+                    term_count = count_term(base_original)
                     if term_count >= 3:
                         log.info(f"添加基础事物词条: '{base_original}' (出现 {term_count} 次) 到游戏事物字典。")
                         new_entry = {header: base_item.get(header, '') for header in game_entity_headers}

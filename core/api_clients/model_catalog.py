@@ -2,8 +2,6 @@
 
 from urllib.parse import urlsplit
 
-from openai import APIConnectionError, APITimeoutError, AuthenticationError, OpenAI, OpenAIError
-
 
 def fetch_openai_models(base_url, api_key):
     """Return model IDs without issuing a completion or retrying requests."""
@@ -17,6 +15,8 @@ def fetch_openai_models(base_url, api_key):
         raise ValueError("API 地址必须是有效的 HTTP 或 HTTPS 基础地址。")
     if not api_key:
         raise ValueError("API Key 不能为空。")
+
+    from openai import APIConnectionError, APITimeoutError, AuthenticationError, OpenAI, OpenAIError
 
     try:
         with OpenAI(base_url=base_url, api_key=api_key, timeout=15.0, max_retries=0) as client:

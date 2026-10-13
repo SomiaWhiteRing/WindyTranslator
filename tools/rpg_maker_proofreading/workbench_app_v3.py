@@ -44,7 +44,6 @@ from workbench_core import (
     load_json_records,
     load_txt_records,
     open_file,
-    records_context,
     save_config,
     save_dictionary,
     search_records,
@@ -231,6 +230,29 @@ class WorkbenchApp(tk.Tk):
         if not self.all_records: raise QAError("请先在第一页检查数据源。")
         return filter_records(self.all_records,self.selected_file_keys,self.workset or None)
 
+    def _mark_manual_check(self, name):
+        if not hasattr(self, "_manual_check_versions"):
+            self._manual_check_versions = {}
+        self._manual_check_versions[name] = self._manual_check_versions.get(name, 0) + 1
+        if hasattr(self, "_initial_check_signature"):
+            self._manual_check_contexts[name] = self._initial_check_signature(name)[:-1]
+
+    def _file_records(self, file_key):
+        if getattr(self, "_indexed_records", None) is not self.all_records:
+            self._indexed_records = self.all_records
+            self._records_by_file = {}
+            self._positions_by_file = {}
+            for record in self.all_records:
+                rows = self._records_by_file.setdefault(record.file_key, [])
+                self._positions_by_file.setdefault(record.file_key, {}).setdefault(record.uid, len(rows))
+                rows.append(record)
+        return self._records_by_file.get(file_key, []), self._positions_by_file.get(file_key, {})
+
+    def _record_context(self, record, radius):
+        rows, positions = self._file_records(record.file_key)
+        index = positions.get(record.uid)
+        return [] if index is None else rows[max(0, index-radius):index+radius+1]
+
     def _refresh_after_write(self):
         snap=self._source_snapshot(); result=self._load_snapshot(snap)
         self.all_records=list(result.records);self.record_by_uid={r.uid:r for r in self.all_records}
@@ -397,16 +419,16 @@ class WorkbenchApp(tk.Tk):
 
     def _show_editor_record(self,record):
         self.current_record=record;self.editor_file.set(record.file_key)
-        same=[r for r in self.all_records if r.file_key==record.file_key]
-        idx=next((i for i,r in enumerate(same,1) if r.uid==record.uid),1);self.editor_index.set(idx)
+        _,positions=self._file_records(record.file_key)
+        idx=positions.get(record.uid,0)+1;self.editor_index.set(idx)
         self.editor_location.set(f"原文：{record.original_location}    |    译文：{record.translated_location}    |    {record.marker} / {record.speaker_id}")
         self._set_text(self.editor_original,record.original,True);self._set_text(self.editor_translation,record.translated,False)
         self._clear_tree(self.context_tree);self.result_maps["context"]={}
-        for i,r in enumerate(records_context(self.all_records,record,3)):
-            iid=f"c{i}";self.result_maps["context"][iid]=r;seq=next((j for j,x in enumerate(same,1) if x.uid==r.uid),0);self.context_tree.insert("","end",iid=iid,values=(seq,r.marker,self._compact(r.original),self._compact(r.translated)))
+        for i,r in enumerate(self._record_context(record,3)):
+            iid=f"c{i}";self.result_maps["context"][iid]=r;seq=positions[r.uid]+1;self.context_tree.insert("","end",iid=iid,values=(seq,r.marker,self._compact(r.original),self._compact(r.translated)))
 
     def _manual_editor_jump(self):
-        rows=[r for r in self.all_records if r.file_key==self.editor_file.get()]
+        rows,_=self._file_records(self.editor_file.get())
         idx=self.editor_index.get()-1
         if 0<=idx<len(rows):self._show_editor_record(rows[idx])
         else:messagebox.showwarning("位置不存在",f"该文件只有 {len(rows)} 条文本。",parent=self)

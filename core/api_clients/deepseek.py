@@ -2,11 +2,9 @@
 import logging
 import re
 import json
-import httpx
 from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from typing import Optional
-from openai import OpenAI, APIConnectionError, AuthenticationError, RateLimitError, BadRequestError, OpenAIError
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +106,8 @@ class DeepSeekClient:
         self.base_url = base_url
         self.api_key = api_key
         try:
+            from openai import OpenAI
+
             self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
             log.info(f"OpenAI 兼容客户端初始化成功 (URL: {self.base_url})。")
         except Exception as e:
@@ -118,6 +118,9 @@ class DeepSeekClient:
         """One HTTP attempt. The translation scheduler owns retry and cost limits."""
         if not model_name or not messages:
             return CompletionResult(error_kind="configuration", error="模型或消息为空")
+        import httpx
+        from openai import APIConnectionError, OpenAIError, RateLimitError
+
         timeout = kwargs.pop("timeout", 120)
         stream = kwargs.pop("stream", False)
         thinking_mode = kwargs.pop("thinking_mode", "auto")
@@ -202,6 +205,8 @@ class DeepSeekClient:
             return False, None, "模型名称不能为空。"
         if not messages:
             return False, None, "消息列表不能为空。"
+
+        from openai import APIConnectionError, AuthenticationError, BadRequestError, OpenAIError, RateLimitError
 
         try:
             log.debug(f"向模型 '{model_name}' 发送 Chat Completion 请求...")

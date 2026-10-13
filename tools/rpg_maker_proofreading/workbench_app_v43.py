@@ -5,8 +5,6 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
 
 from workbench_app_v42 import RPGMakerProofreadingApp as V42App
 from workbench_core import (
@@ -181,13 +179,18 @@ class RPGMakerProofreadingApp(V42App):
         self.ellipsis_tree.bind("<Double-1>", lambda e: self._double_to_editor_event("ellipsis_v4", self.ellipsis_tree, e))
         self.ellipsis_occurrences = {}
 
-    def _do_ellipsis_scan(self):
+    def _do_ellipsis_scan(self, result=None):
         try:
-            rows = analyze_ellipsis_occurrences(self.active_records(), self.ellipsis_side.get())
+            if result is None:
+                records = self.active_records()
+                rows = analyze_ellipsis_occurrences(records, self.ellipsis_side.get())
+                match_by_uid = {r.uid: build_ellipsis_match_to_source(r,
+                                group_size=self.ellipsis_group_size.get(), remainder=self.ellipsis_remainder.get(),
+                                ellipsis_style=self.ellipsis_style.get()) for r in records}
+                self._mark_manual_check("ellipsis")
+            else:
+                rows, match_by_uid = result
             if self.ellipsis_kind.get() != "全部": rows = [x for x in rows if x.kind == self.ellipsis_kind.get()]
-            match_by_uid = {r.uid: build_ellipsis_match_to_source(r,
-                            group_size=self.ellipsis_group_size.get(), remainder=self.ellipsis_remainder.get(),
-                            ellipsis_style=self.ellipsis_style.get()) for r in self.active_records()}
             self.ellipsis_occurrences = {}; self.result_maps["ellipsis_v4"] = {}; self._clear_tree(self.ellipsis_tree)
             for i, row in enumerate(rows):
                 iid=f"el{i}"; self.ellipsis_occurrences[iid]=row; self.result_maps["ellipsis_v4"][iid]=row.record
@@ -320,8 +323,10 @@ class RPGMakerProofreadingApp(V42App):
     # Dictionary correction review / error-alias workflow
     # ------------------------------------------------------------------
     def _dictionary_warnings(self, entries):
+        warnings = analyze_dictionary(self.active_records(),entries,self.dict_messages_only.get())
+        self._mark_manual_check("dictionary")
         self.current_dict_entries=list(entries)
-        return analyze_dictionary(self.active_records(),entries,self.dict_messages_only.get())
+        return warnings
 
     def _show_dict_warnings(self, warnings):
         self.current_dict_warnings=list(warnings)
@@ -514,6 +519,7 @@ class RPGMakerProofreadingApp(V42App):
         if p.suffix.lower()==".csv":
             with p.open("w",encoding="utf-8-sig",newline="") as f:w=csv.writer(f);w.writerow(["错误译名","正确译名","对应辞典原词","来源"]);w.writerows(rows)
         else:
+            from openpyxl import Workbook
             wb=Workbook();ws=wb.active;ws.title="ErrorAliases";ws.append(["错误译名","正确译名","对应辞典原词","来源"])
             for row in rows:ws.append(row)
             wb.save(p);wb.close()

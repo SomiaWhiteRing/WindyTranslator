@@ -15,8 +15,6 @@ from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill
 
 from qa_core_legacy import (
     APP_NAME as LEGACY_APP_NAME,
@@ -379,6 +377,7 @@ def load_excel_records(table_dir: Path, log: LogFn = noop) -> SourceLoadResult:
         relative = str(path.relative_to(table_dir))
         log(f"读取 Excel [{idx}/{len(workbooks)}]：{relative}")
         try:
+            from openpyxl import load_workbook
             wb = load_workbook(path, read_only=True, data_only=False)
         except Exception as exc:
             warnings.append(f"无法读取，已跳过：{relative}（{exc}）")
@@ -595,6 +594,7 @@ def apply_translation_updates(updates: Mapping[str, tuple[DataRecord, str]], log
             rel = path.relative_to(table_dir) if path.is_relative_to(table_dir) else Path(path.name)
             if root is not None:
                 bp = root/rel; bp.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(path, bp)
+            from openpyxl import load_workbook
             wb = load_workbook(path, read_only=False, data_only=False, keep_vba=path.suffix.lower()==".xlsm")
             try:
                 for rec, proposed in items:
@@ -936,6 +936,7 @@ def load_editable_dictionary(path: Path) -> list[EditableDictionaryRow]:
     if path.suffix.lower()==".csv":
         data=list(csv.reader(_decode_csv(path).splitlines()))
     else:
+        from openpyxl import load_workbook
         wb=load_workbook(path,read_only=True,data_only=True); ws=wb.active; data=list(ws.iter_rows(values_only=True)); wb.close()
     if not data:return []
     oi,ti,ci=_dict_columns(data[0])
@@ -962,6 +963,8 @@ def save_dictionary(path: Path, rows: Sequence[EditableDictionaryRow]) -> None:
             w=csv.writer(fh); w.writerow(["Original","Translation","Category"])
             for r in rows:w.writerow([r.original,r.translation,r.category])
         return
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl import Workbook
     wb=Workbook(); ws=wb.active; ws.title="Dictionary"; ws.append(["Original","Translation","Category"])
     for r in rows:ws.append([r.original,r.translation,r.category])
     for cell in ws[1]:cell.font=Font(bold=True);cell.fill=PatternFill("solid",fgColor="D9EAF7")
@@ -978,14 +981,46 @@ def dictionary_entries_from_rows(rows: Sequence[EditableDictionaryRow], conflict
     return chosen,conflicts
 
 
+def analyze_alnum_profiles(records, prefix, query, target, profile_filter, mismatch_only=False):
+    kept = []
+    for row in analyze_alnum_occurrences(records, target):
+        rec = row.record
+        if query and query.casefold() not in row.reason.casefold():
+            continue
+        if prefix == "case":
+            source = case_profile(rec.original)
+            translated = case_profile(rec.translated).replace("原文", "译文")
+            matches = case_format_matches(rec.original, rec.translated)
+        else:
+            source = width_profile(rec.original, target)
+            translated = width_profile(rec.translated, target).replace("原文", "译文")
+            matches = width_format_matches(rec.original, rec.translated, target)
+        if profile_filter != "全部" and source != profile_filter:
+            continue
+        if mismatch_only and matches:
+            continue
+        kept.append((row, source, translated, matches))
+    return kept
+
+
 def analyze_dictionary(records: Iterable[DataRecord], entries: Sequence[DictionaryEntry], messages_only: bool=False) -> list[DictionaryWarning]:
     out=[]
+    visible_cache = {}
+    match_cache = {}
+    def visible(text):
+        if text not in visible_cache:
+            visible_cache[text] = strip_control_codes(text)
+        return visible_cache[text]
     for r in records:
         if messages_only and r.marker!="Message":continue
-        matches=longest_non_overlapping_matches(strip_control_codes(r.original),entries)
+        original = visible(r.original)
+        translated = visible(r.translated)
+        if original not in match_cache:
+            match_cache[original] = longest_non_overlapping_matches(original, entries)
+        matches = match_cache[original]
         for e in matches:
-            if e.translation not in strip_control_codes(r.translated):
-                out.append(DictionaryWarning(r,e.original,e.translation,e.source_file,strip_control_codes(r.original),strip_control_codes(r.translated)))
+            if e.translation not in translated:
+                out.append(DictionaryWarning(r,e.original,e.translation,e.source_file,original,translated))
     return out
 
 
@@ -3088,6 +3123,7 @@ def load_error_aliases(path: Path) -> list[ErrorAlias]:
         with path.open("r", encoding="utf-8-sig", newline="") as f:
             rows = [list(x) for x in csv.reader(f)]
     elif path.suffix.lower() in {".xlsx", ".xlsm"}:
+        from openpyxl import load_workbook
         wb = load_workbook(path, read_only=True, data_only=False)
         try:
             ws = wb[wb.sheetnames[0]]
@@ -3127,6 +3163,7 @@ def save_error_aliases(path: Path, aliases: Sequence[ErrorAlias]) -> None:
         with path.open("w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f); w.writerow(headers); w.writerows(rows)
     elif path.suffix.lower() in {".xlsx", ".xlsm"}:
+        from openpyxl import Workbook
         wb = Workbook(); ws = wb.active; ws.title = "ErrorAliases"; ws.append(headers)
         for row in rows:
             ws.append(row)

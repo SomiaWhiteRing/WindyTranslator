@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import queue
+import threading
 from dataclasses import replace as dc_replace
 from pathlib import Path
 from types import SimpleNamespace
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from openpyxl import Workbook, load_workbook
 
 from workbench_app_v43 import RPGMakerProofreadingApp as V43App
 from workbench_app_v4 import RPGMakerProofreadingApp as V4App
@@ -20,12 +21,20 @@ from workbench_core import (
     QAError,
     TextChange,
     analyze_dictionary,
+    analyze_alnum_profiles,
+    analyze_duplicate_texts,
+    analyze_ellipsis_occurrences,
+    analyze_punctuation,
+    analyze_quote_combined,
+    analyze_speaker_groups,
+    analyze_symbol_catalog,
     analyze_dunhao_usage,
     analyze_english_period_endings,
     analyze_space_structure,
     analyze_missing_translations,
     analyze_width,
     build_error_alias_changes,
+    build_ellipsis_match_to_source,
     remove_translation_trailing_spaces,
     replace_dunhao_all,
     replace_dunhao_line_end,
@@ -35,6 +44,7 @@ from workbench_core import (
     is_face_message,
     is_narration_message,
     load_error_aliases,
+    load_symbol_catalog,
     load_editable_dictionary,
     logical_fullwidth_units,
     normalize_newlines,
@@ -45,6 +55,12 @@ from workbench_core import (
 
 APP_TITLE = "RPG制作大师校对工具 v4.5.0"
 CONFIG_NAME = "rpg_maker_proofreading_tool_config_v42.json"  # keep prior preferences
+INITIAL_CHECK_ERROR_TITLES = {
+    "width": "分析失败", "speaker": "筛选失败", "quote": "引号检查失败",
+    "punct": "检查失败", "symbols": "标点统计失败", "ellipsis": "省略号检查失败",
+    "case": "扫描失败", "charwidth": "扫描失败", "duplicates": "重复文本检查失败",
+    "missing": "缺译检查失败",
+}
 
 
 class RPGMakerProofreadingApp(V43App):
@@ -61,6 +77,9 @@ class RPGMakerProofreadingApp(V43App):
         self.missing_exclusions: set[str] = set()
         self.review_term_filter: str | None = None
         self.review_force_show_alias_managed = False
+        self._initial_check_queue = queue.Queue()
+        self._manual_check_versions = {}
+        self._manual_check_contexts = {}
         super().__init__()
         self.title(APP_TITLE)
         self._initial_input = initial_input
@@ -92,40 +111,117 @@ class RPGMakerProofreadingApp(V43App):
         super()._scan_done(result)
         if self._startup_checks_pending and self.all_records:
             self._startup_checks_pending = False
-            checks = [
-                self._do_width,
-                self._do_speaker,
-                self._do_quote_analysis,
-                self._do_punct,
-                self._refresh_symbol_catalog,
-                self._do_ellipsis_scan,
-                self._scan_english_period,
-                self._scan_dunhao,
-                self._scan_spaces,
-                lambda: self._scan_alnum("case"),
-                lambda: self._scan_alnum("charwidth"),
-                self._do_duplicates,
-                self._do_missing,
-            ]
+            checks = ["width", "speaker", "quote", "punct", "symbols", "ellipsis",
+                      "english_period", "dunhao", "spaces", "case", "charwidth", "duplicates", "missing"]
             if self.dictionary_rows:
-                checks.append(self._initial_dictcheck)
+                checks.append("dictionary")
             self.after_idle(lambda: self._run_initial_check(iter(checks)))
 
-    def _initial_dictcheck(self):
-        entries = self._resolve_conflicts(self.dictionary_rows)
-        if entries is not None:
-            self._show_dict_warnings(self._dictionary_warnings(entries))
-
     def _run_initial_check(self, checks):
-        check = next(checks, None)
-        if check is None:
+        name = next(checks, None)
+        if name is None:
             self.status_var.set("启动检查结束，请在各页面查看结果。")
             return
+        self._start_initial_check(name, checks)
+
+    def _initial_check_options(self, name):
+        fields = {
+            "width": ("face_limit", "narr_limit", "check_face", "check_narr", "ambiguous_unit"),
+            "speaker": ("speaker_mode", "speaker_full", "speaker_first_n"),
+            "punct": ("punct_mode", "punct_default"),
+            "ellipsis": ("ellipsis_side", "ellipsis_kind", "ellipsis_group_size", "ellipsis_remainder", "ellipsis_style"),
+            "spaces": ("space_preserve_source_trailing",),
+            "case": ("case_query", "case_profile_filter"),
+            "charwidth": ("charwidth_query", "charwidth_target", "charwidth_profile_filter"),
+            "duplicates": ("duplicates_inconsistent_only",),
+            "dictionary": ("dict_messages_only",),
+        }
+        options = tuple(getattr(self, field).get() for field in fields.get(name, ()))
+        if name == "symbols": options = (self.catalog_path,)
+        if name == "missing": options = (frozenset(k for k, v in self.missing_type_vars.items() if v.get()), frozenset(self.missing_exclusions))
+        if name == "dictionary": options += (tuple(self.dictionary_rows),)
+        return options
+
+    def _initial_check_signature(self, name):
+        return (id(self.all_records), frozenset(self.selected_file_keys), frozenset(self.workset),
+                self._initial_check_options(name), self._manual_check_versions.get(name, 0))
+
+    def _initial_check_job(self, name, options):
+        if name == "width": return analyze_width, options, self._do_width
+        if name == "speaker":
+            mode, full, first_n = options
+            return analyze_speaker_groups, (mode, None if full else first_n), self._do_speaker
+        if name == "quote": return analyze_quote_combined, (), self._do_quote_analysis
+        if name == "punct": return analyze_punctuation, options, self._do_punct
+        if name == "symbols":
+            path, = options
+            return lambda rows: analyze_symbol_catalog(rows, load_symbol_catalog(path)), (), self._refresh_symbol_catalog
+        if name == "ellipsis":
+            side, _kind, group_size, remainder, style = options
+            def ellipsis(rows):
+                return (analyze_ellipsis_occurrences(rows, side),
+                        {r.uid: build_ellipsis_match_to_source(r, group_size=group_size, remainder=remainder, ellipsis_style=style) for r in rows})
+            return ellipsis, (), self._do_ellipsis_scan
+        if name == "english_period": return analyze_english_period_endings, (), self._scan_english_period
+        if name == "dunhao": return analyze_dunhao_usage, (), self._scan_dunhao
+        if name == "spaces":
+            preserve, = options
+            return lambda rows: analyze_space_structure(rows, preserve_source_trailing=preserve), (), lambda rows: self._scan_spaces(rows=rows)
+        if name in ("case", "charwidth"):
+            query, target, profile = (options[0], "english", options[1]) if name == "case" else options
+            return analyze_alnum_profiles, (name, query, target, profile), lambda rows: self._scan_alnum(name, kept=rows)
+        if name == "duplicates": return analyze_duplicate_texts, (), self._do_duplicates
+        if name == "missing": return analyze_missing_translations, (options[0],), self._do_missing
+        if name == "dictionary":
+            entries = self._resolve_conflicts(list(options[1]))
+            if entries is None: return None
+            def show(warnings):
+                self.current_dict_entries = list(entries)
+                self._show_dict_warnings(warnings)
+            return analyze_dictionary, (entries, options[0]), show
+        raise KeyError(name)
+
+    def _start_initial_check(self, name, checks):
         try:
-            check()
+            signature = self._initial_check_signature(name)
+            job = self._initial_check_job(name, signature[3])
+            if job is None:
+                self.after(1, lambda: self._run_initial_check(checks))
+                return
+            compute, args, done = job
+            records = self.active_records()
+            output_queue = self._initial_check_queue
+            def work():
+                try: result, error = compute(records, *args), None
+                except Exception as exc: result, error = None, exc
+                output_queue.put((name, checks, signature, done, result, error))
+            threading.Thread(target=work, daemon=True).start()
         except Exception as exc:
-            messagebox.showerror("启动检查失败", str(exc), parent=self)
-        self.after(1, lambda: self._run_initial_check(checks))
+            messagebox.showerror(INITIAL_CHECK_ERROR_TITLES.get(name, "启动检查失败"), str(exc), parent=self)
+            self.after(1, lambda: self._run_initial_check(checks))
+
+    def _poll_worker(self):
+        super()._poll_worker()
+        try:
+            while True:
+                name, checks, signature, done, result, error = self._initial_check_queue.get_nowait()
+                try:
+                    current = self._initial_check_signature(name)
+                    if signature[-1] != current[-1] and self._manual_check_contexts.get(name) == current[:-1]:
+                        # A manual check on this page already supplied newer results.
+                        pass
+                    elif signature[:-1] != current[:-1]:
+                        self._start_initial_check(name, checks)
+                        continue
+                    elif error is not None:
+                        raise error
+                    else:
+                        done(result)
+                except Exception as exc:
+                    messagebox.showerror(INITIAL_CHECK_ERROR_TITLES.get(name, "启动检查失败"), str(exc), parent=self)
+                self.after(1, lambda checks=checks: self._run_initial_check(checks))
+        except queue.Empty:
+            pass
 
     # ------------------------------------------------------------------
     # Width analysis: Ambiguous width + adjustable panes + integrated rulers
@@ -218,15 +314,19 @@ class RPGMakerProofreadingApp(V43App):
         except Exception:
             pass
 
-    def _do_width(self):
+    def _do_width(self, unit_issues=None):
         try:
             records = self.active_records()
-            unit_issues = analyze_width(records, self.face_limit.get(), self.narr_limit.get(), self.check_face.get(), self.check_narr.get(), self.ambiguous_unit.get())
+            if unit_issues is None:
+                unit_issues = analyze_width(records, self.face_limit.get(), self.narr_limit.get(), self.check_face.get(), self.check_narr.get(), self.ambiguous_unit.get())
+                self._mark_manual_check("width")
             found: dict[tuple[str, int], SimpleNamespace] = {}
             for x in unit_issues:
                 found[(x.record.uid, x.line_no)] = SimpleNamespace(record=x.record, line_no=x.line_no, face_type=x.face_type,
                                                                    units=x.width, limit=x.limit, pixels="", reason="全角单位超线")
             font = self._font_object(); ref_char = "汉"
+            reference_pixels = {}
+            measured_pixels = {}
             if self.check_font_pixels.get():
                 for r in records:
                     if r.marker != "Message": continue
@@ -237,10 +337,13 @@ class RPGMakerProofreadingApp(V43App):
                         if not self.check_narr.get(): continue
                         limit, typ = self.narr_limit.get(), "无头像"
                     else: continue
-                    ref_pixels = font.measure(ref_char * max(1, int(limit))) + font.measure(ref_char) * (limit % 1)
+                    if limit not in reference_pixels:
+                        reference_pixels[limit] = font.measure(ref_char * max(1, int(limit))) + font.measure(ref_char) * (limit % 1)
+                    ref_pixels = reference_pixels[limit]
                     for n, line in enumerate(normalize_newlines(r.translated).split("\n"), 1):
                         vis = render_rm2k3_controls(line, runtime_placeholders=False)
-                        pixels = font.measure(vis)
+                        if vis not in measured_pixels: measured_pixels[vis] = font.measure(vis)
+                        pixels = measured_pixels[vis]
                         if pixels > ref_pixels:
                             key = (r.uid, n)
                             units = logical_fullwidth_units(vis, self.ambiguous_unit.get())
@@ -313,10 +416,13 @@ class RPGMakerProofreadingApp(V43App):
         self.missing_exclusion_label=tk.StringVar(value="不算缺译：0 条")
         ttk.Label(extra,textvariable=self.missing_exclusion_label,foreground="#555").pack(side="left",padx=10)
 
-    def _do_missing(self):
+    def _do_missing(self, issues=None):
         try:
-            selected={k for k,v in self.missing_type_vars.items() if v.get()}
-            issues=[x for x in analyze_missing_translations(self.active_records(),selected) if x.record.original not in self.missing_exclusions]
+            if issues is None:
+                selected={k for k,v in self.missing_type_vars.items() if v.get()}
+                issues=analyze_missing_translations(self.active_records(),selected)
+                self._mark_manual_check("missing")
+            issues=[x for x in issues if x.record.original not in self.missing_exclusions]
             self._clear_tree(self.missing_tree); self.result_maps["missing"]={}
             for i,x in enumerate(issues):
                 iid=f"miss{i}"; self.result_maps["missing"][iid]=x.record
@@ -354,6 +460,7 @@ class RPGMakerProofreadingApp(V43App):
         elif path.suffix.lower()==".txt":
             path.write_text("\n".join(values),encoding="utf-8-sig")
         else:
+            from openpyxl import Workbook
             wb=Workbook();ws=wb.active;ws.title="NotMissing";ws.append(["不算缺译的原文"])
             for x in values:ws.append([x])
             wb.save(path);wb.close()
@@ -369,6 +476,7 @@ class RPGMakerProofreadingApp(V43App):
         if path.suffix.lower()==".csv":
             with path.open("r",encoding="utf-8-sig",newline="") as f: rows=list(csv.reader(f))
         else:
+            from openpyxl import load_workbook
             wb=load_workbook(path,read_only=True,data_only=False)
             try: rows=[list(x) for x in wb[wb.sheetnames[0]].iter_rows(values_only=True)]
             finally:wb.close()
@@ -767,8 +875,11 @@ class RPGMakerProofreadingApp(V43App):
         self.english_period_tree.master.grid(row=2,column=0,sticky="nsew");self.english_period_tree.bind("<Double-1>",lambda e:self._double_to_editor_event("english_period",self.english_period_tree,e))
         self.english_period_rows={};self.english_period_changes={}
 
-    def _scan_english_period(self):
-        rows=analyze_english_period_endings(self.active_records());self.english_period_rows={};self.english_period_changes={};self.result_maps["english_period"]={};self._clear_tree(self.english_period_tree)
+    def _scan_english_period(self, rows=None):
+        if rows is None:
+            rows=analyze_english_period_endings(self.active_records())
+            self._mark_manual_check("english_period")
+        self.english_period_rows={};self.english_period_changes={};self.result_maps["english_period"]={};self._clear_tree(self.english_period_tree)
         for i,row in enumerate(rows):
             iid=f"ep{i}";self.english_period_rows[iid]=row;self.result_maps["english_period"][iid]=row.record
             self.english_period_tree.insert("","end",iid=iid,values=("☐",row.source_kind,row.source_terminal or "（无）",row.record.file_key,self._display(row.record.original),self._display(row.record.translated),""))
@@ -812,8 +923,11 @@ class RPGMakerProofreadingApp(V43App):
         self.dunhao_tree.master.grid(row=2,column=0,sticky="nsew");self.dunhao_tree.bind("<Double-1>",lambda e:self._double_to_editor_event("dunhao",self.dunhao_tree,e))
         self.dunhao_rows={};self.dunhao_changes={}
 
-    def _scan_dunhao(self):
-        rows=analyze_dunhao_usage(self.active_records());self.dunhao_rows={};self.dunhao_changes={};self.result_maps["dunhao"]={};self._clear_tree(self.dunhao_tree)
+    def _scan_dunhao(self, rows=None):
+        if rows is None:
+            rows=analyze_dunhao_usage(self.active_records())
+            self._mark_manual_check("dunhao")
+        self.dunhao_rows={};self.dunhao_changes={};self.result_maps["dunhao"]={};self._clear_tree(self.dunhao_tree)
         for i,row in enumerate(rows):
             iid=f"dh{i}";self.dunhao_rows[iid]=row;self.result_maps["dunhao"][iid]=row.record
             self.dunhao_tree.insert("","end",iid=iid,values=("☐","是" if row.line_end_count else "否","是" if row.stutter_count else "否","是" if row.multiple else "否","是" if row.other else "否",row.total_count,row.record.file_key,row.detail,self._display(row.record.original),self._display(row.record.translated),""))
@@ -857,8 +971,10 @@ class RPGMakerProofreadingApp(V43App):
         self.space_tree.master.grid(row=2,column=0,sticky="nsew");self.space_tree.bind("<Double-1>",lambda e:self._double_to_editor_event("spaces",self.space_tree,e))
         self.space_rows={};self.space_changes={}
 
-    def _scan_spaces(self,include_all=False):
-        rows=analyze_space_structure(self.active_records(),include_all_with_spaces=include_all,preserve_source_trailing=self.space_preserve_source_trailing.get())
+    def _scan_spaces(self,include_all=False,rows=None):
+        if rows is None:
+            rows=analyze_space_structure(self.active_records(),include_all_with_spaces=include_all,preserve_source_trailing=self.space_preserve_source_trailing.get())
+            self._mark_manual_check("spaces")
         self.space_rows={};self.space_changes={};self.result_maps["spaces"]={};self._clear_tree(self.space_tree)
         for i,row in enumerate(rows):
             iid=f"spc{i}";self.space_rows[iid]=row;self.result_maps["spaces"][iid]=row.record

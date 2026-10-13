@@ -6,8 +6,6 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
 
 from workbench_app_v41 import RPGMakerProofreadingApp as V41App
 from workbench_core import (
@@ -663,6 +661,8 @@ class RPGMakerProofreadingApp(V41App):
                 fh.write("\t".join(headers) + "\n")
                 for row in rows: fh.write("\t".join(str(x).replace("\t", "    ").replace("\r", "").replace("\n", "\\n") for x in row) + "\n")
             return
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl import Workbook
         wb = Workbook(); ws = wb.active; ws.title = sheet_name[:31]
         ws.append(list(headers))
         for row in rows: ws.append(list(row))

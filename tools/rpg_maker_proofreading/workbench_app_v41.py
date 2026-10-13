@@ -12,7 +12,6 @@ from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 from typing import Iterable
 
-from openpyxl import load_workbook
 
 from workbench_app_v4 import RPGMakerProofreadingApp as V4App, DICT_CATEGORIES, QUOTE_STYLE_LABELS
 from workbench_core import (
@@ -27,6 +26,7 @@ from workbench_core import (
     analyze_alnum_occurrences,
     analyze_ellipsis_occurrences,
     analyze_quote_combined,
+    analyze_alnum_profiles,
     build_ellipsis_conversion,
     build_quote_situation_proposal,
     build_quote_style_proposal,
@@ -185,8 +185,17 @@ class RPGMakerProofreadingApp(V4App):
         original_insert = tree.insert
         def insert_and_resize(*args, **kwargs):
             iid = original_insert(*args, **kwargs)
-            try: self.after_idle(lambda t=tree: self._refresh_tree_height(t))
-            except Exception: pass
+            meta = self.tree_registry[tree]
+            if not meta.get("height_refresh_pending"):
+                meta["height_refresh_pending"] = True
+                def resize():
+                    meta["height_refresh_pending"] = False
+                    if tree.winfo_exists():
+                        self._refresh_tree_height(tree)
+                try:
+                    self.after_idle(resize)
+                except tk.TclError:
+                    meta["height_refresh_pending"] = False
             return iid
         tree.insert = insert_and_resize  # type: ignore[method-assign]
         return tree
@@ -418,9 +427,12 @@ class RPGMakerProofreadingApp(V4App):
         self.quote_tree.master.grid(row=2,column=0,sticky="nsew"); self.quote_tree.bind("<Double-1>",lambda e:self._double_to_editor("quote"))
         self.quote_rows: dict[str, CombinedQuoteAnalysisRow] = {}
 
-    def _do_quote_analysis(self):
+    def _do_quote_analysis(self, rows=None):
         try:
-            rows=analyze_quote_combined(self.active_records()); self.quote_rows={}; self.result_maps["quote"]={}; self._clear_tree(self.quote_tree)
+            if rows is None:
+                rows=analyze_quote_combined(self.active_records())
+                self._mark_manual_check("quote")
+            self.quote_rows={}; self.result_maps["quote"]={}; self._clear_tree(self.quote_tree)
             disabled=set()
             for i,row in enumerate(rows):
                 iid=f"q{i}"; self.quote_rows[iid]=row; self.result_maps["quote"][iid]=row.record
@@ -586,20 +598,14 @@ class RPGMakerProofreadingApp(V4App):
         ttk.Button(bar,text="处理修改框划取/全文",command=self._transform_width_edit).pack(side="left",padx=4);ttk.Button(bar,text="修改框内容送入选中记录预览",command=lambda:self._alnum_edit_to_selected("charwidth")).pack(side="left")
         ttk.Button(bar,text="预览勾选记录",command=lambda:self._preview_alnum_records("charwidth")).pack(side="left",padx=4);ttk.Button(bar,text="应用勾选",command=lambda:self._apply_generic_changes("charwidth")).pack(side="right")
 
-    def _scan_alnum(self, prefix, mismatch_only=False):
+    def _scan_alnum(self, prefix, mismatch_only=False, kept=None):
         try:
-            target="english" if prefix=="case" else self.charwidth_target.get();rows=analyze_alnum_occurrences(self.active_records(),target)
-            query=getattr(self,prefix+"_query").get(); tree=getattr(self,prefix+"_tree");self._clear_tree(tree);self.result_maps[prefix]={};kept=[]
-            for row in rows:
-                rec=row.record
-                if query and query.casefold() not in row.reason.casefold():continue
-                if prefix=="case":
-                    sp=case_profile(rec.original);tp=case_profile(rec.translated).replace("原文","译文");match=case_format_matches(rec.original,rec.translated);flt=self.case_profile_filter.get()
-                else:
-                    sp=width_profile(rec.original,target);tp=width_profile(rec.translated,target).replace("原文","译文");match=width_format_matches(rec.original,rec.translated,target);flt=self.charwidth_profile_filter.get()
-                if flt!="全部" and sp!=flt:continue
-                if mismatch_only and match:continue
-                kept.append((row,sp,tp,match))
+            if kept is None:
+                target="english" if prefix=="case" else self.charwidth_target.get()
+                kept=analyze_alnum_profiles(self.active_records(),prefix,getattr(self,prefix+"_query").get(),target,
+                    self.case_profile_filter.get() if prefix=="case" else self.charwidth_profile_filter.get(),mismatch_only)
+                self._mark_manual_check(prefix)
+            tree=getattr(self,prefix+"_tree");self._clear_tree(tree);self.result_maps[prefix]={}
             for i,(row,sp,tp,match) in enumerate(kept):
                 iid=f"{prefix}{i}";self.result_maps[prefix][iid]=row.record
                 tree.insert("","end",iid=iid,values=("☐",row.record.file_key,row.reason,sp,tp,"是" if match else "否",self._display(row.record.original),self._display(row.record.translated),""))
@@ -631,6 +637,7 @@ class RPGMakerProofreadingApp(V4App):
             else:text=raw.decode("utf-8",errors="replace")
             row=next(csv.reader(text.splitlines()),[]);headers={str(x).strip().casefold() for x in row}
         else:
+            from openpyxl import load_workbook
             wb=load_workbook(path,read_only=True,data_only=False);ws=wb.active;headers={str(c.value or "").strip().casefold() for c in next(ws.iter_rows(min_row=1,max_row=1))};wb.close()
         return bool(headers & {"类别","category","type"})
 

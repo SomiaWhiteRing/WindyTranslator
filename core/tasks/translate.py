@@ -558,15 +558,24 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         )
         current_translate_config["_translation_session"] = session
         checkpoint_lock = threading.Lock()
+        checkpoint_dirty = False
 
         def checkpoint(source_file, results):
-            nonlocal all_files_translated_data
+            nonlocal all_files_translated_data, checkpoint_dirty
             with checkpoint_lock:
-                all_files_translated_data.setdefault(source_file, {}).update(results)
+                existing = all_files_translated_data.setdefault(source_file, {})
+                # Workers persist accepted results immediately; their final return
+                # usually contains exactly those same, already durable records.
+                if any(key not in existing or existing[key] != result for key, result in results.items()):
+                    existing.update(results)
+                    checkpoint_dirty = True
+                if not checkpoint_dirty:
+                    return
                 try:
                     all_files_translated_data = _save_translation_results_atomic(
                         translated_json_path, untranslated_data_per_file, all_files_translated_data
                     )
+                    checkpoint_dirty = False
                 except Exception as error:
                     session.pause(f"保存失败，已停止后续请求: {error}")
                     raise TranslationPaused(session.reason) from error

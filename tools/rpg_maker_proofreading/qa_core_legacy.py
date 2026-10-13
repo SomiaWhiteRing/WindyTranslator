@@ -17,8 +17,6 @@ from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill
 
 
 APP_NAME = "RPG Maker 翻译多格式校对分析工具"
@@ -529,6 +527,7 @@ def load_excel_records(table_dir: Path, log: LogFn = _noop_log) -> SourceLoadRes
         relative = str(path.relative_to(table_dir))
         log(f"读取 Excel [{idx}/{len(workbooks)}]：{relative}")
         try:
+            from openpyxl import load_workbook
             wb = load_workbook(path, read_only=True, data_only=False)
         except Exception as exc:
             warnings.append(f"无法读取，已跳过：{relative}（{exc}）")
@@ -1133,6 +1132,7 @@ def load_dictionary(path: Path) -> list[DictionaryEntry]:
             translation = row[t_col] if len(row) > t_col else ""
             rows.append((str(original or ""), str(translation or "")))
     elif path.suffix.lower() in {".xlsx", ".xlsm"}:
+        from openpyxl import load_workbook
         wb = load_workbook(path, read_only=True, data_only=True)
         try:
             found = False
@@ -1336,6 +1336,8 @@ def save_specialized_dictionary(path: Path, rows: Sequence[GeneratedDictionaryRo
         return
     if path.suffix.lower() not in {".xlsx", ".xlsm"}:
         raise QAError("输出辞典请选择 .csv 或 .xlsx。")
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl import Workbook
     wb = Workbook()
     fixed_dt = datetime(2000, 1, 1, 0, 0, 0)
     wb.properties.creator = APP_NAME
@@ -1473,6 +1475,7 @@ def apply_dialogue_fixes(
             backup_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, backup_path)
             keep_vba = path.suffix.lower() == ".xlsm"
+            from openpyxl import load_workbook
             wb = load_workbook(path, read_only=False, data_only=False, keep_vba=keep_vba)
             try:
                 for issue in file_issues:

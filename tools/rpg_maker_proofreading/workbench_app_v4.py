@@ -66,7 +66,6 @@ from workbench_core import (
     normalize_newlines,
     open_file,
     quote_styles,
-    records_context,
     save_config,
     save_dictionary,
     search_records,
@@ -706,17 +705,17 @@ class RPGMakerProofreadingApp(LegacyWorkbenchApp):
 
     def _show_editor_record(self, record):
         self.current_record = record; self.editor_file.set(record.file_key)
-        same = [r for r in self.all_records if r.file_key == record.file_key]
-        idx = next((i for i, r in enumerate(same, 1) if r.uid == record.uid), 1); self.editor_index.set(idx)
+        _, positions = self._file_records(record.file_key)
+        idx = positions.get(record.uid, 0) + 1; self.editor_index.set(idx)
         self.editor_location.set(f"原文：{record.original_location}    |    译文：{record.translated_location}    |    {record.marker} / {record.speaker_id}")
         self.editor_raw_original = record.original; self.editor_raw_translation = record.translated
         self.editor_controls_hidden = False; self.editor_control_button.configure(text="隐藏 RPG Maker 通配符/操作符")
         self._set_text(self.editor_original, record.original, True); self._set_text(self.editor_translation, record.translated, False)
         self._clear_tree(self.context_tree); self.result_maps["context"] = {}
-        context = records_context(self.all_records, record, 8)
+        context = self._record_context(record, 8)
         for i, r in enumerate(context):
             iid = f"c{i}"; self.result_maps["context"][iid] = r
-            seq = next((j for j, x in enumerate(same, 1) if x.uid == r.uid), 0)
+            seq = positions[r.uid] + 1
             self.context_tree.insert("", "end", iid=iid, values=(seq, r.marker, self._display(r.original), self._display(r.translated)))
 
     def _editor_transform(self, mode):
@@ -803,9 +802,11 @@ class RPGMakerProofreadingApp(LegacyWorkbenchApp):
         self.speaker_example_tree.master.grid(row=0, column=0, sticky="nsew")
         self.speaker_example_tree.bind("<Double-1>", lambda e: self._double_to_editor("speaker_examples"))
 
-    def _do_speaker(self):
+    def _do_speaker(self, groups=None):
         try:
-            self.speaker_results = analyze_speaker_groups(self.active_records(), self.speaker_mode.get(), None if self.speaker_full.get() else self.speaker_first_n.get())
+            manual = groups is None
+            self.speaker_results = groups if groups is not None else analyze_speaker_groups(self.active_records(), self.speaker_mode.get(), None if self.speaker_full.get() else self.speaker_first_n.get())
+            if manual: self._mark_manual_check("speaker")
             self._clear_tree(self.speaker_tree); self.result_maps["speaker"] = {}
             for i, group in enumerate(self.speaker_results):
                 iid = f"sp{i}"; self.result_maps["speaker"][iid] = group
@@ -985,8 +986,12 @@ class RPGMakerProofreadingApp(LegacyWorkbenchApp):
                                         ("选择", "文件", "说明", "原文", "译文", "处理结果"), (60, 220, 260, 450, 450, 450), checkbox=True)
         self.terminal_tree.master.grid(row=2, column=0, sticky="nsew"); self.terminal_tree.bind("<Double-1>", lambda e: self._double_to_editor("terminal"))
 
-    def _do_punct(self):
-        try: self._store_generic_changes("terminal", self.terminal_tree, analyze_punctuation(self.active_records(), self.punct_mode.get(), self.punct_default.get()))
+    def _do_punct(self, changes=None):
+        try:
+            if changes is None:
+                changes = analyze_punctuation(self.active_records(), self.punct_mode.get(), self.punct_default.get())
+                self._mark_manual_check("punct")
+            self._store_generic_changes("terminal", self.terminal_tree, changes)
         except Exception as exc: messagebox.showerror("检查失败", str(exc), parent=self)
 
     def _build_symbol_panel(self):
@@ -1003,9 +1008,11 @@ class RPGMakerProofreadingApp(LegacyWorkbenchApp):
         self.symbol_tree.bind("<Double-1>", self._symbol_cell_edit)
         self.symbol_rows: dict[str, dict[str, object]] = {}
 
-    def _refresh_symbol_catalog(self):
+    def _refresh_symbol_catalog(self, rows=None):
         try:
-            catalog = load_symbol_catalog(self.catalog_path); rows = analyze_symbol_catalog(self.active_records(), catalog)
+            if rows is None:
+                catalog = load_symbol_catalog(self.catalog_path); rows = analyze_symbol_catalog(self.active_records(), catalog)
+                self._mark_manual_check("symbols")
             self.symbol_rows = {}; self._clear_tree(self.symbol_tree)
             for i, row in enumerate(rows):
                 iid = f"sym{i}"; self.symbol_rows[iid] = row
@@ -1272,9 +1279,11 @@ class RPGMakerProofreadingApp(LegacyWorkbenchApp):
                                           (60, 90, 100, 520, 620, 300), checkbox=True)
         self.duplicates_tree.master.grid(row=2, column=0, sticky="nsew"); self.duplicates_tree.bind("<Double-1>", self._duplicate_to_search)
 
-    def _do_duplicates(self):
+    def _do_duplicates(self, groups=None):
         try:
-            groups = analyze_duplicate_texts(self.active_records())
+            if groups is None:
+                groups = analyze_duplicate_texts(self.active_records())
+                self._mark_manual_check("duplicates")
             if self.duplicates_inconsistent_only.get(): groups = [x for x in groups if not x.consistent]
             self.duplicate_results = groups; self.result_maps["duplicates"] = {}; self._clear_tree(self.duplicates_tree)
             for i, group in enumerate(groups):
