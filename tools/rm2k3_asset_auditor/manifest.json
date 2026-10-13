@@ -3,6 +3,7 @@
   "id": "rm2k3_asset_auditor",
   "category": "gui",
   "name": "RM2K3 素材调用检查器",
+  "pro_shortcut": {"short_name": "素材检查"},
   "version": "0.4.1",
   "author": "JerryHOEI",
   "description": "检查 RPG Maker 2000/2003 工程中的素材调用。",

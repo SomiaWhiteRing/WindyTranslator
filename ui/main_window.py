@@ -80,7 +80,9 @@ class MainWindow:
 
         # 源码型外部工具页。工具以独立进程运行，不嵌入第三方 GUI。
         self.tools_frame_container = ttk.Frame(self.functions_notebook, padding="5")
-        self.tools_panel = tools_panel.ToolsPanel(self.tools_frame_container, self.app)
+        self.tools_panel = tools_panel.ToolsPanel(
+            self.tools_frame_container, self.app, self.pro_panel.set_tool_shortcut,
+        )
         self.tools_panel.pack(fill=tk.BOTH, expand=True)
         self.functions_notebook.add(self.tools_frame_container, text="小工具")
 
@@ -240,6 +242,8 @@ class MainWindow:
                      # 忽略设置状态时可能发生的错误（例如控件已被销毁）
                      print(f"设置控件状态时出错: {e} (控件: {control})")
                      pass
+
+        self.tools_panel.refresh_shortcut_state()
 
     def get_current_mode(self):
         """获取当前选中的 Notebook 标签页对应的模式 ('easy' 或 'pro')。"""

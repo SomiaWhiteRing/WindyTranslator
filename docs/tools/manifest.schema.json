@@ -30,6 +30,14 @@
     "version": {"type": "string"},
     "author": {"type": "string"},
     "description": {"type": "string"},
+    "pro_shortcut": {
+      "type": "object",
+      "required": ["short_name"],
+      "properties": {
+        "short_name": {"type": "string", "minLength": 1, "pattern": "\\S", "not": {"pattern": "[\\r\\n]"}}
+      },
+      "additionalProperties": false
+    },
     "category": {"enum": ["gui", "cli"]},
     "runtime": {"enum": ["host_python", "exe"]},
     "entry": {"type": "string"},

@@ -116,6 +116,12 @@ DEFAULT_CONFIG = {
     "world_dict_config": DEFAULT_WORLD_DICT_CONFIG.copy(),
     "translate_config": DEFAULT_TRANSLATE_CONFIG.copy(),
     "pro_mode_settings": DEFAULT_PRO_MODE_SETTINGS.copy(),
+    "tools": {
+        "pro_shortcut": {
+            "tool_id": "translation_issue_review",
+            "launch_option_id": None,
+        },
+    },
     # 可以添加其他全局配置，例如上次使用的游戏路径等
     # "last_game_path": ""
 }
@@ -140,12 +146,16 @@ class ConfigManager:
         合并逻辑会确保新旧配置文件的兼容性。
         """
         loaded_config = {}
+        config_loaded = False
         if os.path.exists(self.config_file_path):
             try:
                 with open(self.config_file_path, 'r', encoding='utf-8') as f:
                     loaded_config = json.load(f)
+                if not isinstance(loaded_config, dict):
+                    raise ValueError("配置根节点必须是对象")
+                config_loaded = True
                 log.info(f"成功从 {self.config_file_path} 加载配置。")
-            except (json.JSONDecodeError, IOError) as e:
+            except (ValueError, IOError) as e:
                 log.error(f"加载配置文件 {self.config_file_path} 失败: {e}。将使用合并默认配置。")
                 loaded_config = {} # 加载失败则视为空配置
         else:
@@ -220,6 +230,21 @@ class ConfigManager:
              if key not in ('rtp_options', 'export_scope'):
                  pro_node.setdefault(key, default_value)
 
+        tools_node = final_config.setdefault('tools', {})
+        if not isinstance(tools_node, dict):
+            tools_node = final_config['tools'] = {}
+        shortcut_node = tools_node.setdefault('pro_shortcut', {})
+        if not isinstance(shortcut_node, dict):
+            shortcut_node = tools_node['pro_shortcut'] = {}
+        default_shortcut = DEFAULT_CONFIG['tools']['pro_shortcut']
+        tool_id = shortcut_node.get('tool_id')
+        if not isinstance(tool_id, str) or not tool_id.strip():
+            shortcut_node['tool_id'] = default_shortcut['tool_id']
+        shortcut_node.setdefault('launch_option_id', None)
+        option_id = shortcut_node['launch_option_id']
+        if option_id is not None and (not isinstance(option_id, str) or not option_id.strip()):
+            shortcut_node['launch_option_id'] = None
+
         # 确保顶层 selected_mode 存在
         final_config.setdefault('selected_mode', DEFAULT_CONFIG['selected_mode'])
         final_config.setdefault('enable_completion_notification', DEFAULT_CONFIG['enable_completion_notification'])
@@ -227,6 +252,10 @@ class ConfigManager:
             'completion_notification_identity_registered',
             DEFAULT_CONFIG['completion_notification_identity_registered'],
         )
+
+        # Persist the new shortcut for old installations without replacing their tools settings.
+        if config_loaded and loaded_config.get('tools') != tools_node:
+            self.save_config(final_config)
 
         return final_config
 

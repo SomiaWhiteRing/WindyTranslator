@@ -3,6 +3,7 @@
   "id": "example_tool",
   "category": "gui",
   "name": "示例 GUI 工具",
+  "pro_shortcut": {"short_name": "示例工具"},
   "version": "1.0.0",
   "author": "作者",
   "description": "一个可由 WindyTranslator 启动的源码工具。",

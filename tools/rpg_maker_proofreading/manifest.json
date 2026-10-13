@@ -3,6 +3,7 @@
   "id": "rpg_maker_proofreading",
   "category": "gui",
   "name": "RPG 制作大师校对工具",
+  "pro_shortcut": {"short_name": "文本校对"},
   "version": "4.5.0",
   "author": "JerryHOEI",
   "description": "检查 RPG Maker 翻译文本、辞典、标点和格式。",

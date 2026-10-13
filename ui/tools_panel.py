@@ -13,13 +13,15 @@ from core.utils.file_system import get_modules_path
 
 
 class ToolsPanel(ttk.Frame):
-    def __init__(self, parent, app):
+    def __init__(self, parent, app, shortcut_changed=None):
         super().__init__(parent, padding=8)
         self.app = app
+        self.shortcut_changed = shortcut_changed
+        self.launch_option_ids: dict[str, str] = {}
         self.manager = ToolManager(Path(app.executable_dir) / "tools")
         self.tools: list[ToolManifest] = []
         self.diagnostics: list[tuple[Path, str]] = []
-        self.output_queue: queue.Queue[tuple[RunningTool, str]] = queue.Queue()
+        self.output_queue: queue.Queue[tuple[RunningTool, str, bool]] = queue.Queue()
         self._build_ui()
         self.refresh_tools()
         self.after(150, self._poll_process)
@@ -82,23 +84,35 @@ class ToolsPanel(ttk.Frame):
         actions.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         self.start_button = ttk.Button(actions, text="启动工具", command=self.start_tool)
         self.start_button.pack(side=tk.LEFT)
+        self.shortcut_tool_var = tk.StringVar(value=self._shortcut()['tool_id'])
+        self.shortcut_radio = ttk.Radiobutton(
+            actions, text="设为快捷工具", variable=self.shortcut_tool_var,
+            command=self._register_shortcut,
+        )
 
     def _resize_detail(self, event):
         wraplength = max(1, event.width - 12)
         self.info_label.configure(wraplength=wraplength)
 
     def refresh_tools(self):
+        selected = self._selected()
+        selected_id = selected.id if selected else self._shortcut()['tool_id']
         self.tools, self.diagnostics = self.manager.discover()
         self.tool_list.delete(0, tk.END)
         for tool in self.tools:
             self.tool_list.insert(tk.END, tool.name)
         if self.tools:
-            self.tool_list.selection_set(0)
+            index = next((index for index, tool in enumerate(self.tools) if tool.id == selected_id), 0)
+            self.tool_list.selection_set(index)
             self._show_selected_tool()
         else:
             self.info_var.set("未发现可用工具。请将带 manifest.json 的工具目录放入 tools。")
+            self.options_frame.grid_remove()
+            self.status_label.grid_remove()
+            self.shortcut_radio.pack_forget()
         if self.diagnostics:
             self._write("工具扫描诊断：" + "; ".join(f"{path.name}: {error}" for path, error in self.diagnostics))
+        self._update_start_button()
 
     def _selected(self) -> ToolManifest | None:
         selected = self.tool_list.curselection()
@@ -111,6 +125,11 @@ class ToolsPanel(ttk.Frame):
             return
         self.info_var.set(f"{tool.name}\n版本：{tool.version}\n作者：{tool.author}\n\n{tool.description}")
         self._show_launch_options(tool)
+        if tool.pro_shortcut_name:
+            self.shortcut_radio.configure(value=tool.id)
+            self.shortcut_radio.pack(side=tk.LEFT, padx=(12, 0))
+        else:
+            self.shortcut_radio.pack_forget()
         if tool.errors:
             self.status_var.set("状态检查未通过")
             self.status_label.grid()
@@ -127,10 +146,13 @@ class ToolsPanel(ttk.Frame):
             self.option_combo.configure(values=())
             self.options_frame.grid_remove()
             return
-        self.option_var.set(tool.launch_options[0].id)
+        shortcut = self._shortcut()
+        option_id = shortcut['launch_option_id'] if shortcut['tool_id'] == tool.id else self.launch_option_ids.get(tool.id)
+        index = next((index for index, option in enumerate(tool.launch_options) if option.id == option_id), 0)
+        self.option_var.set(tool.launch_options[index].id)
         self.options_label_var.set(tool.launch_options_label)
         self.option_combo.configure(values=tuple(option.name for option in tool.launch_options))
-        self.option_combo.current(0)
+        self.option_combo.current(index)
         self.options_frame.grid()
 
     def _select_launch_option(self, _event):
@@ -139,12 +161,67 @@ class ToolsPanel(ttk.Frame):
             return
         index = self.option_combo.current()
         if 0 <= index < len(tool.launch_options):
-            self.option_var.set(tool.launch_options[index].id)
+            option_id = tool.launch_options[index].id
+            self.option_var.set(option_id)
+            self.launch_option_ids[tool.id] = option_id
+            if self._shortcut()['tool_id'] == tool.id:
+                self._save_shortcut(tool, option_id)
+
+    def _shortcut(self):
+        return self.app.config['tools']['pro_shortcut']
+
+    def _register_shortcut(self):
+        tool = self._selected()
+        if tool and tool.pro_shortcut_name and tool.available and not self.app.is_processing:
+            self._save_shortcut(tool, self.option_var.get() if tool.launch_options else None)
+        else:
+            self.shortcut_tool_var.set(self._shortcut()['tool_id'])
+
+    def _save_shortcut(self, tool, option_id):
+        previous = self._shortcut()
+        shortcut = dict(previous, tool_id=tool.id, launch_option_id=option_id)
+        if shortcut != previous:
+            self.app.config['tools']['pro_shortcut'] = shortcut
+            if not self.app.save_config():
+                self.app.config['tools']['pro_shortcut'] = previous
+                self._show_launch_options(tool)
+        self.shortcut_tool_var.set(self._shortcut()['tool_id'])
+        self.refresh_shortcut_state()
+
+    def _is_running(self, tool):
+        running = self.manager.running.get(tool.id)
+        return running is not None and running.process.poll() is None
+
+    def refresh_shortcut_state(self):
+        shortcut = self._shortcut()
+        tool = next((tool for tool in self.tools if tool.id == shortcut['tool_id']), None)
+        enabled = bool(tool and tool.pro_shortcut_name and tool.available)
+        if enabled:
+            try:
+                tool.arguments_for(shortcut['launch_option_id'])
+            except ToolSpecError:
+                enabled = False
+        if enabled:
+            enabled = not self.app.is_processing and not self._is_running(tool)
+        if self.shortcut_changed:
+            name = tool.pro_shortcut_name if tool and tool.pro_shortcut_name else "工具不可用"
+            self.shortcut_changed(name, enabled)
+
+    def start_shortcut(self):
+        shortcut = self._shortcut()
+        tool = next((tool for tool in self.tools if tool.id == shortcut['tool_id']), None)
+        if not tool or not tool.pro_shortcut_name:
+            messagebox.showerror("启动失败", "快捷工具不可用，请在小工具 Tab 使用“设为快捷工具”重新选择。", parent=self)
+            return
+        self.start_tool_by_id(tool.id, shortcut['launch_option_id'], from_shortcut=True)
 
     def _update_start_button(self):
         tool = self._selected()
-        state = tk.DISABLED if tool and tool.id in self.manager.running and self.manager.running[tool.id].process.poll() is None else tk.NORMAL
+        available = tool and tool.available and not self.app.is_processing and not self._is_running(tool)
+        state = tk.NORMAL if available else tk.DISABLED
         self.start_button.configure(state=state)
+        self.shortcut_radio.configure(state=tk.NORMAL if tool and tool.available and not self.app.is_processing else tk.DISABLED)
+        self.refresh_shortcut_state()
 
     def _open_tools_dir(self):
         self.manager.tools_root.mkdir(parents=True, exist_ok=True)
@@ -181,11 +258,20 @@ class ToolsPanel(ttk.Frame):
         if not tool:
             return
         option_id = self.option_var.get() if tool.launch_options else None
+        self.start_tool_by_id(tool.id, option_id)
+
+    def start_tool_by_id(self, tool_id, option_id=None, *, from_shortcut=False):
+        tool = next((tool for tool in self.tools if tool.id == tool_id), None)
+        if not tool:
+            return
+        if self.app.is_processing:
+            messagebox.showerror("启动失败", "请先等待当前任务完成。", parent=self)
+            return
         try:
             arguments = tool.arguments_for(option_id)
         except ToolSpecError as exc:
             messagebox.showerror("启动失败", str(exc), parent=self)
-            self._write(f"启动失败：{exc}")
+            self._write(f"启动失败：{exc}", to_main=from_shortcut)
             return
         needs_game_directory = any(
             argument.required and argument.type in {"game_path", "current_game_file"}
@@ -193,21 +279,21 @@ class ToolsPanel(ttk.Frame):
         )
         if needs_game_directory and not os.path.isdir(self.app.get_game_path() or ""):
             messagebox.showerror("启动失败", "请先选择一个有效的游戏目录。", parent=self)
-            self._write("启动失败：请先选择一个有效的游戏目录。")
+            self._write("启动失败：请先选择一个有效的游戏目录。", to_main=from_shortcut)
             return
         try:
             running = self.manager.start(tool, self._values(arguments), self._host_command(), option_id)
         except (ToolSpecError, OSError) as exc:
             messagebox.showerror("启动失败", str(exc), parent=self)
-            self._write(f"启动失败：{exc}")
+            self._write(f"启动失败：{exc}", to_main=from_shortcut)
             return
-        self._write(f"已启动：{tool.name}")
+        self._write(f"已启动：{tool.name}", to_main=from_shortcut)
         self._update_start_button()
 
         def read_output(process_info):
             if running.process.stdout:
                 for line in running.process.stdout:
-                    self.output_queue.put((process_info, line.rstrip()))
+                    self.output_queue.put((process_info, line.rstrip(), from_shortcut))
             running.process.wait()
 
         threading.Thread(target=read_output, args=(running,), daemon=True).start()
@@ -215,18 +301,20 @@ class ToolsPanel(ttk.Frame):
     def _poll_process(self):
         while True:
             try:
-                running, message = self.output_queue.get_nowait()
-                self._write(f"[{running.manifest.name}] {message}")
+                running, message, to_main = self.output_queue.get_nowait()
+                self._write(f"[{running.manifest.name}] {message}", to_main=to_main)
             except queue.Empty:
                 break
         for running in self.manager.clear_finished():
             if running.process.returncode:
-                self._write(f"[{running.manifest.name}] 工具已退出，退出码：{running.process.returncode}")
+                self._write(f"[{running.manifest.name}] 工具已退出，退出码：{running.process.returncode}", to_main=True)
         self._update_start_button()
         self.after(150, self._poll_process)
 
-    def _write(self, message):
+    def _write(self, message, *, to_main=False):
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.insert(tk.END, str(message) + "\n")
         self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
+        if to_main:
+            self.app.log_message(message)

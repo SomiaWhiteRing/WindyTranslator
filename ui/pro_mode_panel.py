@@ -119,7 +119,14 @@ class ProModePanel(ttk.Frame):
         self.deepseek_config_button = ttk.Button(row_frame_5, text="配置", width=config_button_width,
                                               command=lambda: self.app.start_task('configure_deepseek'))
         self.deepseek_config_button.pack(side=tk.RIGHT, padx=padx_val)
-        all_controls_list.extend([self.translate_button, self.deepseek_config_button])
+        self.tool_shortcut_text = tk.StringVar(value="问题审阅")
+        self.tool_shortcut_button = ttk.Button(
+            row_frame_5, textvariable=self.tool_shortcut_text, width=button_width + 2,
+            command=lambda: self.app.main_window.tools_panel.start_shortcut(),
+            state=tk.DISABLED,
+        )
+        self.tool_shortcut_button.pack(side=tk.RIGHT, padx=padx_val)
+        all_controls_list.extend([self.translate_button, self.deepseek_config_button, self.tool_shortcut_button])
         row_idx += 1
 
         # --- 6. 释放JSON文件 ---
@@ -161,6 +168,11 @@ class ProModePanel(ttk.Frame):
     def get_controls(self):
         """返回此面板上的所有可交互控件列表。"""
         return self.all_controls
+
+    def set_tool_shortcut(self, name, enabled):
+        if self.tool_shortcut_text.get() != name:
+            self.tool_shortcut_text.set(name)
+        self.tool_shortcut_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
 
     # ... (update_rtp_button_text, _set_combobox_value, _on_encoding_change, _save_settings 方法保持不变, 但注意 _save_settings 中获取 Combobox 值的方式可能需要调整，因为现在是通过 self 实例属性访问) ...
     def update_rtp_button_text(self):

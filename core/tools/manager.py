@@ -52,6 +52,7 @@ class ToolManifest:
     launch_options: tuple[LaunchOption, ...] = ()
     launch_options_label: str = "启动选项"
     errors: tuple[str, ...] = field(default_factory=tuple)
+    pro_shortcut_name: str | None = None
 
     @property
     def available(self) -> bool:
@@ -198,6 +199,15 @@ def load_manifest(path: Path) -> ToolManifest:
     if not isinstance(options_label, str) or not options_label.strip():
         raise ToolSpecError("launch_options_label 必须是非空字符串")
     arguments = () if launch_options else _parse_arguments(arguments_payload)
+    shortcut_name = None
+    if "pro_shortcut" in payload:
+        shortcut = payload["pro_shortcut"]
+        if not isinstance(shortcut, dict) or set(shortcut) != {"short_name"}:
+            raise ToolSpecError("pro_shortcut 必须是只包含 short_name 的对象")
+        shortcut_name = shortcut["short_name"]
+        if not isinstance(shortcut_name, str) or not shortcut_name.strip() or "\n" in shortcut_name or "\r" in shortcut_name:
+            raise ToolSpecError("pro_shortcut.short_name 必须是非空单行字符串")
+        shortcut_name = shortcut_name.strip()
     if not entry.is_file():
         errors.append(f"入口不存在: {entry.name}")
     errors.extend(f"资源不存在: {resource.relative_to(root)}" for resource in resources if not resource.exists())
@@ -216,6 +226,7 @@ def load_manifest(path: Path) -> ToolManifest:
         launch_options=launch_options,
         launch_options_label=options_label,
         errors=tuple(errors),
+        pro_shortcut_name=shortcut_name,
     )
 
 
@@ -259,6 +270,9 @@ class ToolManager:
 
     def start(self, manifest: ToolManifest, values: dict[str, Any], host_executable: str | list[str] | None = None,
               option_id: str | None = None) -> RunningTool:
+        existing = self.running.get(manifest.id)
+        if existing and existing.process.poll() is None:
+            raise ToolSpecError(f"工具已在运行: {manifest.name}")
         if not manifest.available:
             raise ToolSpecError("工具不可用: " + "; ".join(manifest.errors))
         for argument in manifest.arguments_for(option_id):
