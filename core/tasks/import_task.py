@@ -1,9 +1,11 @@
 # core/tasks/import_task.py
 import os
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from core.external import easyrpg, rpgrewriter
-from core.utils import rpg_rt_ini
+from core.utils import rpg_rt_ini, text_processing
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
@@ -14,6 +16,61 @@ def _read_title_file(path):
     if len(lines) != 2 or lines[0] != "#GameTitle#":
         raise ValueError("title.txt 格式无效")
     return lines[1]
+
+
+def _import_with_gbk_compatibility(game_path, import_encoding, message_queue):
+    lmt_path = Path(game_path) / "RPG_RT.lmt"
+    if str(import_encoding) not in rpg_rt_ini.SUPPORTED_ENCODINGS:
+        return rpgrewriter.import_text_command(str(lmt_path), import_encoding)
+
+    from core.tasks.json_creation import _extract_strings_from_file
+    from core.tasks.json_release import _apply_translations_to_file
+
+    scripts_path = Path(game_path) / "StringScripts"
+    replacements = {}
+    for path in scripts_path.rglob("*.txt"):
+        changes = {}
+        for original in _extract_strings_from_file(str(path)):
+            compatible = text_processing.apply_gbk_compatibility(original)
+            if compatible != original:
+                changes[original] = {"text": compatible}
+        if changes:
+            replacements[path.relative_to(scripts_path)] = changes
+
+    if not replacements:
+        return rpgrewriter.import_text_command(str(lmt_path), import_encoding)
+
+    # 底层工具固定读取 LMT 同目录的 StringScripts；在副本中执行，
+    # 不临时搬走用户的脚本目录，也不将兼容化文本写回原 TXT/JSON。
+    with tempfile.TemporaryDirectory(prefix=".windy-import-", dir=game_path) as temporary_dir:
+        staging_path = Path(temporary_dir)
+        originals = {
+            path: path.read_bytes()
+            for path in Path(game_path).iterdir()
+            if path.is_file() and path.suffix.lower() in {".lmt", ".ldb", ".lmu"}
+        }
+        for path, content in originals.items():
+            (staging_path / path.name).write_bytes(content)
+        for filename in ("input.txt", "UserSettings.txt"):
+            sidecar = Path(game_path) / filename
+            if sidecar.is_file():
+                shutil.copy2(sidecar, staging_path / sidecar.name)
+        staged_scripts = staging_path / "StringScripts"
+        shutil.copytree(scripts_path, staged_scripts)
+        for relative_path, changes in replacements.items():
+            _apply_translations_to_file(str(staged_scripts / relative_path), changes)
+
+        count = sum(len(changes) for changes in replacements.values())
+        message_queue.put(("log", ("normal", f"导入前在临时副本中兼容化 {count} 条文本，保留原始 TXT 和 JSON。")))
+        result = rpgrewriter.import_text_command(str(staging_path / lmt_path.name), import_encoding)
+        if result[0] == 0:
+            if any(path.read_bytes() != content for path, content in originals.items()):
+                raise RuntimeError("导入期间游戏数据被其他程序修改，已停止写回临时导入结果。")
+            for path, original_content in originals.items():
+                staged_file = staging_path / path.name
+                if staged_file.read_bytes() != original_content:
+                    os.replace(staged_file, path)
+        return result
 
 
 def run_import(game_path, source_encoding, import_encoding, message_queue):
@@ -102,7 +159,15 @@ def run_import(game_path, source_encoding, import_encoding, message_queue):
 
         if ini_path.exists():
             translated_title = _read_title_file(title_path) if title_path.exists() else None
-            ini_text, _ini_encoding = rpg_rt_ini.read_ini(ini_path, source_encoding)
+            ini_text, ini_encoding = rpg_rt_ini.read_ini(ini_path, source_encoding)
+            log.info(
+                "读取 RPG_RT.ini：文件编码=%s，游戏数据编码=%s，写入编码=%s",
+                ini_encoding, source_encoding, import_encoding,
+            )
+            if translated_title is None:
+                translated_title = rpg_rt_ini.get_game_title(ini_text)
+            if translated_title is not None and str(import_encoding) in rpg_rt_ini.SUPPORTED_ENCODINGS:
+                translated_title = text_processing.apply_gbk_compatibility(translated_title)
             if translated_title is not None:
                 ini_text = rpg_rt_ini.set_game_title(ini_text, translated_title)
             ini_text = rpg_rt_ini.set_full_package_flag(ini_text)
@@ -112,7 +177,7 @@ def run_import(game_path, source_encoding, import_encoding, message_queue):
             ini_temp_path.write_bytes(ini_bytes)
 
         # 执行导入命令
-        return_code, stdout, stderr = rpgrewriter.import_text_command(lmt_path, import_encoding)
+        return_code, stdout, stderr = _import_with_gbk_compatibility(game_path, import_encoding, message_queue)
 
         if return_code == 0:
             if ini_temp_path is not None:

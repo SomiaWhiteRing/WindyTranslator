@@ -25,8 +25,22 @@ def _get_value(text, section_name, key_name):
 
 
 def _encoding_hint(raw):
-    match = re.search(rb"(?im)^\s*Encoding\s*=\s*(\d+)\s*$", raw)
-    return match.group(1).decode("ascii") if match else None
+    value = _get_value(raw.decode("latin-1"), "EasyRPG", "Encoding")
+    code = value.strip() if value is not None else None
+    return code if code in SUPPORTED_ENCODINGS else None
+
+
+def _looks_like_misdecoded_kana(text, alternative):
+    # GBK 中的日文假名被按 932 读取时，会变成大量半角字符。
+    # 只有声明编码能还原出更多全角假名，且不含半角字符时才改选；
+    # Encoding 描述游戏数据，不能无条件当作 INI 的实际编码。
+    halfwidth = r"[\uff61-\uff9f]"
+    fullwidth = r"[\u3041-\u3096\u30a1-\u30fa]"
+    return (
+        re.search(halfwidth, text) is not None
+        and re.search(halfwidth, alternative) is None
+        and len(re.findall(fullwidth, alternative)) > len(re.findall(fullwidth, text))
+    )
 
 
 def read_ini(path, preferred_encoding, original_title=None):
@@ -34,8 +48,16 @@ def read_ini(path, preferred_encoding, original_title=None):
     if raw.startswith(codecs.BOM_UTF8):
         return raw.decode("utf-8-sig"), "utf-8-sig"
 
+    # 普通 UTF-8 同样有明确的字节校验，避免它被 932 误读。
+    if any(byte >= 0x80 for byte in raw):
+        try:
+            return raw.decode("utf-8"), "utf-8"
+        except UnicodeDecodeError:
+            pass
+
     candidates = []
-    for code in (preferred_encoding, _encoding_hint(raw), *SUPPORTED_ENCODINGS):
+    hint = _encoding_hint(raw)
+    for code in (preferred_encoding, hint, *SUPPORTED_ENCODINGS):
         if code and code not in candidates:
             candidates.append(code)
 
@@ -51,7 +73,12 @@ def read_ini(path, preferred_encoding, original_title=None):
 
     if not decoded:
         raise UnicodeDecodeError(codec_name(preferred_encoding), raw, 0, len(raw), "cannot decode RPG_RT.ini")
-    return decoded[0]
+    selected_text, selected_code = decoded[0]
+    if original_title is None and selected_code != hint:
+        for text, code in decoded:
+            if code == hint and _looks_like_misdecoded_kana(selected_text, text):
+                return text, code
+    return selected_text, selected_code
 
 
 def get_game_title(text):
@@ -165,4 +192,13 @@ def set_game_title(text, title):
 
 
 def encode_ini(text, target_encoding):
-    return text.encode(codec_name(target_encoding))
+    try:
+        return text.encode(codec_name(target_encoding))
+    except UnicodeEncodeError as error:
+        line = text.count("\n", 0, error.start) + 1
+        chars = text[error.start:error.end]
+        codepoints = " ".join(f"U+{ord(char):04X}" for char in chars)
+        raise ValueError(
+            f"RPG_RT.ini 第 {line} 行包含无法写入编码 {target_encoding} 的字符 "
+            f"{chars!r}（{codepoints}）。请检查游戏标题或 INI 注释中的这些字符后重试。"
+        ) from error

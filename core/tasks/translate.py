@@ -355,8 +355,6 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         # --- 获取翻译配置 ---
         current_translate_config = translate_config.copy()
-        apply_gbk_compatibility = not detected_game or detected_game.engine == "rm200x"
-        current_translate_config["_apply_gbk_compatibility_postprocess"] = apply_gbk_compatibility
         control_profile = control_tokens.profile_from_game(game_path)
         current_translate_config["_control_code_profile"] = control_profile
         if detected_game and detected_game.engine == "wolf":
@@ -379,10 +377,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 key=len,
                 reverse=True,
             ))
-        if detected_game and not apply_gbk_compatibility:
-            message_queue.put(("log", ("normal", f"检测到 {detected_game.engine}：跳过 RM2000/2003 的 GBK 字符兼容化后处理。")))
-        else:
-            message_queue.put(("log", ("normal", "启用 RM2000/2003 的 GBK 字符兼容化后处理。")))
+        message_queue.put(("log", ("normal", "翻译结果保留原符号；GBK 字符兼容替换仅在导入前处理。")))
         message_queue.put(("log", ("normal", f"控制码保护配置: {control_profile.summary}")))
         api_url = current_translate_config.get("api_url", "").strip()
         api_key = current_translate_config.get("api_key", "").strip()

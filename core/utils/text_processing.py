@@ -234,7 +234,19 @@ def repair_translation_quotes(text, original_text):
     return processed_text
 
 
-def post_process_translation(text, original_text, apply_gbk_compatibility=True, *, process_quotes=True):
+def apply_gbk_compatibility(text):
+    """仅用于导入副本的有损字符兼容处理，不修改保存的译文。"""
+    if not isinstance(text, str):
+        return text
+    for original, replacement in (
+        ('・', '·'), ('ー', '―'), ('—', '―'), ('♪', '～'), ('~', '～'),
+        ('⋯', '…'), ('≫', '》'), ('≪', '《'), ('⇒', '→'),
+    ):
+        text = text.replace(original, replacement)
+    return text
+
+
+def post_process_translation(text, original_text, *, process_quotes=True):
     """
     对翻译后的、已还原 PUA 的文本进行最终的清理和格式调整。
     分段翻译时关闭引号处理，待整条拼接完成后再调用 repair_translation_quotes。
@@ -261,19 +273,6 @@ def post_process_translation(text, original_text, apply_gbk_compatibility=True, 
             cleaned = TRANSLATION_METADATA_PREFIX_RE.sub("", cleaned)
             cleaned_lines.append(cleaned)
         processed_text = "\n".join(cleaned_lines)
-
-    # 规则 1: RM2000/2003 的 GBK 兼容字符替换。
-    # VX Ace / MV / MZ 使用 Unicode 数据文件，不需要牺牲 ♪ 等符号做兼容化。
-    if apply_gbk_compatibility:
-        processed_text = processed_text.replace('・', '·') # 日语点 -> 中文点
-        processed_text = processed_text.replace('ー', '―') # 日语长音 -> 中文破折号
-        processed_text = processed_text.replace('—', '―') # 半角破折号 -> 全角破折号
-        processed_text = processed_text.replace('♪', '～') # 音符 -> 波浪号
-        processed_text = processed_text.replace('~', '～') # 半角波浪号 -> 波浪号
-        processed_text = processed_text.replace('⋯', '…') # 日文间隔号 -> 中文省略号
-        processed_text = processed_text.replace('≫', '》') # 日语右尖括号 -> 全角右尖括号
-        processed_text = processed_text.replace('≪', '《') # 日语左尖括号 -> 全角左尖括号
-        processed_text = processed_text.replace('⇒', '→') # 日语右箭头 -> 全角右箭头
 
     # 规则 2–3: 引号清理和平衡只针对完整条目处理。
     if process_quotes:

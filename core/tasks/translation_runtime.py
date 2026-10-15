@@ -152,7 +152,6 @@ def validate_item(item, transport, raw, config, wolf_mappings=()):
     repaired = text_processing.repair_translation_format(source, restored)
     processed = text_processing.post_process_translation(
         repaired, source,
-        apply_gbk_compatibility=config.get("_apply_gbk_compatibility_postprocess", True),
         process_quotes=not config.get("_fragment_mode", False),
     )
     # Post-processing historically strips final empty lines. Restore only empty
