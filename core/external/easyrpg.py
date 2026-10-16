@@ -11,6 +11,8 @@ log = logging.getLogger(__name__)
 EASYRPG_SRC_DIR = os.path.join(get_modules_path(), "EasyRPG")
 EASYRPG_PLAYER_PATH = os.path.join(EASYRPG_SRC_DIR, "Player.exe")
 EASYRPG_ENCODING_MAP = {
+    "utf-8": "65001",
+    "utf8": "65001",
     "ibm-943_p15a-2003": "932",
     "windows-936-2000": "936",
     "windows-949-2000": "949",

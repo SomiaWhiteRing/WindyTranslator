@@ -16,7 +16,7 @@ class ProModePanel(ttk.Frame):
 
         # --- 控件变量 (不变) ---
         self.export_source_encoding_var = tk.StringVar(value=pro_settings.get('export_source_encoding', 'auto'))
-        self.import_encoding_var = tk.StringVar(value=pro_settings.get('import_encoding', '936'))
+        self.import_encoding_var = tk.StringVar(value=config['output_settings']['legacy_encoding'])
         self.auto_import_after_release_check = tk.BooleanVar(value=pro_settings.get('auto_import_after_release', False))
         self.export_scope = dict(pro_settings.get('export_scope', {}))
         self.rtp_button_text = tk.StringVar()
@@ -24,6 +24,7 @@ class ProModePanel(ttk.Frame):
         # --- 编码选项列表 (不变) ---
         self.encoding_options = [
             ("自动检测", "auto"),
+            ("UTF-8", "65001"),
             ("日语 (Shift-JIS)", "932"), ("中文简体 (GBK)", "936"), ("中文繁体 (Big5)", "950"),
             ("韩语 (EUC-KR)", "949"), ("泰语", "874"), ("拉丁语系 (西欧)", "1252"),
             ("东欧", "1250"), ("西里尔字母", "1251")
@@ -50,6 +51,7 @@ class ProModePanel(ttk.Frame):
 
             desc_label = ttk.Label(row_frame, text=description_text)
             desc_label.pack(side=tk.LEFT, padx=(padx_val, 0))
+            row_frame.description_label = desc_label
 
             # 返回行容器，用于向右侧添加按钮
             return row_frame
@@ -82,6 +84,7 @@ class ProModePanel(ttk.Frame):
 
         # --- 2. 重写文件名 ---
         row_frame_2 = create_row(self, "2. 重写文件名", "非ASCII文件名转Unicode")
+        self.rename_description = row_frame_2.description_label
         self.rename_button = ttk.Button(row_frame_2, text="执行", width=button_width,
                                        command=lambda: self.app.start_task('rename'))
         self.rename_button.pack(side=tk.RIGHT, padx=padx_val)
@@ -151,13 +154,15 @@ class ProModePanel(ttk.Frame):
         self.import_button.pack(side=tk.RIGHT, padx=padx_val)
         # 编码控件组合
         encoding_frame_import = ttk.Frame(row_frame_7)
+        self.import_encoding_frame = encoding_frame_import
         encoding_frame_import.pack(side=tk.RIGHT, padx=padx_val)
         self.import_encoding_combo = ttk.Combobox(encoding_frame_import, textvariable=self.import_encoding_var,
-                                             values=self.encoding_display_values, state="readonly", width=config_control_width - 2)
+                                             values=[value for value in self.encoding_display_values if value.split(' - ')[-1] not in ('auto', '65001')], state="readonly", width=config_control_width - 2)
         ttk.Label(encoding_frame_import, text="编码:").pack(side=tk.LEFT, padx=(0, 2))
         self.import_encoding_combo.pack(side=tk.LEFT)
         self.import_encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
         self._set_combobox_value(self.import_encoding_combo, self.import_encoding_var.get())
+        self.output_mode = "legacy"
         all_controls_list.extend([self.import_button, self.import_encoding_combo])
         row_idx += 1
 
@@ -168,6 +173,36 @@ class ProModePanel(ttk.Frame):
     def get_controls(self):
         """返回此面板上的所有可交互控件列表。"""
         return self.all_controls
+
+    def set_output_profile(self, profile):
+        self.output_mode = profile["mode"] if profile else "legacy"
+        if profile:
+            self._set_combobox_value(self.import_encoding_combo, profile["legacy_encoding"])
+            source_code = profile["source_encoding"]
+            self.export_source_encoding_var.set(next(
+                value for value in self.encoding_display_values if value.endswith(f" - {source_code}")
+            ))
+        else:
+            self._set_combobox_value(self.import_encoding_combo, self.config['output_settings']['legacy_encoding'])
+            source_code = self.config.get("pro_mode_settings", {}).get("export_source_encoding", "auto")
+            self.export_source_encoding_var.set(next(
+                (value for value in self.encoding_display_values if value.endswith(f" - {source_code}")),
+                self.encoding_display_values[0],
+            ))
+        if self.output_mode == "utf8":
+            self.import_encoding_frame.pack_forget()
+            self.rename_description.configure(text="")
+        else:
+            self.import_encoding_frame.pack(side=tk.RIGHT, padx=5)
+            self.rename_description.configure(text="非ASCII文件名转Unicode")
+        self.apply_output_mode_state()
+
+    def apply_output_mode_state(self):
+        utf8 = self.output_mode == "utf8"
+        self.rename_button.configure(
+            text="无需执行" if utf8 else "执行",
+            state=tk.DISABLED if utf8 or self.app.is_processing else tk.NORMAL,
+        )
 
     def set_tool_shortcut(self, name, enabled):
         if self.tool_shortcut_text.get() != name:
@@ -200,7 +235,7 @@ class ProModePanel(ttk.Frame):
 
     def _on_encoding_change(self, event=None):
         """当编码下拉框选择变化时保存设置。"""
-        self._save_settings()
+        self._save_settings({"legacy_encoding": self.import_encoding_var.get().split(' - ')[-1]})
 
     def _show_export_settings(self):
         dialog = tk.Toplevel(self)
@@ -306,28 +341,20 @@ class ProModePanel(ttk.Frame):
         button_frame.pack(fill=tk.X, padx=12, pady=(6, 12))
 
         def save():
-            self.export_source_encoding_var.set(encoding_var.get())
             self.export_scope = {key: var.get() for key, var in scope_vars.items()}
             self.export_scope["game_text"] = True
-            self._save_settings()
-            dialog.destroy()
+            settings = {"export_scope": dict(self.export_scope)}
+            selected_code = encoding_var.get().split(' - ')[-1]
+            if selected_code != export_code:
+                settings["export_source_encoding"] = selected_code
+            if self._save_settings(settings):
+                dialog.destroy()
 
         ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(button_frame, text="确定", command=save).pack(side=tk.RIGHT)
 
-    def _save_settings(self):
-        """将当前面板上的设置保存到 App 配置中。"""
-        # 现在可以直接通过实例属性访问 Combobox
-        export_display = self.export_source_encoding_var.get()
-        import_display = self.import_encoding_var.get()
-
-        export_code = export_display.split(' - ')[-1]
-        import_code = import_display.split(' - ')[-1] if ' - ' in import_display else '936'
-
-        settings_to_save = {
-            'export_source_encoding': export_code,
-            'import_encoding': import_code,
-            'export_scope': dict(self.export_scope),
-            'auto_import_after_release': self.auto_import_after_release_check.get(),
-        }
-        self.app.save_pro_mode_settings(settings_to_save)
+    def _save_settings(self, settings=None):
+        """仅保存用户本次改动的字段，避免回写其他实例更新前的编码。"""
+        if settings is None:
+            settings = {'auto_import_after_release': self.auto_import_after_release_check.get()}
+        return self.app.save_pro_mode_settings(settings)

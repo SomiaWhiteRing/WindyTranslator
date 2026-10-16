@@ -3,6 +3,7 @@ import os
 import logging
 from core.utils import file_system # 导入文件系统工具以确保目录存在
 from core.tasks.translation_protocol import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
+from core.utils.output_mode import DEFAULT_OUTPUT_SETTINGS, migrate_settings
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +86,6 @@ DEFAULT_TRANSLATE_CONFIG = {
 # --- 默认专业模式配置 ---
 DEFAULT_PRO_MODE_SETTINGS = {
     "export_source_encoding": "auto",
-    "import_encoding": "936",   # 默认 GBK
     "export_scope": {
         "game_text": True,
         "game_title": True,
@@ -112,6 +112,7 @@ DEFAULT_CONFIG = {
     "enable_completion_notification": False,
     "completion_notification_identity_registered": False,
     "updates": {"check_on_startup": True},
+    "output_settings": DEFAULT_OUTPUT_SETTINGS,
     # 使用深拷贝确保子字典独立
     "world_dict_config": DEFAULT_WORLD_DICT_CONFIG.copy(),
     "translate_config": DEFAULT_TRANSLATE_CONFIG.copy(),
@@ -230,6 +231,12 @@ class ConfigManager:
              if key not in ('rtp_options', 'export_scope'):
                  pro_node.setdefault(key, default_value)
 
+        final_config["output_settings"] = migrate_settings(
+            loaded_config.get("output_settings"),
+            os.path.exists(self.config_file_path),
+            pro_node.pop("import_encoding", "936"),
+        )
+
         tools_node = final_config.setdefault('tools', {})
         if not isinstance(tools_node, dict):
             tools_node = final_config['tools'] = {}
@@ -253,8 +260,12 @@ class ConfigManager:
             DEFAULT_CONFIG['completion_notification_identity_registered'],
         )
 
-        # Persist the new shortcut for old installations without replacing their tools settings.
-        if config_loaded and loaded_config.get('tools') != tools_node:
+        # 持久化补齐的设置，并移除已用于升级初始化的旧配置字段。
+        if config_loaded and (
+            loaded_config.get('tools') != tools_node
+            or loaded_config.get("output_settings") != final_config["output_settings"]
+            or loaded_config.get("pro_mode_settings") != pro_node
+        ):
             self.save_config(final_config)
 
         return final_config
@@ -273,8 +284,7 @@ class ConfigManager:
                  file_system.ensure_dir_exists(config_dir) # 使用工具函数创建
 
             # 使用缩进美化 JSON 输出，确保 UTF-8 编码
-            with open(self.config_file_path, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=4, ensure_ascii=False)
+            file_system.write_json_atomic(self.config_file_path, config_data)
             log.info(f"配置已成功保存到: {self.config_file_path}")
             return True
         except (IOError, TypeError) as e:

@@ -17,6 +17,7 @@ from . import rtp_dialog # 需要调用更新按钮文本
 from . import config_dialogs # 可能需要引用
 from . import dict_editor # 可能需要引用
 from . import tools_panel
+from .output_mode_panel import OutputModePanel
 
 class MainWindow:
     """应用程序的主窗口 UI 类。"""
@@ -45,7 +46,7 @@ class MainWindow:
         main_frame.pack(fill=tk.BOTH, expand=True)
         # **** Grid 配置: 让 main_frame 的列 0 和行 2 (日志区) 可以扩展 ****
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(2, weight=1) # 日志区所在行
+        main_frame.rowconfigure(3, weight=1) # 日志区所在行
 
         # --- 1. 游戏路径选择区域 ---
         path_frame = ttk.LabelFrame(main_frame, text="游戏路径", padding="5")
@@ -61,10 +62,14 @@ class MainWindow:
         self.browse_button = ttk.Button(path_frame, text="浏览...", command=self.app.browse_game_path)
         self.browse_button.grid(row=0, column=1, padx=5, pady=5) # 按钮不需要扩展
 
+        self.output_mode_panel = OutputModePanel(main_frame, self.app)
+        self.output_mode_panel.grid(row=1, column=0, sticky="ew", pady=(0, 3))
+        self.output_mode_panel.grid_remove()
+
         # --- 2. 功能区 Notebook ---
         self.functions_notebook = ttk.Notebook(main_frame)
         # 让 Notebook 水平填充
-        self.functions_notebook.grid(row=1, column=0, sticky="ew", padx=0, pady=5)
+        self.functions_notebook.grid(row=2, column=0, sticky="ew", padx=0, pady=5)
         # Notebook 本身不需要 weight，因为它的大小由内容决定或固定
 
         # 创建模式面板实例 (将 App 控制器传递给它们)
@@ -101,7 +106,7 @@ class MainWindow:
         # --- 3. 日志区域 ---
         log_frame = ttk.LabelFrame(main_frame, padding="5")
         # **** 让 log_frame 在主框架中双向填充 ****
-        log_frame.grid(row=2, column=0, sticky="nsew", padx=0, pady=5)
+        log_frame.grid(row=3, column=0, sticky="nsew", padx=0, pady=5)
         # **** Grid 配置: 让 log_frame 内部的 Text (行 0, 列 0) 可以双向扩展 ****
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
@@ -131,7 +136,7 @@ class MainWindow:
         # --- 4. 状态栏 ---
         status_frame = ttk.Frame(main_frame, padding=(5, 2))
         # 让 status_frame 水平填充
-        status_frame.grid(row=3, column=0, sticky="ew", padx=0, pady=(5, 0))
+        status_frame.grid(row=4, column=0, sticky="ew", padx=0, pady=(5, 0))
         # **** Grid 配置: 让 status_frame 内的 Label (列 0) 可以水平扩展 ****
         status_frame.columnconfigure(0, weight=1)
 
@@ -144,7 +149,9 @@ class MainWindow:
 
         # --- 保存控件引用，方便启用/禁用 ---
         self.all_controls = [
+            self.game_path_entry,
             self.browse_button,
+            self.output_mode_panel.get_controls(),
             self.completion_notification_checkbox,
             self.easy_panel.get_controls(), # EasyModePanel 需要提供获取其控件的方法
             self.pro_panel.get_controls(),  # ProModePanel 需要提供获取其控件的方法
@@ -244,6 +251,8 @@ class MainWindow:
                      pass
 
         self.tools_panel.refresh_shortcut_state()
+        self.output_mode_panel.set_enabled(enabled)
+        self.pro_panel.apply_output_mode_state()
 
     def get_current_mode(self):
         """获取当前选中的 Notebook 标签页对应的模式 ('easy' 或 'pro')。"""
@@ -286,9 +295,12 @@ class MainWindow:
         )
 
     def _refresh_game_context(self, token):
+        if token != self._game_context_token:
+            return
         self._path_check_after_id = None
         path = self.app.get_game_path().strip()
         detected = detect_game_engine(path) if path else None
+        self.output_mode_panel.refresh(path, detected)
         is_wolf = bool(detected and detected.engine == "wolf")
         if not is_wolf:
             return

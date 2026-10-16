@@ -27,7 +27,12 @@ def _get_value(text, section_name, key_name):
 def _encoding_hint(raw):
     value = _get_value(raw.decode("latin-1"), "EasyRPG", "Encoding")
     code = value.strip() if value is not None else None
-    return code if code in SUPPORTED_ENCODINGS else None
+    return code if code in (*SUPPORTED_ENCODINGS, "65001") else None
+
+
+def read_game_encoding_hint(path):
+    """读取显式游戏编码声明；INI 文件本身的编码不代表游戏数据编码。"""
+    return _encoding_hint(path.read_bytes().removeprefix(codecs.BOM_UTF8))
 
 
 def _looks_like_misdecoded_kana(text, alternative):
@@ -193,7 +198,8 @@ def set_game_title(text, title):
 
 def encode_ini(text, target_encoding):
     try:
-        return text.encode(codec_name(target_encoding))
+        encoding = "utf-8-sig" if str(target_encoding) == "65001" else codec_name(target_encoding)
+        return text.encode(encoding)
     except UnicodeEncodeError as error:
         line = text.count("\n", 0, error.start) + 1
         chars = text[error.start:error.end]

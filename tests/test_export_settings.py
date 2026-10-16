@@ -34,7 +34,7 @@ def test_import_rejects_unrepresentable_title_without_touching_ini(monkeypatch, 
     called = []
     monkeypatch.setattr(import_task.rpgrewriter, "import_text_command", lambda *_args: called.append(True))
 
-    import_task.run_import(str(game_path), "932", "936", Queue())
+    import_task.run_import(str(game_path), "932", "936", Queue(), "legacy")
 
     assert called == []
     assert hashlib.sha256(ini_path.read_bytes()).hexdigest() == original_hash

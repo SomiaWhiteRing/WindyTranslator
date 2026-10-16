@@ -9,6 +9,7 @@ import traceback
 import logging
 import time
 import platform
+import copy
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -24,9 +25,11 @@ from core.tasks import (
 )
 from core.utils import (text_processing, dictionary_manager)
 from ui.dict_editor import DictEditorWindow
-from core.utils.file_system import get_executable_dir, ensure_dir_exists  # 导入路径辅助函数
+from core.utils.file_system import get_executable_dir, ensure_dir_exists, write_json_atomic  # 导入路径辅助函数
 from core.utils.engine_detection import detect_game_engine
 from core.utils import windows_notifications
+from core.utils import output_mode
+from core.external import easyrpg
 from core.utils.task_control import exclusive_work, WorkBusyError
 from core.updates import load_build_info
 from ui.update_dialog import UpdateController
@@ -168,6 +171,7 @@ class RPGTranslatorApp:
             detected = detect_game_engine(path)
             if detected:
                 self.game_path.set(path)
+                self.main_window.refresh_game_context()
                 self.log_message(f"已选择游戏目录: {path} ({detected.engine})")
                 self.update_status("游戏目录已选择，可以开始操作。")
             else:
@@ -180,7 +184,61 @@ class RPGTranslatorApp:
 
     def get_game_path(self):
         """获取当前游戏路径。"""
-        return self.game_path.get()
+        path = self.game_path.get().strip()
+        return os.path.normpath(path) if path else ""
+
+    def get_output_profile(self, game_path=None):
+        return output_mode.get_profile(self.config, game_path or self.get_game_path(), self.works_dir)
+
+    def ensure_output_profile(self, game_path):
+        if getattr(self, "_resolving_output_profile", False):
+            return None
+        self._resolving_output_profile = True
+        try:
+            return output_mode.ensure_project(
+                self.config, game_path, self.works_dir, self._resolve_unrecorded_encoding,
+            )
+        except WorkBusyError as error:
+            messagebox.showwarning("作品正在处理", str(error), parent=self.root)
+        except (OSError, ValueError) as error:
+            log.exception("读取或创建工程设置失败")
+            messagebox.showerror("工程设置失败", str(error), parent=self.root)
+        finally:
+            self._resolving_output_profile = False
+        return None
+
+    def _resolve_unrecorded_encoding(self, game_path):
+        try:
+            return output_mode.detect_unrecorded_encoding(game_path)
+        except (easyrpg.EncodingDetectionError, OSError, UnicodeError) as error:
+            return self.main_window.output_mode_panel.choose_source_encoding(game_path, str(error))
+
+    def set_output_profile(self, game_path, mode, make_default=False):
+        previous = copy.deepcopy(self.config["output_settings"])
+        try:
+            with exclusive_work(game_path, self.works_dir):
+                previous_project = output_mode.save_project_locked(
+                    self.config, game_path, self.works_dir, mode=mode,
+                    make_default=make_default,
+                )
+                self.config["output_settings"]["onboarding_seen"] = True
+                self.config["output_settings"]["upgrade_notice_pending"] = False
+                if not self.save_config():
+                    self.config["output_settings"] = previous
+                    write_json_atomic(output_mode.project_settings_path(game_path, self.works_dir), previous_project)
+                    return False
+        except WorkBusyError as error:
+            messagebox.showwarning("作品正在处理", str(error), parent=self.root)
+            return False
+        except (OSError, ValueError) as error:
+            self.config["output_settings"] = previous
+            log.exception("保存工程输出设置失败")
+            messagebox.showerror("保存失败", f"无法保存输出方式：{error}", parent=self.root)
+            return False
+        detected = detect_game_engine(self.get_game_path())
+        self.main_window.output_mode_panel.refresh(self.get_game_path(), detected, show_intro=False)
+        self.log_message("输出方式已保存，下一次导入将使用所选方式。")
+        return True
 
     def start_task(self, task_name, mode='pro', game_path=None, task_id_for_callback=None, task_payload=None):
         """
@@ -230,8 +288,22 @@ class RPGTranslatorApp:
         # 从配置中获取所需参数
         pro_config = self.config.get('pro_mode_settings', {}) # 专业模式的独立配置
         rtp_options = pro_config.get('rtp_options', {'2000': True, '2000en': False, '2003': False, '2003steam': False, '2003zh_tw': False})
-        export_source_encoding = pro_config.get('export_source_encoding', 'auto')
-        import_encoding = pro_config.get('import_encoding', '936')
+        source_encoding = pro_config.get('export_source_encoding', 'auto')
+        target_encoding = self.config['output_settings']['legacy_encoding']
+        project_output_mode = "legacy"
+        detected = detect_game_engine(current_game_path) if current_game_path else None
+        if detected and detected.engine == "rm200x":
+            profile = self.ensure_output_profile(current_game_path)
+            if profile is None:
+                return
+            if task_name in CONTINUOUS_TASK_NAMES and not self.config["output_settings"]["onboarding_seen"]:
+                self.main_window.output_mode_panel.refresh(current_game_path, detected, show_intro=False)
+                if not self.main_window.output_mode_panel.show_choice(initial=True):
+                    return
+                profile = self.get_output_profile(current_game_path)
+            project_output_mode = profile["mode"]
+            source_encoding = profile["source_encoding"]
+            target_encoding = profile["target_encoding"]
         export_scope = pro_config.get('export_scope', {})
         world_dict_config = self.config.get('world_dict_config', {})
         translate_config = self.config.get('translate_config', {})
@@ -239,13 +311,18 @@ class RPGTranslatorApp:
         # 根据 task_name 选择任务函数和参数
         if task_name == 'initialize':
             task_func = initialize.run_initialize
-            task_args = [current_game_path, rtp_options, export_source_encoding, self.message_queue]
+            task_args = [current_game_path, rtp_options]
+            task_kwargs = dict(source_encoding=source_encoding, message_queue=self.message_queue,
+                               output_mode=project_output_mode)
         elif task_name == 'rename':
             task_func = rename.run_rename
             task_args = [current_game_path, self.message_queue]
+            task_kwargs = dict(source_encoding=source_encoding, output_mode=project_output_mode)
         elif task_name == 'export':
             task_func = export.run_export
-            task_args = [current_game_path, export_source_encoding, export_scope, self.message_queue]
+            task_args = [current_game_path]
+            task_kwargs = dict(source_encoding=source_encoding, export_scope=export_scope,
+                               message_queue=self.message_queue)
         elif task_name == 'create_json':
             task_func = json_creation.run_create_json
             task_args = [current_game_path, self.works_dir, self.message_queue]
@@ -281,7 +358,9 @@ class RPGTranslatorApp:
                 return
         elif task_name == 'import':
             task_func = import_task.run_import
-            task_args = [current_game_path, export_source_encoding, import_encoding, self.message_queue]
+            task_args = [current_game_path]
+            task_kwargs = dict(source_encoding=source_encoding, target_encoding=target_encoding,
+                               message_queue=self.message_queue, output_mode=project_output_mode)
         elif task_name == 'apply_wolf_fonts':
             from core.engines import wolf
 
@@ -294,12 +373,13 @@ class RPGTranslatorApp:
                  return
 
              task_func = easy_mode_flow.run_easy_flow
-             task_args = [
-                 current_game_path, self.works_dir,
-                  rtp_options, export_source_encoding, import_encoding, export_scope,
-                 world_dict_config, translate_config,
-                 self.message_queue
-             ]
+             task_args = [current_game_path, self.works_dir, rtp_options]
+             task_kwargs = dict(
+                 source_encoding=source_encoding, target_encoding=target_encoding,
+                 export_scope=export_scope, world_dict_config=world_dict_config,
+                 translate_config=translate_config, message_queue=self.message_queue,
+                 output_mode=project_output_mode,
+             )
         # --- 新增：手动应用基础字典任务 ---
         elif task_name == 'apply_base_dictionary_manual':
             task_func = apply_base_dictionary.run_apply_base_dictionary
@@ -345,8 +425,42 @@ class RPGTranslatorApp:
         """保存专业模式的设置到配置中。由 ProModePanel 调用。"""
         if 'pro_mode_settings' not in self.config:
             self.config['pro_mode_settings'] = {}
-        self.config['pro_mode_settings'].update(settings)
-        self.save_config() # 保存到文件
+        path = self.get_game_path()
+        detected = detect_game_engine(path) if path else None
+        global_settings = {key: value for key, value in settings.items() if key in cfg.DEFAULT_PRO_MODE_SETTINGS}
+        encoding = settings.get("legacy_encoding")
+        if detected and detected.engine == "rm200x":
+            global_settings.pop("export_source_encoding", None)
+            previous_pro = copy.deepcopy(self.config['pro_mode_settings'])
+            try:
+                with exclusive_work(path, self.works_dir):
+                    profile = self.get_output_profile(path)
+                    if profile["mode"] != "legacy":
+                        encoding = None
+                    previous_project = output_mode.save_project_locked(
+                        self.config, path, self.works_dir, legacy_encoding=encoding,
+                        source_encoding=settings.get("export_source_encoding"),
+                    )
+                    self.config['pro_mode_settings'].update(global_settings)
+                    if not self.save_config():
+                        self.config['pro_mode_settings'] = previous_pro
+                        write_json_atomic(output_mode.project_settings_path(path, self.works_dir), previous_project)
+                        return False
+            except WorkBusyError as error:
+                messagebox.showwarning("作品正在处理", str(error), parent=self.root)
+                return False
+            except (OSError, ValueError) as error:
+                log.exception("保存专业模式设置失败")
+                messagebox.showerror("保存失败", str(error), parent=self.root)
+                return False
+        elif encoding in output_mode.SUPPORTED_ENCODINGS:
+            self.config['output_settings']['legacy_encoding'] = encoding
+        if not detected or detected.engine != "rm200x":
+            self.config['pro_mode_settings'].update(global_settings)
+            if not self.save_config():
+                return False
+        self.main_window.output_mode_panel.refresh(path, detected, show_intro=False)
+        return True
 
     def save_config(self):
         """保存当前应用配置。"""
@@ -461,6 +575,8 @@ class RPGTranslatorApp:
         self._task_stop = threading.Event()
         task_message_proxy = TaskMessageProxy(self.message_queue, self._task_stop)
         tracked_args = self._replace_message_queue_arg(args, task_message_proxy)
+        kwargs = {key: task_message_proxy if value is self.message_queue else value
+                  for key, value in kwargs.items()}
 
         # 从 kwargs 中提取 task_id_for_callback，以便在异常时使用
         # 实际的 task_id 会通过 kwargs 传递给 task_func
@@ -472,7 +588,23 @@ class RPGTranslatorApp:
             try:
                 with exclusive_work(args[0], self.works_dir):
                     if not self._task_stop.is_set():
+                        # 参数也在锁内读取，避免等待任务启动时另一实例已完成转码。
+                        target_encoding = None
+                        detected = detect_game_engine(args[0])
+                        if "source_encoding" in kwargs and detected and detected.engine == "rm200x":
+                            profile = self.get_output_profile(args[0])
+                            if not profile["recorded"]:
+                                raise ValueError("当前游戏路径尚未完成编码登记")
+                            kwargs["source_encoding"] = profile["source_encoding"]
+                            if "target_encoding" in kwargs:
+                                target_encoding = kwargs["target_encoding"] = profile["target_encoding"]
+                            if "output_mode" in kwargs:
+                                kwargs["output_mode"] = profile["mode"]
                         task_result = task_func(*tracked_args, **kwargs)
+                        if task_result and not task_message_proxy.has_problem and target_encoding is not None:
+                            detected = detect_game_engine(args[0])
+                            if detected and detected.engine == "rm200x":
+                                output_mode.record_import_encoding_locked(args[0], self.works_dir, target_encoding)
                         task_succeeded = bool(task_result)
                 # 注意：任务成功完成的消息由任务自身通过队列发送 ("success", ...)
             except WorkBusyError as e:
@@ -515,6 +647,9 @@ class RPGTranslatorApp:
         if task_name == 'apply_wolf_fonts' and hasattr(self.main_window, "font_panel"):
             self.main_window.font_panel.finish_apply()
         self.set_processing_state(False)
+        if task_succeeded and task_name in ("import", "easy_flow"):
+            path = self.get_game_path()
+            self.main_window.output_mode_panel.refresh(path, detect_game_engine(path) if path else None, show_intro=False)
         auto_import_pending = task_name == 'release_json' and task_succeeded and self._should_auto_import_after_release()
         if self._should_emit_completion_notification(task_name, mode, task_succeeded) and not auto_import_pending:
             self.root.after(50, lambda: self._maybe_send_completion_notification(has_problem))
@@ -753,7 +888,23 @@ class RPGTranslatorApp:
         vxace_exe = os.path.join(current_game_path, "Game.exe") # VX Ace / MV / MZ
 
         exe_to_run = None
-        if os.path.exists(player_exe):
+        detected = detect_game_engine(current_game_path)
+        profile = self.get_output_profile(current_game_path) if detected and detected.engine == "rm200x" else None
+        current_encoding = None
+        if profile:
+            try:
+                current_encoding = easyrpg.resolve_game_encoding(current_game_path, profile["source_encoding"])
+            except (easyrpg.EncodingDetectionError, OSError, UnicodeError) as error:
+                log.exception("启动前读取游戏数据编码失败")
+                messagebox.showerror("启动失败", f"无法确定当前游戏数据编码：\n{error}", parent=self.root)
+                return
+        requires_utf8_player = current_encoding == "65001"
+        if requires_utf8_player:
+            exe_to_run = player_exe if os.path.isfile(player_exe) else easyrpg.EASYRPG_PLAYER_PATH
+            if not os.path.isfile(exe_to_run):
+                messagebox.showerror("需要兼容播放器", "当前游戏数据为 UTF-8，需要 EasyRPG 或支持 UTF-8 的专用 RPG_RT。请先执行初始化，或自行用专用 RPG_RT 运行。", parent=self.root)
+                return
+        elif os.path.exists(player_exe):
             exe_to_run = player_exe
         elif os.path.exists(vxace_exe):
             exe_to_run = vxace_exe

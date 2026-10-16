@@ -12,12 +12,13 @@ def run_easy_flow(
     game_path,
     works_dir,
     rtp_options,
-    export_source_encoding,
-    import_encoding, # import_task 需要
+    source_encoding,
+    target_encoding,
     export_scope,
     world_dict_config, # dict_generation 需要
     translate_config, # translate 需要
-    message_queue
+    message_queue,
+    output_mode,
 ):
     """
     按顺序执行轻松模式下的所有翻译步骤。
@@ -26,8 +27,8 @@ def run_easy_flow(
         game_path (str): 游戏路径。
         works_dir (str): Works 目录。
         rtp_options (dict): RTP 选择。
-        export_source_encoding (str): 导出编码选择。
-        import_encoding (str): 导入编码。
+        source_encoding (str): 当前游戏数据的读取编码选择。
+        target_encoding (str): 导入时使用的目标编码。
         world_dict_config (dict): Gemini 配置。
         translate_config (dict): DeepSeek 配置。
         message_queue (queue.Queue): 消息队列。
@@ -36,14 +37,16 @@ def run_easy_flow(
     total_steps = 8 # 定义总步骤数
 
     steps = [
-        {"name": "初始化", "func": initialize.run_initialize, "args": [game_path, rtp_options, export_source_encoding, message_queue]},
-        {"name": "导出文本", "func": export.run_export, "args": [game_path, export_source_encoding, export_scope, message_queue]},
-        {"name": "重写文件名", "func": rename.run_rename, "args": [game_path, message_queue]},
+        {"name": "初始化", "func": initialize.run_initialize, "args": [game_path, rtp_options],
+         "kwargs": dict(source_encoding=source_encoding, message_queue=message_queue, output_mode=output_mode)},
+        {"name": "导出文本", "func": export.run_export, "args": [game_path],
+         "kwargs": dict(source_encoding=source_encoding, export_scope=export_scope, message_queue=message_queue)},
+        {"name": "重写文件名", "func": rename.run_rename, "args": [game_path, message_queue],
+         "kwargs": dict(source_encoding=source_encoding, output_mode=output_mode)},
         {"name": "制作JSON文件", "func": json_creation.run_create_json, "args": [game_path, works_dir, message_queue]},
         {"name": "生成世界观字典", "func": dict_generation.run_generate_dictionary, "args": [game_path, works_dir, world_dict_config, message_queue]},
         {"name": "翻译JSON文件", "func": translate.run_translate, "args": [game_path, works_dir, translate_config, world_dict_config, message_queue]},
         # {"name": "释放JSON文件", "func": json_release.run_release_json, "args": [game_path, works_dir, selected_json_path, message_queue]}, # 需要 App 决定路径
-        # {"name": "导入文本", "func": import_task.run_import, "args": [game_path, import_encoding, message_queue]},
     ]
     
     # --- 特殊处理：释放 JSON 和 导入文本 ---
@@ -66,7 +69,9 @@ def run_easy_flow(
     import_step = {
         "name": "导入文本",
         "func": import_task.run_import,
-        "args": [game_path, export_source_encoding, import_encoding, message_queue]
+        "args": [game_path],
+        "kwargs": dict(source_encoding=source_encoding, target_encoding=target_encoding,
+                       message_queue=message_queue, output_mode=output_mode),
     }
 
     # 将最后两步加入
@@ -104,7 +109,7 @@ def run_easy_flow(
                      message_queue.put(("status", "轻松模式未生成可释放的翻译文件"))
                      return False
 
-            step_func(*step_args)
+            step_func(*step_args, **step_info.get("kwargs", {}))
 
             if getattr(message_queue, "has_problem", False):
                 message_queue.put(("error", f"步骤“{step_name}”失败，轻松模式已停止。"))

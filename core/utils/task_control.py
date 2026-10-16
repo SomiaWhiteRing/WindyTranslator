@@ -15,7 +15,7 @@ class WorkBusyError(RuntimeError):
 @contextmanager
 def exclusive_work(game_path, works_dir):
     # Also lock the cache: different game paths can share the same Works name.
-    folder = sanitize_filename(os.path.basename(game_path)) or "UntitledGame"
+    folder = sanitize_filename(os.path.basename(os.path.normpath(game_path))) or "UntitledGame"
     resources = (game_path, os.path.join(works_dir, folder))
     lock_dir = os.path.join(tempfile.gettempdir(), "WindyTranslator-task-locks")
     os.makedirs(lock_dir, exist_ok=True)

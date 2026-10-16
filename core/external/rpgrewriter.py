@@ -13,7 +13,7 @@ RPGREWRITER_EXE_PATH = os.path.join(get_modules_path(), "RPGRewriter", "RPGRewri
 
 # --- RPGRewriter 核心交互函数 ---
 
-def run_rpgrewriter_command(lmt_path, command_args, interact_input=None):
+def run_rpgrewriter_command(lmt_path, command_args, interact_input=None, *, force_resave=False):
     """
     执行 RPGRewriter 命令。
 
@@ -42,6 +42,8 @@ def run_rpgrewriter_command(lmt_path, command_args, interact_input=None):
 
     # 完整命令列表
     full_command = [RPGREWRITER_EXE_PATH, lmt_path] + command_args
+    if force_resave:
+        full_command.append("-forceresave")
 
     creation_flags = 0
     if platform.system() == "Windows":
@@ -61,7 +63,7 @@ def run_rpgrewriter_command(lmt_path, command_args, interact_input=None):
             errors='replace',   # 替换无法解码的字符
             cwd=run_dir,         # 在 lmt 文件所在目录执行
             # cwd=program_dir     # 或者在程序所在目录执行？取决于 RPGRewriter 行为
-            creationflags=creation_flags # 新增此参数
+            creationflags=creation_flags,
         )
 
         stdout, stderr = process.communicate(input=interact_input if interact_input else None)
@@ -89,7 +91,7 @@ def run_rpgrewriter_command(lmt_path, command_args, interact_input=None):
 
 # --- 特定命令的封装 (可选，但能简化 tasks 模块) ---
 
-def generate_filelist(lmt_path):
+def generate_filelist(lmt_path, source_encoding):
     """
     调用 RPGRewriter 生成 filelist.txt。
     RPGRewriter 会在程序执行目录下生成 filelist.txt。
@@ -102,6 +104,7 @@ def generate_filelist(lmt_path):
         str: 生成的 filelist.txt 的完整路径 (如果成功)，或 None。
     """
     args = ["-F", "Y"] # 命令参数生成 filelist.txt
+    args.extend(["-readcode", str(source_encoding), "-filereadcode", str(source_encoding), "-miscreadcode", str(source_encoding)])
     return_code, _, stderr = run_rpgrewriter_command(lmt_path, args)
 
     # RPGRewriter 会在 *RPGRewriter.exe 所在目录* 或 *工作目录* 生成 filelist.txt
@@ -140,11 +143,12 @@ def validate_rename_input(lmt_path):
          
     return run_rpgrewriter_command(lmt_path, args)
 
-def rewrite_game_data(lmt_path, rewrite_all=True, log_filename=None):
+def rewrite_game_data(lmt_path, rewrite_all=True, log_filename=None, *, source_encoding):
     """
     调用 RPGRewriter 重写游戏数据 (-rewrite)。
     需要 input.txt 存在于工作目录。
     需要用户交互输入 "Y"。
+    按当前源编码读取并写回，不在重写文件名时切换编码。
 
     Args:
         lmt_path (str): 游戏 LMT 文件路径。
@@ -155,6 +159,8 @@ def rewrite_game_data(lmt_path, rewrite_all=True, log_filename=None):
         tuple: (return_code, stdout, stderr)
     """
     args = ["-rewrite"]
+    for argument in ("-readcode", "-filereadcode", "-miscreadcode", "-writecode", "-filewritecode", "-miscwritecode"):
+        args.extend([argument, str(source_encoding)])
     if rewrite_all:
         args.append("-all")
     if log_filename:
@@ -172,18 +178,18 @@ def rewrite_game_data(lmt_path, rewrite_all=True, log_filename=None):
 
     return run_rpgrewriter_command(lmt_path, args, interact_input="Y\n")
 
-def export_text_command(lmt_path, encoding_code, export_scope):
+def export_text_command(lmt_path, source_encoding, export_scope):
     """
     执行导出文本的命令。
 
     Args:
         lmt_path (str): 游戏 LMT 文件路径。
-        encoding_code (str): 读取时使用的编码代号 (如 "932")。
+        source_encoding (str): 读取时使用的源编码代号 (如 "932")。
 
     Returns:
         tuple: (return_code, stdout, stderr)
     """
-    args = ["-export", "-readcode", str(encoding_code), "-filereadcode", str(encoding_code), "-miscreadcode", str(encoding_code)]
+    args = ["-export", "-readcode", str(source_encoding), "-filereadcode", str(source_encoding), "-miscreadcode", str(source_encoding)]
     for config_key, argument in (
         ("map_names", "-mapnames"),
         ("map_event_names", "-mapeventnames"),
@@ -196,19 +202,34 @@ def export_text_command(lmt_path, encoding_code, export_scope):
     # 注意：这个命令不需要交互输入
     return run_rpgrewriter_command(lmt_path, args)
 
-def import_text_command(lmt_path, encoding_code):
+def import_text_command(lmt_path, source_encoding, target_encoding):
     """
     执行导入文本的命令。
 
     Args:
         lmt_path (str): 游戏 LMT 文件路径。
-        encoding_code (str): 写入时使用的编码代号 (如 "936")。
+        source_encoding (str): 游戏数据当前使用的源编码代号 (如 "932")。
+        target_encoding (str): 写入时使用的目标编码代号 (如 "936")。
 
     Returns:
         tuple: (return_code, stdout, stderr)
     """
     # 原脚本使用了 -nolimit 1 参数
     
-    args = ["-import", "-readcode", str(encoding_code), "-filereadcode", str(encoding_code), "-miscreadcode", str(encoding_code), "-writecode", str(encoding_code), "-filewritecode", str(encoding_code), "-miscwritecode", str(encoding_code), "-nolimit", "1"]
+    length_mode = "2" if str(target_encoding) == "65001" else "1"
+    args = ["-import", "-readcode", str(source_encoding), "-filereadcode", str(source_encoding), "-miscreadcode", str(source_encoding), "-writecode", str(target_encoding), "-filewritecode", str(target_encoding), "-miscwritecode", str(target_encoding), "-nolimit", length_mode]
     # 注意：这个命令不需要交互输入
     return run_rpgrewriter_command(lmt_path, args)
+
+
+def transcode_game_data(lmt_path, source_encoding, target_encoding):
+    """在调用方的临时目录中统一重存 LDB/LMT/LMU，包括文本未变化的文件。"""
+    input_path = os.path.join(os.path.dirname(lmt_path), ".windy-encoding-input.txt")
+    with open(input_path, "w", encoding="utf-8") as output:
+        output.write("")
+    args = ["-rewrite", "-all", "-input", ".windy-encoding-input", "-log", "null", "-nolimit", "2"]
+    for argument in ("-readcode", "-filereadcode", "-miscreadcode"):
+        args.extend([argument, str(source_encoding)])
+    for argument in ("-writecode", "-filewritecode", "-miscwritecode"):
+        args.extend([argument, str(target_encoding)])
+    return run_rpgrewriter_command(lmt_path, args, interact_input="Y\n", force_resave=True)

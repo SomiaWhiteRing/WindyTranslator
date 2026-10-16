@@ -3,8 +3,29 @@ import os
 import sys
 import shutil
 import logging
+import json
+import tempfile
 
 log = logging.getLogger(__name__)
+
+
+def write_json_atomic(path, data):
+    """写好同目录临时文件后替换 JSON，写入失败时保留原文件。"""
+    path = os.path.abspath(path)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                         prefix=".windy-config-", suffix=".tmp", delete=False) as output:
+            temporary_path = output.name
+            json.dump(data, output, indent=4, ensure_ascii=False)
+            output.write("\n")
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
 
 def ensure_dir_exists(dir_path):
     """确保目录存在，如果不存在则创建它。"""

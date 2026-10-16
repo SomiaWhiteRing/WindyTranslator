@@ -1,13 +1,13 @@
 # core/tasks/rename.py
 import os
 import logging
-from core.external import rpgrewriter # 导入 RPGRewriter 交互模块
+from core.external import easyrpg, rpgrewriter # 导入 RPGRewriter 交互模块
 from core.utils import file_system
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
 
-def _create_input_txt(lmt_path):
+def _create_input_txt(lmt_path, source_encoding):
     """
     生成 filelist.txt 并转换为 input.txt。
 
@@ -22,7 +22,7 @@ def _create_input_txt(lmt_path):
     log.info("步骤 2.1: 生成原始文件列表 (filelist.txt)...")
     # RPGRewriter 可能在 lmt_path 目录生成 filelist.txt
     game_dir = os.path.dirname(lmt_path)
-    success, filelist_path = rpgrewriter.generate_filelist(lmt_path)
+    success, filelist_path = rpgrewriter.generate_filelist(lmt_path, source_encoding)
 
     if not success or not filelist_path:
         log.error("无法生成 filelist.txt。")
@@ -86,7 +86,7 @@ def _create_input_txt(lmt_path):
         return False, None, 0
 
 # --- 主任务函数 ---
-def run_rename(game_path, message_queue):
+def run_rename(game_path, message_queue, output_mode, source_encoding):
     """
     执行重写文件名流程。
 
@@ -99,6 +99,10 @@ def run_rename(game_path, message_queue):
         message_queue.put(("log", ("normal", "步骤 2: 开始重写文件名...")))
 
         detected = detect_game_engine(game_path)
+        if detected and detected.engine == "rm200x" and output_mode == "utf8":
+            message_queue.put(("status", "已保留原文件名"))
+            message_queue.put(("done", None))
+            return
         if detected and detected.engine == "wolf":
             message_queue.put(("log", ("success", "检测到 WOLF RPG Editor：重写文件名步骤自动跳过。")))
             message_queue.put(("success", "重写文件名完成（WOLF：跳过）"))
@@ -126,7 +130,8 @@ def run_rename(game_path, message_queue):
             return
 
         # 1. 生成 input.txt
-        success_input, input_txt_path, converted_count = _create_input_txt(lmt_path)
+        actual_encoding = easyrpg.resolve_game_encoding(game_path, source_encoding)
+        success_input, input_txt_path, converted_count = _create_input_txt(lmt_path, actual_encoding)
         if not success_input:
             message_queue.put(("error", "生成 input.txt 文件失败。"))
             message_queue.put(("status", "重写文件名失败"))
@@ -148,7 +153,7 @@ def run_rename(game_path, message_queue):
 
         # 3. 重写游戏数据 (RPGRewriter -rewrite)
         message_queue.put(("log", ("normal", "步骤 2.4: 重写游戏数据 (RPGRewriter -rewrite)...")))
-        return_code_rw, stdout_rw, stderr_rw = rpgrewriter.rewrite_game_data(lmt_path, rewrite_all=True)
+        return_code_rw, stdout_rw, stderr_rw = rpgrewriter.rewrite_game_data(lmt_path, rewrite_all=True, source_encoding=actual_encoding)
         if return_code_rw != 0:
             message_queue.put(("error", f"重写游戏数据失败。退出码: {return_code_rw}"))
             if stderr_rw: message_queue.put(("log", ("error", f"RPGRewriter 错误信息: {stderr_rw}")))

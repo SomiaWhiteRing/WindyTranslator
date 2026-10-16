@@ -377,7 +377,6 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 key=len,
                 reverse=True,
             ))
-        message_queue.put(("log", ("normal", "翻译结果保留原符号；GBK 字符兼容替换仅在导入前处理。")))
         message_queue.put(("log", ("normal", f"控制码保护配置: {control_profile.summary}")))
         api_url = current_translate_config.get("api_url", "").strip()
         api_key = current_translate_config.get("api_key", "").strip()

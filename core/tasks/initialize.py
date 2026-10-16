@@ -165,7 +165,7 @@ def _update_rpg_rt_ini(ini_path, target_encoding_code='936'):
         return False # 表示未修改
 
 # --- 主任务函数 ---
-def run_initialize(game_path, rtp_options, source_encoding, message_queue):
+def run_initialize(game_path, rtp_options, source_encoding, message_queue, output_mode):
     """
     执行游戏初始化流程：复制 EasyRPG，安装 RTP，转换编码，更新 ini。
 
@@ -233,7 +233,7 @@ def run_initialize(game_path, rtp_options, source_encoding, message_queue):
         message_queue.put(("log", ("normal", "检查并转换文本文件编码 (日文 -> GBK)...")))
         converted_count = 0
         checked_count = 0
-        if source_encoding == '932':
+        if output_mode == "legacy" and source_encoding == '932':
             target_files = [item for item in os.listdir(game_path)
                             if os.path.isfile(os.path.join(game_path, item)) and
                             item.lower().endswith('.txt')]
@@ -244,8 +244,6 @@ def run_initialize(game_path, rtp_options, source_encoding, message_queue):
                 converted, _ = _detect_and_convert_encoding(file_path, target_encoding='gbk')
                 if converted:
                     converted_count += 1
-        else:
-            message_queue.put(("log", ("normal", "当前项目不是 932，跳过日文侧车文件转换。")))
         message_queue.put(("log", ("success", f"编码检查完成: 检查 {checked_count} 个文件，转换 {converted_count} 个。")))
 
         message_queue.put(("success", "初始化完成"))
