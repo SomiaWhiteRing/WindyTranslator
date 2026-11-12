@@ -56,6 +56,19 @@ Fusion Pixel Font 为 WOLF RPG Editor 汉化提供简体中文字符覆盖。项
 完整许可证文本见 `modules/WOLF/FusionPixel/OFL.txt`，组件声明见
 `modules/WOLF/FusionPixel/LICENSES/`。
 
+## chardet
+
+**版本**: 5.2.0
+
+**许可证**: GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later)
+
+chardet 用于检测 RM2000/2003 游戏 ZIP 中资源文件名的编码。本项目直接使用上游发布版本，未修改 chardet 源码。
+
+**源代码**: <https://github.com/chardet/chardet/tree/5.2.0>
+**许可证文本**: <https://github.com/chardet/chardet/blob/5.2.0/LICENSE>
+
+使用和分发 chardet 时，请遵循上述许可证条款。
+
 ## Python运行时库和依赖
 
 本项目使用的Python库和依赖遵循各自的许可证，包括但不限于:

@@ -33,6 +33,7 @@ from core.external import easyrpg
 from core.utils.task_control import exclusive_work, WorkBusyError
 from core.updates import load_build_info
 from ui.update_dialog import UpdateController
+from core.utils.rm_zip import extract_zip
 
 log = logging.getLogger(__name__) # 获取 logger 实例
 
@@ -181,6 +182,63 @@ class RPGTranslatorApp:
                     parent=self.root,
                 )
                 self.log_message("选择了无效的游戏目录。", "error")
+
+    def extract_game_zip(self):
+        """选择游戏 ZIP，在后台检测文件名编码并解压。"""
+        if (self._closing or self.update_controller.updating
+                or self.is_processing or self.current_task_thread is not None):
+            return
+        source_path = filedialog.askopenfilename(
+            title="选择 RM2K / RM2K3 游戏 ZIP", parent=self.root,
+            filetypes=[("ZIP 压缩包", "*.zip")])
+        if not source_path:
+            return
+        self._task_stop = threading.Event()
+        stop_event = self._task_stop
+        self.set_processing_state(True)
+        self.update_status("正在检测资源文件名编码并解压…")
+        self.log_message(f"解压 ZIP: {source_path}")
+
+        def run_extraction():
+            """执行解压，只通过消息队列将结果交回主线程。"""
+            result = None
+            error = None
+            try:
+                result = extract_zip(source_path, stop_event)
+            except Exception as task_error:
+                error = task_error
+            finally:
+                self.message_queue.put(("archive_extracted", (result, error)))
+
+        self.current_task_thread = threading.Thread(target=run_extraction, daemon=True)
+        try:
+            self.current_task_thread.start()
+        except Exception:
+            self.current_task_thread = None
+            self.set_processing_state(False)
+            raise
+
+    def _finish_zip_extraction(self, result, error):
+        """在主线程显示解压结果，成功后回填游戏路径。"""
+        if self.current_task_thread and self.current_task_thread.is_alive():
+            self.root.after(10, lambda: self._finish_zip_extraction(result, error))
+            return
+        self.current_task_thread = None
+        if self._closing:
+            return
+        self.set_processing_state(False)
+        if error is not None:
+            self.log_message(f"ZIP 解压失败: {error}", "error")
+            self.update_status("解压未完成，原游戏路径未改变。")
+            messagebox.showerror("ZIP 解压失败", str(error), parent=self.root)
+            return
+        self.game_path.set(str(result.directory))
+        self.main_window.refresh_game_context()
+        self.log_message(
+            f"编码: {result.encoding}；置信度: {result.confidence:.1%}；"
+            f"资源文件名样本: {result.sample_count}")
+        self.log_message(f"解压完成: {result.directory}", "success")
+        self.update_status("解压完成，已填入游戏路径。")
 
     def get_game_path(self):
         """获取当前游戏路径。"""
@@ -765,6 +823,10 @@ class RPGTranslatorApp:
                 
                 if msg_type == "task_finished":
                     self._finish_task(*content)
+                    self.message_queue.task_done()
+                    continue
+                if msg_type == "archive_extracted":
+                    self._finish_zip_extraction(*content)
                     self.message_queue.task_done()
                     continue
                 if msg_type == "done":

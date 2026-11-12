@@ -62,6 +62,10 @@ class MainWindow:
         self.browse_button = ttk.Button(path_frame, text="浏览...", command=self.app.browse_game_path)
         self.browse_button.grid(row=0, column=1, padx=5, pady=5) # 按钮不需要扩展
 
+        self.extract_zip_button = ttk.Button(
+            path_frame, text="解压 ZIP…", command=self.app.extract_game_zip)
+        self.extract_zip_button.grid(row=0, column=2, padx=5, pady=5)
+
         self.output_mode_panel = OutputModePanel(main_frame, self.app)
         self.output_mode_panel.grid(row=1, column=0, sticky="ew", pady=(0, 3))
         self.output_mode_panel.grid_remove()
@@ -151,6 +155,7 @@ class MainWindow:
         self.all_controls = [
             self.game_path_entry,
             self.browse_button,
+            self.extract_zip_button,
             self.output_mode_panel.get_controls(),
             self.completion_notification_checkbox,
             self.easy_panel.get_controls(), # EasyModePanel 需要提供获取其控件的方法
