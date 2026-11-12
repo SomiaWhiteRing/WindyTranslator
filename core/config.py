@@ -69,7 +69,7 @@ DEFAULT_TRANSLATE_CONFIG = {
     "context_lines": 8,
     "concurrency": 4,
     "max_retries": 1,
-    "retry_failed_items_only": False,
+    "retry_failed_items_only": True,
     "source_language": "日语",
     "target_language": "简体中文",
     # New fields deliberately supersede every old prompt_template value.

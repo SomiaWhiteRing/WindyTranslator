@@ -139,9 +139,13 @@ class TranslationSession:
 
 
 def validate_item(item, transport, raw, config, wolf_mappings=()):
-    # Import lazily: these helpers are also used by legacy line translation.
+    # 兼容原版整段译文；片段协议由程序直接还原结构。
     from core.tasks.translate import _restore_wolf_transport_masks
-    ok, restored, reason = transport.restore(raw)
+    Response_UsesSegments = isinstance(raw, dict) and set(raw) == {"segments"}
+    if Response_UsesSegments:
+        ok, restored, reason = transport.Transport_RestoreModelSegments(raw["segments"])
+    else:
+        ok, restored, reason = transport.restore(raw)
     if ok:
         ok, restored, reason = _restore_wolf_transport_masks(restored, wolf_mappings)
     if not ok:
@@ -149,11 +153,15 @@ def validate_item(item, transport, raw, config, wolf_mappings=()):
     source = item["text_to_translate"]
     if source.strip() and not restored.strip():
         return None, "译文为空"
-    repaired = text_processing.repair_translation_format(source, restored)
-    processed = text_processing.post_process_translation(
-        repaired, source,
-        process_quotes=not config.get("_fragment_mode", False),
-    )
+    if Response_UsesSegments:
+        repaired = restored
+        processed = restored
+    else:
+        repaired = text_processing.repair_translation_format(source, restored)
+        processed = text_processing.post_process_translation(
+            repaired, source,
+            process_quotes=not config.get("_fragment_mode", False),
+        )
     # Post-processing historically strips final empty lines. Restore only empty
     # suffix lines explicitly present in the source; never invent text.
     trailing = len(source) - len(source.rstrip("\n"))
@@ -194,7 +202,7 @@ def translate_batch(items, context, characters, entities, client, config, file_n
     request_budget = config.get("_batch_request_budget") or {"used": 0, "limit": max_requests}
     attempts = Counter()
     batch_attempts = Counter()
-    retry_failed_only = config.get("retry_failed_items_only", False)
+    retry_failed_only = config.get("retry_failed_items_only", True)
     reasoning_exhaustions = Counter()
     failures = {}
     transient_retries = 0
@@ -238,8 +246,9 @@ def translate_batch(items, context, characters, entities, client, config, file_n
             transports.append(protocol.encode(masked, config.get("_control_code_profile"), literals))
             mappings.append(mapping)
         feedback = [{"id": i + 1, **failures[item["original_json_key"]]}
-                    for i, item in enumerate(pending) if item["original_json_key"] in failures] if retry_failed_only else []
-        messages = protocol.build_messages(pending, transports, context, characters, entities, config, feedback)
+                    for i, item in enumerate(pending) if item["original_json_key"] in failures]
+        Request_Config = {**config, "_retry_context_items": items} if feedback else config
+        messages = protocol.build_messages(pending, transports, context, characters, entities, Request_Config, feedback)
         request_number = session.begin_request()
         request_budget["used"] += 1
         kwargs = dict(temperature=config.get("temperature", 0.7), timeout=config.get("request_timeout", 120),
@@ -303,9 +312,8 @@ def translate_batch(items, context, characters, entities, client, config, file_n
                     failures[key]["previous_translation"] = records[i + 1]
                 issues[i + 1] = reason
                 remainder.append(item)
-        # Normal mode accepts a batch together; the experimental mode commits
-        # its successful subset before sending only the failed items again.
-        # On shutdown retain valid in-flight results even if their batch is incomplete.
+        # 局部重试立即保存通过项；保留显式关闭时的原版整批行为。
+        # 停止任务时也保存已经取得的有效译文。
         accepted = successes if retry_failed_only or not remainder or session.stop.is_set() else {}
         session.record(response, request_number, file_name, len(pending), len(accepted), issues, pending, stream=kwargs["stream"])
         completed.update(accepted)
