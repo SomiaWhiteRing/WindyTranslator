@@ -15,9 +15,10 @@ DEFAULT_SYSTEM_PROMPT = '''你是一名专业的游戏翻译家，将游戏中�
 4. 专名与源语言文字：在源语言与目标语言不同时，不保留未翻译的源语言专有字符；源语言专名按术语表、通行译法或上下文音译、意译。日语中的片假名外来词不能简单保留假名，应采用恰当译名或对应外语词。已有术语表优先。
 5. 角色口癖：不要直接保留源语言的句尾口癖，应结合角色的性格和说话风格，转化为自然的目标语言语气，传达原文口吻。
 6. 非指定源语言：文本中原本使用的非{source_language}语言（如英语、韩语等）直接保留，不翻译成{target_language}；用源语言音译书写的外来词仍按专名规则处理。网址保持原样。
+7. 不擅自增补：不添加原文或术语表没有依据的英文、罗马字注音、括号解释或备选译法。原文已有内容按上述规则处理，专名可采用符合目标语言习惯的合理译名。
 
 ### 元数据与人物表达
-输入条目的 type 表示原始文本类型，speaker 表示脸图标识或 NARRATION、SYSTEM、NONE 等说话者信息；这些元数据只供理解，不复制到译文。
+待译条目的 text 和上文的 source 均为原文；type 表示原始文本类型，speaker 表示脸图标识或 NARRATION、SYSTEM、NONE 等说话者信息。上文只供理解，不输出上文的译文；元数据不复制到译文。
 对话类文本：参考脸图标识、人物词典中的对应原名、性别、年龄、性格、口吻和描述，判断说话者并保持其语气；原文台词前已有的发言人名称也要保留并翻译。
 旁白与独白：根据原文判断，保持原文的叙述人称。第三人称叙述不能改成“我”；原文中的第一人称、内心独白也不能仅因 NARRATION 或 SYSTEM 标记改写成第三人称或 UI 文案。
 系统、菜单、词条：确认文本确实属于这些用途后，采用简洁、准确、书面化的游戏术语。
@@ -268,7 +269,25 @@ def article_term_issue(source, translated, terms):
 
 
 def build_messages(items, transports, context, characters, entities, config, feedback=None):
-    source = "\n".join(item["text_to_translate"] for item in items).lower()
+    context_count = max(0, int(config.get("context_lines", 4)))
+    requested_keys = {item.get("original_json_key", item["text_to_translate"]) for item in items}
+    context_items, context_rows, seen_context = [], [], set()
+    for identifier, item in enumerate(items, 1):
+        preceding = item.get("_source_context", context if identifier == 1 else [])
+        for previous in preceding[-context_count:] if context_count else []:
+            if "_source_context" in item:
+                key = previous["original_json_key"]
+                if key in requested_keys or key in seen_context:
+                    continue
+                seen_context.add(key)
+            context_items.append(previous)
+            context_rows.append({
+                "before_id": identifier,
+                "source": previous["text_to_translate"],
+                "type": previous.get("original_marker"),
+                "speaker": previous.get("speaker_id"),
+            })
+    source = "\n".join(item["text_to_translate"] for item in [*context_items, *items]).lower()
     by_name = {entry.get("原文"): entry for entry in characters if entry.get("原文")}
     names = {name for name in by_name if name.lower() in source}
     names.update(by_name[name].get("对应原名") for name in list(names))
@@ -281,14 +300,12 @@ def build_messages(items, transports, context, characters, entities, config, fee
         edges = transport.edge_constraints()
         if edges:
             row["control_edges"] = edges
-    context_count = max(0, int(config.get("context_lines", 4)))
-    # Preserve each selected source item in full. Generated prose is not a style reference.
-    context_text = "\n".join(x["text_to_translate"] for x in context[-context_count:]) if context_count else ""
+    # Preserve source order and anchor interleaved context to the current request IDs.
     values = dict(
         source_language=config.get("source_language", "日语"), target_language=config.get("target_language", "简体中文"),
         character_glossary_section="人物术语：\n" + json.dumps(chars, ensure_ascii=False),
         entity_glossary_section="事物术语：\n" + json.dumps(things, ensure_ascii=False),
-        context_section="仅供理解的上文：\n" + context_text,
+        context_section="仅供理解的上文（按原文顺序排列，before_id 表示位于该待译 id 之前；不输出上文译文）：\n" + json.dumps(context_rows, ensure_ascii=False),
         batch_text=json.dumps(rows, ensure_ascii=False),
     )
     # Only substitute documented fields; literal JSON braces remain editable.

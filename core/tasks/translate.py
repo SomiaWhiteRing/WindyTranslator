@@ -412,6 +412,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 all_files_translated_data[file_name] = {} # 预先设置空结果
                 continue
 
+            all_metadata_items_for_this_file = list(data_for_this_file.values())
+            source_positions = {key: index for index, key in enumerate(data_for_this_file)}
             items_with_original_key_for_this_file = []
             prefilled_count_for_this_file = 0
             no_content_prefilled_for_this_file = 0
@@ -488,8 +490,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
                 items_with_original_key_for_this_file.append(metadata_obj)
 
-            all_metadata_items_for_this_file = items_with_original_key_for_this_file
-            num_items_in_file = len(all_metadata_items_for_this_file)
+            num_items_in_file = len(items_with_original_key_for_this_file)
             overall_total_items_in_all_files += num_items_in_file
             overall_default_db_prefilled_count += prefilled_count_for_this_file
             # 同步累计“无需翻译”预填数量，排除在需译计数之外
@@ -500,23 +501,27 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             all_files_translated_data.setdefault(file_name, {})
 
 
-            i = 0
             for batch_metadata_for_task in pack_batches(
-                all_metadata_items_for_this_file, batch_size_config,
+                items_with_original_key_for_this_file, batch_size_config,
             ):
                 if not batch_metadata_for_task: continue
 
-                context_start_idx = max(0, i - context_lines_count)
-                # 上下文严格从当前文件内选取
-                context_metadata_for_task = all_metadata_items_for_this_file[context_start_idx : i]
+                batch_items = []
+                for metadata_obj in batch_metadata_for_task:
+                    source_index = source_positions[metadata_obj["original_json_key"]]
+                    context_start_idx = max(0, source_index - context_lines_count)
+                    # 每条保留源位置对应的上文，拆批或重试时也能补回中间跳过的条目。
+                    batch_items.append({
+                        **metadata_obj,
+                        "_source_context": all_metadata_items_for_this_file[context_start_idx:source_index],
+                    })
                 
                 global_translation_tasks.append({
-                    "batch_items": batch_metadata_for_task,
-                    "context_items": context_metadata_for_task,
+                    "batch_items": batch_items,
+                    "context_items": batch_items[0]["_source_context"],
                     "source_file": file_name,
                     # 其他参数可以作为字典传递给worker，或者worker直接从config取
                 })
-                i += len(batch_metadata_for_task)
         
         if not global_translation_tasks:
             try:

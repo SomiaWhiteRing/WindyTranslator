@@ -352,6 +352,7 @@ def translate_long_item(item, context, characters, entities, client, config, fil
     from core.tasks.translate import _protected_literals_for_text
     from core.utils import control_tokens
     session = config["_translation_session"]
+    context = item.get("_source_context", context)
     source = item["text_to_translate"]
     literals = _protected_literals_for_text(source, config.get("_protected_literals") or ())
     parts = protocol.split_long_text(source, int(config.get("max_segment_chars", 1200)), config.get("_control_code_profile"), literals)
@@ -369,6 +370,8 @@ def translate_long_item(item, context, characters, entities, client, config, fil
             fragment_identity += "\0quotes_after_reassembly_v1"
         key = hashlib.sha256(fragment_identity.encode("utf-8")).hexdigest()
         fragment = {**item, "original_json_key": part, "text_to_translate": part}
+        # Subsequent fragments use the rolling context, not the whole item's fixed window.
+        fragment.pop("_source_context", None)
         cached = session.fragments.get(key)
         if cached is not None:
             ok, reason = control_tokens.validate_restored_text(part, cached, profile=config.get("_control_code_profile"))
