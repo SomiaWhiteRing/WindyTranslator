@@ -223,11 +223,25 @@ def repair_translation_quotes(text, original_text):
     processed_text = processed_text.replace('』”', '』')
     processed_text = processed_text.replace('」”', '」')
 
+    source_lines = original_text.split('\n')
+    target_lines = processed_text.split('\n')
     for opening, closing in (('「', '」'), ('『', '』')):
-        missing_count = processed_text.count(opening) - processed_text.count(closing)
-        if missing_count > 0:
-            log.debug("Adding %s missing %r to translation: %r", missing_count, closing, processed_text[:50])
-            processed_text = _append_before_trailing_structural_controls(processed_text, closing * missing_count)
+        # A message may leave a quotation open for the next message box.
+        source_unclosed = max(0, original_text.count(opening) - original_text.count(closing))
+        missing_count = processed_text.count(opening) - processed_text.count(closing) - source_unclosed
+        if missing_count <= 0:
+            continue
+        open_in_translation = 0
+        for index, (source_line, target_line) in enumerate(zip(source_lines, target_lines)):
+            open_in_translation += target_line.count(opening) - target_line.count(closing)
+            to_restore = min(missing_count, open_in_translation, source_line.count(closing) - target_line.count(closing))
+            if to_restore > 0:
+                target_lines[index] = _append_before_trailing_structural_controls(target_line, closing * to_restore)
+                open_in_translation -= to_restore
+                missing_count -= to_restore
+                if not missing_count:
+                    break
+    processed_text = '\n'.join(target_lines)
 
     if isinstance(original_text, str) and '『“' not in original_text and '”』' not in original_text:
         processed_text = re.sub(r'『“([\s\S]*?)”』', r'『\1』', processed_text)

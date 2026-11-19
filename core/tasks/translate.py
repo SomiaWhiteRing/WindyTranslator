@@ -19,6 +19,10 @@ log = logging.getLogger(__name__)
 
 WOLF_API_TAG_RE = re.compile(r"\{\{WINDY_WOLF_(\d+)_([0-9a-f]{8})\}\}", re.IGNORECASE)
 WOLF_API_MASK_RE = re.compile(r"\[\[W\d+:[0-9a-f]{4}\]\]", re.IGNORECASE)
+# A parenthesized face can use kana for its face or waving hands.
+MONSTER_FACE_RE = re.compile(
+    r"[ノヽヾ]*[(（](?:ツ|[・ωдД∀▽△≧≦゜゛´｀`'＊*^＾._;；><＞＜ノＴ￣° 　-]+)[)）][ノヽヾ]*"
+)
 
 
 def _mask_wolf_transport(text, optional_tags=()):
@@ -418,6 +422,9 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             prefilled_count_for_this_file = 0
             no_content_prefilled_for_this_file = 0
             resumed_count_for_this_file = 0
+            is_monster_table = file_name.replace('\\', '/').lower() in (
+                'database/monsters.txt', 'database/enemies/enemies.txt', 'monsters.txt', 'enemies.txt',
+            )
             existing_file_translations = existing_translated_data.get(file_name, {})
             if not isinstance(existing_file_translations, dict):
                 existing_file_translations = {}
@@ -462,14 +469,19 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                         }
                     prefilled_count_for_this_file += 1
                     continue
-                # 若源语言为日语且文本中无假名或汉字，则视为“无需翻译”，直接保留原状
+                # 纯颜文字怪名保留原始字形，包括在提取时转为全角的假名。
                 if is_source_language_japanese:
+                    source_text = metadata_obj['text_to_translate']
+                    is_monster_face = (
+                        is_monster_table and metadata_obj.get('original_marker') == 'Name'
+                        and MONSTER_FACE_RE.fullmatch(source_text.strip()) is not None
+                    )
                     orig_has_jp = text_processing.has_japanese_letters(original_json_key)
-                    text_has_jp = text_processing.has_japanese_letters(metadata_obj.get('text_to_translate'))
-                    if not orig_has_jp and not text_has_jp:
+                    text_has_jp = text_processing.has_japanese_letters(source_text)
+                    if is_monster_face or (not orig_has_jp and not text_has_jp):
                         all_files_translated_data.setdefault(file_name, {})
                         all_files_translated_data[file_name][original_json_key] = {
-                            'text': metadata_obj.get('text_to_translate'),
+                            'text': original_json_key if is_monster_face else source_text,
                             'status': 'success',
                             'failure_context': None,
                             'original_marker': metadata_obj.get('original_marker', 'UnknownMarker'),
