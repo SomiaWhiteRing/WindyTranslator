@@ -112,6 +112,7 @@ DEFAULT_CONFIG = {
     "enable_completion_notification": False,
     "completion_notification_identity_registered": False,
     "updates": {"check_on_startup": True},
+    "report_error_logs": True,
     "output_settings": DEFAULT_OUTPUT_SETTINGS,
     # 使用深拷贝确保子字典独立
     "world_dict_config": DEFAULT_WORLD_DICT_CONFIG.copy(),

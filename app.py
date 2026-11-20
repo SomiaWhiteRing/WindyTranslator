@@ -1,5 +1,8 @@
 # app.py
 import subprocess
+import sys
+import sqlite3
+from collections import deque
 import os
 import tkinter as tk
 from tkinter import messagebox, filedialog
@@ -31,7 +34,8 @@ from core.utils import windows_notifications
 from core.utils import output_mode
 from core.external import easyrpg
 from core.utils.task_control import exclusive_work, WorkBusyError
-from core.updates import load_build_info
+from core.updates import load_build_info, UpdateError
+from core.error_reports import ErrorReports, failed_tool
 from ui.update_dialog import UpdateController
 
 log = logging.getLogger(__name__) # 获取 logger 实例
@@ -54,10 +58,14 @@ FAILURE_STATUS_KEYWORDS = ("失败", "中止", "错误")
 class TaskMessageProxy:
     """Forward task messages while tracking whether the task reported a problem."""
 
-    def __init__(self, target_queue, stop_event=None):
+    def __init__(self, target_queue, stop_event=None, reports=None, task=""):
         self.target_queue = target_queue
         self.stop_event = stop_event if stop_event is not None else threading.Event()
         self.has_problem = False
+        self.reports = reports
+        self.task = task
+        self.report_project = {}
+        self.events = deque(maxlen=12)
         self._lock = threading.Lock()
 
     def put(self, message):
@@ -71,8 +79,18 @@ class TaskMessageProxy:
 
         msg_type, content = message[0], message[1]
         if msg_type == "error":
+            if self.reports and self.reports.enabled and not self.has_problem and not self.stop_event.is_set():
+                # Translation pauses have structured reports at their owning failure site.
+                if not str(content).startswith("翻译已暂停") and not any(
+                    word in str(content).lower() for word in ("api key", "api 配置", "额度不足", "已取消")
+                ):
+                    exc = sys.exc_info()[1]
+                    self.reports.capture("task-error", self.task, dict(task=self.task, message=str(content),
+                        stack="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)) if exc else None,
+                        project=self.report_project, events=list(self.events), tool=failed_tool.get()))
             self.has_problem = True
         elif msg_type == "status" and isinstance(content, str):
+            self.events.append((time.time(),content))
             if any(keyword in content for keyword in FAILURE_STATUS_KEYWORDS):
                 self.has_problem = True
 
@@ -96,6 +114,29 @@ class RPGTranslatorApp:
         ensure_dir_exists(self.works_dir)
         self.config_manager = cfg.ConfigManager(self.config_file_path) # 实例化管理器
         self.config = self.config_manager.load_config() # 加载配置
+        self.error_reports = None
+        try:
+            self.error_reports = ErrorReports(self.executable_dir, self.build_info, self.config)
+        except (OSError, sqlite3.Error, ValueError, UpdateError):
+            log.warning("错误报告队列不可用")
+        if self.error_reports:
+            previous_tk_hook = root.report_callback_exception
+            previous_sys_hook = sys.excepthook
+            previous_thread_hook = threading.excepthook
+            def tk_error(cls, exc, tb):
+                self.error_reports.exception("ui-exception", "Tk", exc)
+                previous_tk_hook(cls, exc, tb)
+            def process_error(cls, exc, tb):
+                if isinstance(exc, Exception):
+                    self.error_reports.exception("process-exception", "main", exc)
+                previous_sys_hook(cls, exc, tb)
+            def thread_error(args):
+                if args.thread is not self.error_reports.thread and isinstance(args.exc_value, Exception):
+                    self.error_reports.exception("process-exception", "thread", args.exc_value)
+                previous_thread_hook(args)
+            root.report_callback_exception = tk_error
+            sys.excepthook = process_error
+            threading.excepthook = thread_error
         dictionary_manager.ensure_base_dictionaries()
         if not os.path.exists(self.config_file_path):
             try:
@@ -161,6 +202,8 @@ class RPGTranslatorApp:
         self.main_window.font_panel.close()
         self.thread_pool.shutdown(wait=True)
         self.update_controller.close()
+        if self.error_reports:
+            self.error_reports.close()
         self._closing = self._closed = True
         self.root.destroy()
 
@@ -415,7 +458,10 @@ class RPGTranslatorApp:
                 font_panel = self.main_window.font_panel
                 font_panel.begin_apply()
             try:
-                self._run_task_in_thread(task_func, task_args, task_kwargs, task_name, mode)
+                project = {"engine": detected.engine if detected else None, "mode": mode}
+                if detected and detected.engine == "rm200x":
+                    project.update(sourceEncoding=source_encoding, targetEncoding=target_encoding)
+                self._run_task_in_thread(task_func, task_args, task_kwargs, task_name, mode, project)
             except Exception:
                 if font_panel:
                     font_panel.finish_apply()
@@ -568,12 +614,13 @@ class RPGTranslatorApp:
             return False
         return True
 
-    def _run_task_in_thread(self, task_func, args, kwargs, task_name="后台任务", mode='pro'):
+    def _run_task_in_thread(self, task_func, args, kwargs, task_name="后台任务", mode='pro', project=None):
         """在后台线程中运行给定的任务函数。"""
         self.set_processing_state(True)
         self.update_status(f"正在执行: {task_name}...")
         self._task_stop = threading.Event()
-        task_message_proxy = TaskMessageProxy(self.message_queue, self._task_stop)
+        task_message_proxy = TaskMessageProxy(self.message_queue, self._task_stop, self.error_reports, task_name)
+        task_message_proxy.report_project = dict(project or {})
         tracked_args = self._replace_message_queue_arg(args, task_message_proxy)
         kwargs = {key: task_message_proxy if value is self.message_queue else value
                   for key, value in kwargs.items()}
@@ -593,6 +640,8 @@ class RPGTranslatorApp:
                         detected = detect_game_engine(args[0])
                         if "source_encoding" in kwargs and detected and detected.engine == "rm200x":
                             profile = self.get_output_profile(args[0])
+                            task_message_proxy.report_project.update(sourceEncoding=profile["source_encoding"],
+                                                                     targetEncoding=profile["target_encoding"])
                             if not profile["recorded"]:
                                 raise ValueError("当前游戏路径尚未完成编码登记")
                             kwargs["source_encoding"] = profile["source_encoding"]
@@ -615,6 +664,8 @@ class RPGTranslatorApp:
                     self.message_queue.put(("done", (task_id_from_kwargs_for_exception_handling, (False, str(e)))))
             except Exception as e:
                 task_message_proxy.has_problem = True
+                if self.error_reports:
+                    self.error_reports.exception("task-exception", task_name, e)
                 # 捕获任务函数本身抛出的未处理异常（理论上不应发生）
                 log.exception(f"任务 '{task_name}' 执行期间发生未捕获的严重错误。")
                 # 发送错误消息到队列
@@ -1013,6 +1064,8 @@ class RPGTranslatorApp:
         if hasattr(self.main_window, "font_panel"):
             self.main_window.font_panel.close()
         self.update_controller.close()
+        if self.error_reports:
+            self.error_reports.close()
         self.thread_pool.shutdown(wait=True)
         self._closed = True
         self.root.destroy()

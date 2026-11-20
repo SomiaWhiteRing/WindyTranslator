@@ -21,6 +21,7 @@ class UpdateController:
         self.site_url = self.build_info.get("updateSite", updates.DEFAULT_SITE_URL)
         settings = app.config.get("updates", {})
         self.check_on_startup = settings.get("check_on_startup", True) is not False if isinstance(settings, dict) else True
+        self.report_error_logs = app.config["report_error_logs"]
         self.dialog = self.result = None
         self.busy = ""
         self.status = "正在检查更新…"
@@ -57,12 +58,18 @@ class UpdateController:
         if check and not self.busy:
             self.check()
 
-    def save_auto_check(self, enabled):
-        settings = {"check_on_startup": bool(enabled)}
-        config = dict(self.app.config, updates=settings)
+    def save_preferences(self, check_on_startup, report_error_logs):
+        settings = self.app.config.get("updates")
+        settings = dict(settings) if isinstance(settings, dict) else {}
+        settings["check_on_startup"] = check_on_startup
+        config = dict(self.app.config, updates=settings, report_error_logs=report_error_logs)
         if self.app.config_manager.save_config(config):
             self.app.config["updates"] = settings
-            self.check_on_startup = bool(enabled)
+            self.app.config["report_error_logs"] = report_error_logs
+            if self.app.error_reports and self.report_error_logs != report_error_logs:
+                self.app.error_reports.set_enabled(report_error_logs)
+            self.check_on_startup = check_on_startup
+            self.report_error_logs = report_error_logs
         else:
             self.status = "设置保存失败，请检查程序目录是否可写。"
         self._render()
@@ -243,16 +250,25 @@ class UpdateDialog(tk.Toplevel):
         self._notes = None
         self.progress = ttk.Progressbar(frame, maximum=100)
         self.progress.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        preferences = ttk.Frame(frame)
+        preferences.grid(row=4, column=0, sticky="w", pady=(0, 12))
         self.auto = tk.BooleanVar(value=controller.check_on_startup)
-        self.auto_button = ttk.Checkbutton(frame, text="启动时自动检查更新", variable=self.auto,
-                                          command=lambda: controller.save_auto_check(self.auto.get()))
-        self.auto_button.grid(row=4, column=0, sticky="w", pady=(0, 12))
+        self.report = tk.BooleanVar(value=controller.report_error_logs)
+        self.auto_button = ttk.Checkbutton(preferences, text="启动时自动检查更新", variable=self.auto,
+                                          command=self._save_preferences)
+        self.auto_button.pack(side=tk.LEFT)
+        self.report_button = ttk.Checkbutton(preferences, text="上报错误日志", variable=self.report,
+                                            command=self._save_preferences)
+        self.report_button.pack(side=tk.LEFT, padx=(12, 0))
         buttons = ttk.Frame(frame)
         buttons.grid(row=5, column=0, sticky="e")
         self.later = ttk.Button(buttons, text="稍后", command=controller.close_dialog)
         self.later.pack(side=tk.LEFT, padx=6)
         self.primary = ttk.Button(buttons, command=self._primary)
         self.primary.pack(side=tk.LEFT)
+
+    def _save_preferences(self):
+        self.controller.save_preferences(self.auto.get(), self.report.get())
 
     def _primary(self):
         info = self.controller.result
@@ -282,7 +298,9 @@ class UpdateDialog(tk.Toplevel):
         else:
             self.progress.grid_remove()
         self.auto.set(c.check_on_startup)
+        self.report.set(c.report_error_logs)
         self.auto_button.configure(state=tk.DISABLED if c.updating else tk.NORMAL)
+        self.report_button.configure(state=tk.DISABLED if c.updating else tk.NORMAL)
         self.later.configure(text="稍后" if newer else "关闭", state=tk.DISABLED if c.updating else tk.NORMAL)
         self.primary.configure(text="立即更新" if newer else "前往网站" if info and info.status == "available" and info.comparison == "unknown" else "重新检查",
                                state=tk.DISABLED if c.busy else tk.NORMAL)

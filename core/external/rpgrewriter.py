@@ -5,6 +5,7 @@ import logging
 import sys
 import platform
 from core.utils.file_system import get_modules_path
+from core.error_reports import failed_tool
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +69,9 @@ def run_rpgrewriter_command(lmt_path, command_args, interact_input=None, *, forc
 
         stdout, stderr = process.communicate(input=interact_input if interact_input else None)
         return_code = process.returncode
+        failed_tool.set({"name": "RPGRewriter", "exitCode": return_code, "stdout": stdout[-48000:],
+                         "stderr": stderr[-48000:], "truncated": len(stdout)>48000 or len(stderr)>48000,
+                         "sizeBytes": os.path.getsize(RPGREWRITER_EXE_PATH)} if return_code else None)
 
         # 日志记录输出（截断长输出）
         stdout_log = stdout.strip() if stdout else ""

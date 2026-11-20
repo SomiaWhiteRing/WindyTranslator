@@ -114,6 +114,9 @@ def _translation_worker(
         raise
     except Exception as error:
         session = config.get("_translation_session")
+        reports = config.get("_error_reports")
+        if reports:
+            reports.exception("task-exception", "translate", error)
         if session:
             session.pause(f"翻译处理异常: {error}")
         log.exception("翻译工作线程异常，保留已经保存的结果")
@@ -359,6 +362,9 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         # --- 获取翻译配置 ---
         current_translate_config = translate_config.copy()
+        current_translate_config["_error_reports"] = getattr(message_queue, "reports", None)
+        current_translate_config["_report_project"] = dict(getattr(message_queue, "report_project", {}),
+                                                          resumed=bool(existing_translated_data))
         control_profile = control_tokens.profile_from_game(game_path)
         current_translate_config["_control_code_profile"] = control_profile
         if detected_game and detected_game.engine == "wolf":

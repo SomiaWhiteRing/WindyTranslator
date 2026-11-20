@@ -9,6 +9,7 @@ import time
 import uuid
 
 from core.api_clients.deepseek import CompletionResult
+from core.error_reports import issue_signature, validation_kind
 from core.tasks import translation_protocol as protocol
 from core.utils import text_processing
 
@@ -138,12 +139,14 @@ class TranslationSession:
                  request_number, count, recovered, response.finish_reason, prompt, completion, response.error_kind or "无")
 
 
-def validate_item(item, transport, raw, config, wolf_mappings=()):
+def validate_item(item, transport, raw, config, wolf_mappings=(), trace=None):
     # Import lazily: these helpers are also used by legacy line translation.
     from core.tasks.translate import _restore_wolf_transport_masks
     ok, restored, reason = transport.restore(raw)
     if ok:
         ok, restored, reason = _restore_wolf_transport_masks(restored, wolf_mappings)
+    if trace is not None and ok:
+        trace["restored"] = restored
     if not ok:
         return None, reason
     source = item["text_to_translate"]
@@ -161,6 +164,8 @@ def validate_item(item, transport, raw, config, wolf_mappings=()):
         missing = source.count("\n") - processed.count("\n")
         if missing <= trailing:
             processed += "\n" * missing
+    if trace is not None:
+        trace.update(repaired=repaired, processed=processed)
     if source.count("\n") != processed.count("\n"):
         return None, f"译文行数与原文不一致：必须为 {source.count(chr(10)) + 1} 行（含空行），实际为 {processed.count(chr(10)) + 1} 行；请逐行对应，跨行的句子也不能合并"
     from core.tasks.translate import _protected_literals_for_text
@@ -197,6 +202,36 @@ def translate_batch(items, context, characters, entities, client, config, file_n
     retry_failed_only = config.get("retry_failed_items_only", False)
     reasoning_exhaustions = Counter()
     failures = {}
+    reports = config.get("_error_reports")
+    history = deque(maxlen=8)
+    failed_requests = 0
+
+    def report_failure(remaining):
+        if not reports or not reports.enabled or not history:
+            return
+        seen = set()
+        for item in remaining:
+            key = item["original_json_key"]
+            reason = failures[key]["reason"]
+            kind = validation_kind(reason)
+            related = [attempt for attempt in history if any(e["original"] == key for e in attempt["entries"])]
+            entry = next((e for a in reversed(related) for e in a["entries"] if e["original"] == key), {})
+            stage = ("postprocess" if entry.get("processed") != entry.get("repaired") else
+                     "repair" if entry.get("repaired") != entry.get("restored") else
+                     "validate" if "restored" in entry else "transport")
+            failure = dict(reason=reason, type=item.get("original_marker"), stage=stage)
+            signature = issue_signature(kind, {"task": "translate", "failure": failure})
+            if signature in seen:
+                continue
+            seen.add(signature)
+            reports.capture(kind, session.run_id, dict(
+                task="translate", file=file_name, run=session.run_id, failure=failure,
+                settings={key: config.get(key) for key in ("model", "source_language", "target_language",
+                          "batch_size", "context_lines", "max_retries", "reasoning_effort", "temperature")},
+                engine=getattr(config.get("_control_code_profile"), "engine", None),
+                project=config.get("_report_project"), attempts=related,
+                omittedEarlierAttempts=failed_requests-len(history), pause=session.reason),
+                sensitive_values=(config.get("api_key"), config.get("api_url")))
     transient_retries = 0
     while queue:
         if session.stop.is_set():
@@ -229,6 +264,7 @@ def translate_batch(items, context, characters, entities, client, config, file_n
         batch_key = tuple(item["original_json_key"] for item in pending)
         if request_budget["used"] >= request_budget["limit"]:
             session.pause("批次达到请求预算，成功译文已保存；剩余条目可续跑")
+            report_failure([i for i in pending if i["original_json_key"] in failures])
             raise TranslationPaused(session.reason)
         transports, mappings = [], []
         for item in pending:
@@ -250,6 +286,7 @@ def translate_batch(items, context, characters, entities, client, config, file_n
             kwargs["reasoning_effort"] = config["reasoning_effort"]
         kwargs["thinking_mode"] = config.get("thinking_mode", "auto")
         try:
+            started = time.time()
             response = client.complete(config.get("model"), messages, **kwargs)
         except Exception:
             # Unknown client failures are not safe to silently retry (may already be billed).
@@ -291,10 +328,13 @@ def translate_batch(items, context, characters, entities, client, config, file_n
         batch_attempts[batch_key] += 1
         records, parse_error = protocol.parse_records(response.content, set(range(1, len(pending) + 1)))
         successes, remainder, issues = {}, [], {}
+        traces = []
         for i, item in enumerate(pending):
             key = item["original_json_key"]
             attempts[key] += 1
-            result, reason = validate_item(item, transports[i], records[i + 1], config, mappings[i]) if i + 1 in records else (None, parse_error or response.error or "缺少该条译文")
+            trace = (dict(id=i+1, original=key, type=item.get("original_marker"), speaker=item.get("speaker_id"),
+                          transport=transports[i].text, raw=records.get(i+1)) if reports and reports.enabled else None)
+            result, reason = validate_item(item, transports[i], records[i + 1], config, mappings[i], trace) if i + 1 in records else (None, parse_error or response.error or "缺少该条译文")
             if result is not None:
                 successes[key] = result
             else:
@@ -302,7 +342,15 @@ def translate_batch(items, context, characters, entities, client, config, file_n
                 if i + 1 in records:
                     failures[key]["previous_translation"] = records[i + 1]
                 issues[i + 1] = reason
+                if trace is not None:
+                    traces.append(dict(trace, reason=reason))
                 remainder.append(item)
+        if traces:
+            failed_requests += 1
+            history.append(dict(request=request_number, started=started, durationMs=round((time.time()-started)*1000),
+                                messages=messages, entries=traces, response=response.content,
+                                model=response.response_model, requestId=response.request_id, httpStatus=response.status_code,
+                                finish=response.finish_reason, usage=response.usage, stream=kwargs["stream"]))
         # Normal mode accepts a batch together; the experimental mode commits
         # its successful subset before sending only the failed items again.
         # On shutdown retain valid in-flight results even if their batch is incomplete.
@@ -311,6 +359,8 @@ def translate_batch(items, context, characters, entities, client, config, file_n
         completed.update(accepted)
         if accepted and checkpoint:
             checkpoint(file_name, accepted)
+        if session.stop.is_set() and session.bad_streak >= int(config.get("max_consecutive_failures", 12)):
+            report_failure(remainder)
         usage = response.usage or {}
         output_tokens = usage.get("completion_tokens", 0) or 0
         reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0
@@ -319,6 +369,7 @@ def translate_batch(items, context, characters, entities, client, config, file_n
                 reasoning_exhaustions[item["original_json_key"]] += 1
             if any(reasoning_exhaustions[item["original_json_key"]] >= 2 for item in remainder):
                 session.pause("同一文本两次耗尽输出预算于模型思考，未返回译文；已暂停以节省额度，请降低思考强度或检查中转站参数支持")
+                report_failure(remainder)
                 raise TranslationPaused(session.reason)
         if not remainder:
             continue
@@ -334,6 +385,7 @@ def translate_batch(items, context, characters, entities, client, config, file_n
             retry_items = pending
         if exhausted:
             session.pause(f"{len(exhausted)} 条文本多次校验未通过，已保存其余译文。详情见请求诊断日志，修正后可续跑")
+            report_failure(exhausted)
             raise TranslationPaused(session.reason)
         # Retry selection is independent of transport compatibility and budgets.
         if len(retry_items) > 1:
@@ -399,6 +451,10 @@ def translate_long_item(item, context, characters, entities, client, config, fil
         ok, reason = config["_translation_validator"](source, joined)
     if not ok:
         session.pause("长文本拼接校验失败: " + reason)
+        reports = config.get("_error_reports")
+        if reports:
+            reports.capture("long-text", session.run_id, dict(task="translate", file=file_name, original=source,
+                            parts=pieces, processed=joined, reason=reason))
         raise TranslationPaused(session.reason)
     result = {"text": joined, "status": "success", "failure_context": None,
               "original_marker": item.get("original_marker"), "speaker_id": item.get("speaker_id")}
