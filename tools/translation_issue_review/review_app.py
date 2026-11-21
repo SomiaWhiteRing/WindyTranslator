@@ -20,8 +20,10 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from .display_width import calc_display_width
+    from .paused_review import load_paused_entries
 except ImportError:  # Supports execution as the tool entry script.
     from display_width import calc_display_width
+    from paused_review import load_paused_entries
 
 
 MESSAGE_MARKER = "Message"
@@ -365,6 +367,8 @@ class ReviewEntry:
     per_line_widths: List[int] = field(default_factory=list)
     overflow_lines: List[int] = field(default_factory=list)
     dirty: bool = False
+    pending_metadata: Optional[dict] = None
+    pending_confirmed: bool = False
 
     def __post_init__(self) -> None:
         self.recompute()
@@ -440,14 +444,17 @@ class ReviewEntry:
         else:
             self.per_line_widths = []
             self.overflow_lines = []
-        self.dirty = self.current_text != self.initial_text
+        self.dirty = self.current_text != self.initial_text or self.pending_confirmed
 
-    def update_text(self, new_text: str) -> None:
+    def update_text(self, new_text: str, *, confirm_pending: bool = False) -> None:
         self.current_text = new_text
+        self.pending_confirmed = confirm_pending and self.pending_metadata is not None
         self.recompute()
 
     def restore_initial(self) -> None:
-        self.update_text(self.initial_text)
+        self.pending_confirmed = False
+        self.current_text = self.initial_text
+        self.recompute()
 
 
 @dataclass
@@ -604,14 +611,12 @@ def scan_translation_data(
 
     fallback_records = list(fallback_records or [])
     fallback_by_key = _fallback_record_map(fallback_records)
-    seen_json_keys = set()
     review_entries: List[ReviewEntry] = []
     for map_name, entries in data.items():
         for original_key, info in entries.items():
             map_name_str = str(map_name)
             original_key_str = str(original_key)
             key = (map_name_str, original_key_str)
-            seen_json_keys.add(key)
 
             marker = str(info.get("original_marker", ""))
             fallback_record = fallback_by_key.get(key)
@@ -639,19 +644,35 @@ def scan_translation_data(
     return review_entries
 
 
+def load_review_project(path: Path, fallback_csv_path: Optional[Path] = None):
+    data = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+    records = load_fallback_records(fallback_csv_path) if fallback_csv_path else []
+    pending = load_paused_entries(path, data)
+    if not pending:
+        if not path.exists():
+            raise FileNotFoundError(path)
+        return data, records, scan_translation_data(data, records)
+
+    # The overlay is for display only. An untouched draft must stay missing on disk.
+    display = {name: dict(items) for name, items in data.items()}
+    paused_records = []
+    for (name, key), (metadata, draft, reason) in pending.items():
+        display.setdefault(name, {})[key] = dict(metadata, text=draft)
+        paused_records.append(FallbackRecord(name, key, metadata["original_marker"], reason))
+    entries = scan_translation_data(display, [*paused_records, *records])
+    for entry in entries:
+        if entry.key in pending:
+            entry.pending_metadata = pending[entry.key][0]
+    return data, records, entries
+
+
 def translation_json_has_reviewable_issues(
     translated_json_path: Path,
     fallback_csv_path: Optional[Path] = None,
 ) -> bool:
     """Return whether the integrated review button should be enabled."""
-    if not translated_json_path.exists():
-        return False
     try:
-        data = json.loads(translated_json_path.read_text(encoding="utf-8"))
-        fallback_records: List[FallbackRecord] = []
-        if fallback_csv_path and fallback_csv_path.exists():
-            fallback_records = load_fallback_records(fallback_csv_path)
-        entries = scan_translation_data(data, fallback_records)
+        _, _, entries = load_review_project(translated_json_path, fallback_csv_path)
     except UnsupportedFallbackCsvError:
         return True
     except Exception:
@@ -846,10 +867,16 @@ def export_reviewed_data(data: dict, entries: Iterable[ReviewEntry]) -> dict:
     """Return a deep-copied JSON payload with updated translation texts."""
     cloned = copy.deepcopy(data)
     for entry in entries:
-        cloned[entry.map_name][entry.original_key]["text"] = entry.current_text
-        if entry.is_fallback and entry.dirty:
-            cloned[entry.map_name][entry.original_key]["status"] = "success"
-            cloned[entry.map_name][entry.original_key]["failure_context"] = None
+        if not entry.dirty:
+            continue
+        if entry.pending_metadata is not None and not entry.current_text.strip():
+            raise ValueError("译文为空")
+        result = cloned.setdefault(entry.map_name, {}).setdefault(entry.original_key, {})
+        if entry.pending_metadata is not None:
+            result.update(entry.pending_metadata)
+        result["text"] = entry.current_text
+        if entry.is_fallback:
+            result.update(status="success", failure_context=None)
     return cloned
 
 
@@ -902,16 +929,20 @@ def save_integrated_review(
     dirty_entries = [entry for entry in entries if entry.dirty]
     corrected_fallback_keys = {entry.key for entry in dirty_entries if entry.is_fallback}
 
-    updated_data = export_reviewed_data(data, entries)
+    if translated_json_path.is_file():
+        data = json.loads(translated_json_path.read_text(encoding="utf-8-sig"))
+    updated_data = export_reviewed_data(data, dirty_entries)
     _write_json_atomic(translated_json_path, updated_data)
 
-    remaining_fallback_rows = 0
+    csv_keys = {record.key for record in fallback_records or ()}
+    remaining_fallback_rows = sum(entry.pending_metadata is not None and not entry.dirty and entry.key not in csv_keys
+                                  for entry in entries)
     if (
         fallback_csv_path
         and fallback_records is not None
         and (fallback_records or fallback_csv_path.exists())
     ):
-        remaining_fallback_rows = rewrite_fallback_csv(
+        remaining_fallback_rows += rewrite_fallback_csv(
             fallback_csv_path,
             fallback_records,
             corrected_fallback_keys,
@@ -1496,21 +1527,11 @@ class LineLimitCheckerApp:
 
     def load_file(self, path: Path) -> None:
         """Load translation JSON and its sidecar rules."""
-        if not path.exists():
-            messagebox.showerror("加载失败", f"文件不存在:\n{path}", parent=self.root)
-            return
-
         if not self._confirm_discard_unsaved_context():
             return
 
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            fallback_records = (
-                load_fallback_records(self.fallback_csv_path)
-                if self.fallback_csv_path is not None
-                else []
-            )
-            entries = scan_translation_data(data, fallback_records)
+            data, fallback_records, entries = load_review_project(path, self.fallback_csv_path)
             rules_path = default_rules_path(path)
             rules = load_rule_set(rules_path)
         except Exception as exc:
@@ -1787,7 +1808,7 @@ class LineLimitCheckerApp:
             return
 
         new_text = self._get_editor_text()
-        entry.update_text(new_text)
+        entry.update_text(new_text, confirm_pending=True)
         self._refresh_current_entry_metrics(editor_text=entry.current_text)
 
         current_visible_index = (
@@ -2072,6 +2093,10 @@ class LineLimitCheckerApp:
             )
             remaining_fallback_keys = {record.key for record in self.fallback_records}
             for entry in self.entries:
+                if entry.pending_metadata is not None and not entry.dirty:
+                    continue
+                entry.pending_metadata = None
+                entry.pending_confirmed = False
                 entry.initial_text = entry.current_text
                 entry.recompute()
                 if entry.key in remaining_fallback_keys:
@@ -2148,6 +2173,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="译文问题审阅器")
     parser.add_argument("json_path", nargs="?", help="可选：待审阅的翻译 JSON 路径")
     parser.add_argument("--initial-input", help="启动时加载的译文 JSON 路径")
+    parser.add_argument("--translated-dir", type=Path)
     parser.add_argument("--initial-fallback-csv", help="启动时加载的回退记录 CSV 路径")
     return parser.parse_args()
 
@@ -2156,6 +2182,8 @@ def main() -> None:
     args = _parse_args()
     input_path = args.initial_input or args.json_path
     initial_path = Path(input_path).resolve() if input_path else None
+    if args.translated_dir:
+        initial_path = args.translated_dir.resolve() / "translation_translated.json"
     fallback_csv_path = Path(args.initial_fallback_csv).resolve() if args.initial_fallback_csv else None
 
     root = tk.Tk()
@@ -2174,9 +2202,6 @@ def main() -> None:
         fallback_csv_path=fallback_csv_path,
         integrated_mode=initial_path is not None,
     )
-    if initial_path and not initial_path.exists():
-        messagebox.showerror("加载失败", f"文件不存在:\n{initial_path}", parent=root)
-        app.status_var.set(f"启动时未找到文件：{initial_path}")
     root.mainloop()
 
 

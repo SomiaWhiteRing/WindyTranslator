@@ -13,11 +13,11 @@
   "arguments": [
     {
       "name": "input",
-      "flag": "--initial-input",
+      "flag": "--translated-dir",
       "type": "current_game_file",
-      "source": "translated/translation_translated.json",
+      "source": "translated",
       "required": true,
-      "label": "译文 JSON 文件"
+      "label": "译文目录"
     },
     {
       "name": "fallback_csv",
