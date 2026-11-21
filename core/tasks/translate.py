@@ -6,6 +6,7 @@ import re
 import time
 import logging
 import threading
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, CancelledError
 from core.api_clients import deepseek
 from core.utils import file_system, text_processing, default_database, control_tokens
@@ -126,7 +127,7 @@ def _translation_worker(
     return source_file_name_for_worker, batch_processing_result
 
 
-def _load_existing_translated_data(translated_json_path):
+def _load_existing_translated_data(translated_json_path, *, strict=False):
     """加载已有翻译结果，用于中断后续跑。"""
     if not os.path.exists(translated_json_path):
         return {}
@@ -135,10 +136,16 @@ def _load_existing_translated_data(translated_json_path):
             existing_data = json.load(f_existing)
         if isinstance(existing_data, dict):
             return existing_data
+        if strict:
+            raise ValueError("已有翻译文件的顶层结构无效")
         log.warning(f"已有翻译文件不是预期的字典结构，将忽略: {translated_json_path}")
     except json.JSONDecodeError as decode_err:
+        if strict:
+            raise
         log.warning(f"已有翻译文件无法解析，将忽略并重新生成: {translated_json_path} - {decode_err}")
     except OSError as os_err:
+        if strict:
+            raise
         log.warning(f"读取已有翻译文件失败，将忽略并重新生成: {translated_json_path} - {os_err}")
     return {}
 
@@ -180,13 +187,17 @@ def _reuse_translation_result(result_obj, metadata_obj):
     return reused
 
 
-def _save_translation_results_atomic(translated_json_path, untranslated_data, translated_data):
+def _save_translation_results_atomic(translated_json_path, untranslated_data, translated_data, selected_entries=None):
     """按原始顺序原子写入翻译结果，避免中途退出留下半截 JSON。"""
     for file_name, source_entries in untranslated_data.items():
+        if selected_entries is not None and file_name not in selected_entries:
+            continue
         results = translated_data.get(file_name)
         if not isinstance(source_entries, dict) or not isinstance(results, dict):
             continue
         for source_text, source_metadata in source_entries.items():
+            if selected_entries is not None and source_text not in selected_entries[file_name]:
+                continue
             result = results.get(source_text)
             if (
                 isinstance(source_metadata, dict)
@@ -197,6 +208,12 @@ def _save_translation_results_atomic(translated_json_path, untranslated_data, tr
                 result["wolf_export_schema"] = source_metadata["wolf_export_schema"]
     file_system.ensure_dir_exists(os.path.dirname(translated_json_path))
     reordered_results = _reorder_translation_results(untranslated_data, translated_data)
+    if selected_entries is not None:
+        # A partial submission must also retain older results absent from the current extraction.
+        for name, rows in translated_data.items():
+            retained = reordered_results.setdefault(name, {})
+            for original, result in rows.items():
+                retained.setdefault(original, result)
     tmp_path = f"{translated_json_path}.tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f_json_out:
         json.dump(reordered_results, f_json_out, ensure_ascii=False, indent=4)
@@ -234,7 +251,8 @@ def _completed_futures(futures, stop_event):
         yield from finished
 
 
-def run_translate(game_path, works_dir, translate_config, world_dict_config, message_queue):
+def run_translate(game_path, works_dir, translate_config, world_dict_config, message_queue,
+                  *, selected_entries=None, retry=False):
     start_time = time.time()
     character_dictionary = [] 
     entity_dictionary = []   
@@ -264,7 +282,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         from core.engines import wolf as wolf_engine
         detected_game = detect_game_engine(game_path)
         is_wolf_game = bool(detected_game and detected_game.engine == "wolf")
-        stale_wolf_outputs = (
+        stale_wolf_outputs = () if selected_entries is not None else (
             translated_json_path,
             f"{translated_json_path}.tmp",
             fallback_csv_path,
@@ -325,7 +343,12 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         if not untranslated_data_per_file:
             message_queue.put(("warning", "未翻译的 JSON 文件为空或无效，无需翻译。")); message_queue.put(("status", "翻译跳过(无内容)")); message_queue.put(("done", None)); return
 
-        existing_translated_data = _load_existing_translated_data(translated_json_path)
+        existing_translated_data = _load_existing_translated_data(translated_json_path, strict=selected_entries is not None)
+        previous_issues = {}
+        if selected_entries is not None:
+            from tools.translation_issue_review.paused_review import load_paused_entries
+            previous_issues = load_paused_entries(Path(translated_json_path), existing_translated_data)
+            all_files_translated_data = {name: dict(rows) for name, rows in existing_translated_data.items()}
         existing_success_count = 0
         if existing_translated_data:
             for file_name, data_for_this_file in untranslated_data_per_file.items():
@@ -362,6 +385,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         # --- 获取翻译配置 ---
         current_translate_config = translate_config.copy()
+        current_translate_config["_selected_translation"] = selected_entries is not None
         current_translate_config["_error_reports"] = getattr(message_queue, "reports", None)
         current_translate_config["_report_project"] = dict(getattr(message_queue, "report_project", {}),
                                                           resumed=bool(existing_translated_data))
@@ -399,6 +423,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         src_lang_lc = str(source_language_cfg).lower()
         is_source_language_japanese = ("日" in str(source_language_cfg)) or src_lang_lc.startswith("ja") or ("japanese" in src_lang_lc)
         if not api_url or not api_key or not model_name:
+             if selected_entries is not None:
+                 message_queue.put(("progress_fault", (game_path, "configuration")))
              raise ValueError("翻译API 配置不完整 (URL, Key, Model)。")
 
         try: api_client_instance = deepseek.DeepSeekClient(api_url, api_key)
@@ -417,6 +443,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         message_queue.put(("log", ("normal", "开始预切分所有翻译任务...")))
         for file_name, data_for_this_file in untranslated_data_per_file.items():
+            if selected_entries is not None and file_name not in selected_entries:
+                continue
             if not data_for_this_file:
                 log.info(f"文件 '{file_name}' 为空，跳过预切分。")
                 all_files_translated_data[file_name] = {} # 预先设置空结果
@@ -436,7 +464,20 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 existing_file_translations = {}
             for original_json_key, metadata_obj in data_for_this_file.items():
                 # 确保元数据对象中有一个字段存储这个原始的JSON键
-                metadata_obj['original_json_key'] = original_json_key 
+                metadata_obj['original_json_key'] = original_json_key
+                existing_result_obj = existing_file_translations.get(original_json_key)
+                if selected_entries is not None:
+                    if original_json_key not in selected_entries.get(file_name, ()):
+                        continue
+                    if not retry and ((file_name, original_json_key) in previous_issues
+                                      or (existing_result_obj or {}).get("status") == "fallback"):
+                        continue
+                if _is_reusable_translation_result(existing_result_obj, metadata_obj) and (
+                    selected_entries is not None or existing_result_obj.get("manual")
+                ):
+                    all_files_translated_data.setdefault(file_name, {})[original_json_key] = existing_result_obj
+                    resumed_count_for_this_file += 1
+                    continue
                 if (
                     detected_game
                     and detected_game.engine == "wolf"
@@ -546,13 +587,17 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 all_files_translated_data = _save_translation_results_atomic(
                     translated_json_path,
                     untranslated_data_per_file,
-                    all_files_translated_data
+                    all_files_translated_data, selected_entries
                 )
             except Exception as checkpoint_err:
                 log.exception(f"保存续跑结果失败: {checkpoint_err}")
                 message_queue.put(("error", f"保存续跑结果失败: {checkpoint_err}"))
                 message_queue.put(("status", "翻译失败(保存错误)")); message_queue.put(("done", None)); return
 
+            if selected_entries is not None:
+                message_queue.put(("status", "所选条目处理完成"))
+                message_queue.put(("done", None))
+                return
             if overall_resumed_success_count > 0:
                 message_queue.put(("success", f"所有条目已有成功译文，已复用 {overall_resumed_success_count} 条并完成续跑。"))
                 message_queue.put(("status", "翻译全部完成(续跑复用)")); message_queue.put(("progress", 100.0)); message_queue.put(("done", None)); return
@@ -586,6 +631,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             stop_event=getattr(message_queue, "stop_event", None),
         )
         current_translate_config["_translation_session"] = session
+        for (name, key), (_, draft, reason) in previous_issues.items():
+            session.pending_review.setdefault(name, {})[key] = {"draft": draft, "reason": reason}
         checkpoint_lock = threading.Lock()
         checkpoint_dirty = False
 
@@ -602,7 +649,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     return
                 try:
                     all_files_translated_data = _save_translation_results_atomic(
-                        translated_json_path, untranslated_data_per_file, all_files_translated_data
+                        translated_json_path, untranslated_data_per_file, all_files_translated_data, selected_entries
                     )
                     checkpoint_dirty = False
                 except Exception as error:
@@ -669,15 +716,21 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
 
         summary_path = os.path.join(translated_dir, "translation_run_summary.json")
         summary = {"run_id": session.run_id, "paused": session.stop.is_set(),
+                   "pending_review": {name: {key: failure for key, failure in items.items()
+                                             if not _is_reusable_translation_result(
+                                                 all_files_translated_data.get(name, {}).get(key),
+                                                 untranslated_data_per_file.get(name, {}).get(key))}
+                                      for name, items in session.pending_review.items()},
                    "reason": session.reason, **session.stats,
                    "saved_success": sum(
                        result.get("status") == "success"
                        for entries in all_files_translated_data.values() for result in entries.values()
                    )}
-        with open(summary_path, "w", encoding="utf-8") as summary_file:
-            json.dump(summary, summary_file, ensure_ascii=False, indent=2)
+        file_system.write_json_atomic(summary_path, summary)
         message_queue.put(("log", ("normal", f"实际请求 {session.stats['requests']} 次；输入 {session.stats['input_tokens']} / 输出 {session.stats['output_tokens']} token；拆批 {session.stats['splits']} 次。")))
         if session.stop.is_set():
+            if selected_entries is not None and session.pause_kind and session.pause_kind != "cancelled":
+                message_queue.put(("progress_fault", (game_path, session.pause_kind)))
             message_queue.put(("error", f"翻译已暂停，成功译文已保存，可续跑。{session.reason}"))
             message_queue.put(("status", "翻译暂停(已保存进度)"))
             message_queue.put(("done", None))
@@ -722,6 +775,12 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                 csv_header_fallback_global = ["源文件名", "原文", "原始标记", "最终尝试结果/原因", "修正译文"]
                 csv_data_fallback_global = [csv_header_fallback_global] + \
                                            [[fname, key, marker, context, ""] for fname, key, marker, context in all_fallback_items_for_csv_global]
+                if selected_entries is not None and os.path.isfile(fallback_csv_path):
+                    with open(fallback_csv_path, newline="", encoding="utf-8-sig") as prior_csv:
+                        old_rows = {tuple(row[:2]): row for row in list(csv.reader(prior_csv))[1:]}
+                    for i, row in enumerate(csv_data_fallback_global[1:], 1):
+                        if row[1] not in selected_entries.get(row[0], ()):
+                            csv_data_fallback_global[i] = old_rows.get(tuple(row[:2]), row)
                 with open(fallback_csv_path, 'w', newline='', encoding='utf-8-sig') as f_csv_global:
                     writer_global = csv.writer(f_csv_global, quoting=csv.QUOTE_ALL)
                     writer_global.writerows(csv_data_fallback_global)
@@ -741,7 +800,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             all_files_translated_data = _save_translation_results_atomic(
                 translated_json_path,
                 untranslated_data_per_file,
-                all_files_translated_data
+                all_files_translated_data, selected_entries
             )
             
             total_elapsed_time_overall = time.time() - start_time
@@ -750,6 +809,8 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             final_msg_overall = "所有文件翻译完成"
             final_status_overall = "翻译全部完成"
             final_log_level_overall = "success"
+            if selected_entries is not None:
+                final_msg_overall = final_status_overall = "所选条目翻译完成"
             if overall_explicit_fallback_count_global > 0:
                  final_msg_overall += f" (共 {overall_explicit_fallback_count_global} 个回退，详见 '{fallback_csv_filename}')"
                  final_status_overall += f" (有回退)"

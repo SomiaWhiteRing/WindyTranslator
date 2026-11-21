@@ -13,7 +13,7 @@ from core.utils.engine_detection import detect_game_engine
 log = logging.getLogger(__name__)
 
 # --- 导出文本任务 ---
-def run_export(game_path, source_encoding, export_scope, message_queue):
+def run_export(game_path, source_encoding, export_scope, message_queue, *, works_dir=None):
     """
     执行导出文本到 StringScripts 文件夹的流程。
     包含处理 RPGRewriter 导出失败时移动问题地图文件的逻辑。
@@ -208,6 +208,13 @@ def run_export(game_path, source_encoding, export_scope, message_queue):
                     message_queue.put(("warning", f"警告：导出成功，但备份原始 StringScripts 到 StringScripts_Origin 失败: {backup_err}"))
                     # 备份失败只是一个警告，导出本身还是成功的
                 # --- 备份结束 ---
+
+                if works_dir and not problem_files and os.path.isdir(backup_path):
+                    from .supplement import inventory
+                    try:
+                        inventory(game_path, works_dir, source_encoding, rebuild=True)
+                    except (OSError, ValueError) as error:
+                        log.warning("未能记录补充提取清单：%s", error)
 
                 try:
                     # 统计文件数量

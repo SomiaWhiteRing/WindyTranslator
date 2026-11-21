@@ -18,6 +18,7 @@ from . import config_dialogs # 可能需要引用
 from . import dict_editor # 可能需要引用
 from . import tools_panel
 from .output_mode_panel import OutputModePanel
+from .translation_progress import TranslationProgress
 
 class MainWindow:
     """应用程序的主窗口 UI 类。"""
@@ -82,6 +83,9 @@ class MainWindow:
         self.pro_mode_frame_container = ttk.Frame(self.functions_notebook, padding="5")
         self.pro_panel = pro_mode_panel.ProModePanel(self.pro_mode_frame_container, self.app, self.config) # 专业模式需要配置来初始化
         self.functions_notebook.add(self.pro_mode_frame_container, text="专业模式")
+
+        self.progress_panel = TranslationProgress(self.functions_notebook, self.app)
+        self.functions_notebook.add(self.progress_panel, text="翻译进度")
 
         # 源码型外部工具页。工具以独立进程运行，不嵌入第三方 GUI。
         self.tools_frame_container = ttk.Frame(self.functions_notebook, padding="5")
@@ -253,6 +257,15 @@ class MainWindow:
         self.tools_panel.refresh_shortcut_state()
         self.output_mode_panel.set_enabled(enabled)
         self.pro_panel.apply_output_mode_state()
+        self.progress_panel.enabled = enabled
+        if not enabled:
+            self.progress_panel.generation += 1
+            self.progress_panel.loading = None
+        self.progress_panel.controls()
+        if self.progress_panel.editor:
+            self.progress_panel.editor.refresh()
+        if enabled and self.functions_notebook.select() == str(self.progress_panel):
+            self.progress_panel.refresh()
 
     def get_current_mode(self):
         """获取当前选中的 Notebook 标签页对应的模式 ('easy' 或 'pro')。"""
@@ -278,6 +291,11 @@ class MainWindow:
              # self.root.after(50, lambda: self.switch_to_mode(mode))
 
     def _on_game_path_changed(self, *_args):
+        self.progress_panel.generation += 1
+        self.progress_panel.loading = None
+        if self.functions_notebook.select() == str(self.progress_panel):
+            self.progress_panel.project = None
+            self.progress_panel.recount()
         self._schedule_game_context_refresh(300)
 
     def refresh_game_context(self):
@@ -301,6 +319,8 @@ class MainWindow:
         path = self.app.get_game_path().strip()
         detected = detect_game_engine(path) if path else None
         self.output_mode_panel.refresh(path, detected)
+        if self.functions_notebook.select() == str(self.progress_panel):
+            self.progress_panel.refresh()
         is_wolf = bool(detected and detected.engine == "wolf")
         if not is_wolf:
             return
@@ -339,6 +359,8 @@ class MainWindow:
         elif selected == str(self.pro_mode_frame_container):
             self._last_workflow_mode = "pro"
         self.font_panel.set_visible(selected == str(self.font_mode_frame_container))
+        if selected == str(self.progress_panel) and not self._path_check_after_id:
+            self.progress_panel.refresh()
 
 
     def update_rtp_button_text(self):

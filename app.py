@@ -22,7 +22,7 @@ from ui import main_window #, config_dialogs, rtp_dialog, dict_editor # 等
 # 导入 Core 层
 from core import config as cfg # 重命名避免与 tkinter.config 冲突
 from core.tasks import (
-    initialize, rename, export, json_creation,
+    initialize, rename, export, json_creation, supplement,
     dict_generation, translate, json_release, import_task,
     easy_mode_flow, apply_base_dictionary
 )
@@ -365,16 +365,22 @@ class RPGTranslatorApp:
             task_func = export.run_export
             task_args = [current_game_path]
             task_kwargs = dict(source_encoding=source_encoding, export_scope=export_scope,
-                               message_queue=self.message_queue)
+                               message_queue=self.message_queue, works_dir=self.works_dir)
+        elif task_name == 'supplement':
+            task_func = supplement.run_supplement
+            task_args = [current_game_path, self.works_dir, task_payload, self.message_queue]
+            task_kwargs = dict(source_encoding=source_encoding)
         elif task_name == 'create_json':
             task_func = json_creation.run_create_json
             task_args = [current_game_path, self.works_dir, self.message_queue]
         elif task_name == 'generate_dictionary':
             task_func = dict_generation.run_generate_dictionary
             task_args = [current_game_path, self.works_dir, world_dict_config, self.message_queue]
-        elif task_name == 'translate':
+        elif task_name in ('translate', 'translate_selected'):
             task_func = translate.run_translate
             task_args = [current_game_path, self.works_dir, translate_config, world_dict_config, self.message_queue]
+            if task_name == 'translate_selected':
+                task_kwargs = task_payload
         elif task_name == 'release_json':
             json_files = self._find_translated_json_files(current_game_path) # <--- 传递 current_game_path
             if not json_files:
@@ -658,6 +664,8 @@ class RPGTranslatorApp:
                 # 注意：任务成功完成的消息由任务自身通过队列发送 ("success", ...)
             except WorkBusyError as e:
                 task_message_proxy.has_problem = True
+                if task_name in ("supplement", "translate_selected"):
+                    self.message_queue.put(("progress_fault", (args[0], "busy")))
                 self.message_queue.put(("error", str(e)))
                 self.message_queue.put(("status", "作品任务未启动"))
                 if task_id_from_kwargs_for_exception_handling:
@@ -858,6 +866,8 @@ class RPGTranslatorApp:
                     self.log_message(content, "error")
                     # 可以在状态栏显示错误提示
                     # self.update_status("操作出错，详情请查看日志")
+                elif msg_type == "progress_fault":
+                    self.main_window.progress_panel.show_fault(*content)
                 elif msg_type == "progress": # 特别为轻松模式
                     self.update_easy_mode_progress(content)
                 elif msg_type == "easy_status": # 特别为轻松模式

@@ -26,6 +26,7 @@ class TranslationSession:
         self.lock = threading.Lock()
         self.stop = stop_event if stop_event is not None else threading.Event()
         self._reason = ""
+        self.pause_kind = ""
         self.stats = Counter()
         self.bad_streak = 0
         self.json_format = True
@@ -35,6 +36,7 @@ class TranslationSession:
         self.stream = self.stream_mode == "enabled"
         self.diagnostics_path = diagnostics_path
         self.run_id = uuid.uuid4().hex[:12]
+        self.pending_review = {}
         self.fragments = {}
         self.fragment_path = os.path.join(os.path.dirname(diagnostics_path), "translation_fragments.jsonl") if diagnostics_path else None
         if self.fragment_path and os.path.exists(self.fragment_path):
@@ -74,11 +76,16 @@ class TranslationSession:
                     os.fsync(output.fileno())
             self.fragments[key] = text
 
-    def pause(self, reason):
+    def pause(self, reason, kind=""):
         with self.lock:
             if not self.stop.is_set():
                 self.reason = reason
+                self.pause_kind = kind
             self.stop.set()
+
+    def remember_failure(self, file_name, key, reason, draft):
+        with self.lock:
+            self.pending_review.setdefault(file_name, {})[key] = {"reason": reason, "draft": draft}
 
     def enable_stream(self):
         with self.lock:
@@ -202,11 +209,17 @@ def translate_batch(items, context, characters, entities, client, config, file_n
     retry_failed_only = config.get("retry_failed_items_only", False)
     reasoning_exhaustions = Counter()
     failures = {}
+    review_drafts = {}
     reports = config.get("_error_reports")
     history = deque(maxlen=8)
     failed_requests = 0
 
     def report_failure(remaining):
+        for item in remaining:
+            key = item["original_json_key"]
+            parent = config.get("_fragment_parent")
+            session.remember_failure(file_name, parent or key, failures[key]["reason"],
+                                     None if parent else review_drafts.get(key))
         if not reports or not reports.enabled or not history:
             return
         seen = set()
@@ -292,18 +305,31 @@ def translate_batch(items, context, characters, entities, client, config, file_n
             # Unknown client failures are not safe to silently retry (may already be billed).
             session.record(CompletionResult(error_kind="unknown", error="接口调用发生未分类异常"),
                            request_number, file_name, len(pending), 0, {}, pending, stream=kwargs["stream"])
-            session.pause("接口调用发生未分类异常，已停止后续请求")
+            session.pause("接口调用发生未分类异常，已停止后续请求", "unknown")
             raise
+        if config.get("_selected_translation") and response.error_kind == "empty" and response.finish_reason != "length":
+            session.record(response, request_number, file_name, len(pending), 0, {}, stream=kwargs["stream"])
+            session.pause("接口未返回有效译文", "empty")
+            raise TranslationPaused(session.reason)
+        if config.get("_selected_translation") and response.error_kind == "refusal":
+            reason = "接口拒绝回答"
+            for item in pending:
+                key = config.get("_fragment_parent") or item["original_json_key"]
+                session.remember_failure(file_name, key, reason, None)
+            session.record(response, request_number, file_name, len(pending), 0,
+                           {i: reason for i in range(1, len(pending) + 1)}, pending, stream=kwargs["stream"])
+            session.pause(reason)
+            raise TranslationPaused(session.reason)
         if response.error_kind in ("authentication", "quota", "configuration", "cancelled"):
             session.record(response, request_number, file_name, len(pending), 0, {}, stream=kwargs["stream"])
-            session.pause(f"接口错误 ({response.error_kind}): {response.error}")
+            session.pause(f"接口错误 ({response.error_kind}): {response.error}", response.error_kind)
             raise TranslationPaused(session.reason)
         if response.error_kind == "unsupported_format":
             session.record(response, request_number, file_name, len(pending), 0, {}, stream=kwargs["stream"])
             # Other in-flight requests may have already disabled the shared
             # option. Only this request's parameters prove it was a retry.
             if "response_format" not in kwargs:
-                session.pause("接口在取消 response_format 后仍拒绝请求，请检查接口配置")
+                session.pause("接口在取消 response_format 后仍拒绝请求，请检查接口配置", "configuration")
                 raise TranslationPaused(session.reason)
             with session.lock:
                 session.json_format = False
@@ -319,7 +345,8 @@ def translate_batch(items, context, characters, entities, client, config, file_n
                 continue
             transient_retries += 1
             if transient_retries > max(1, int(config.get("max_retries", 1))):
-                session.pause("接口持续返回临时错误或不完整响应，已保存译文并暂停，可稍后续跑")
+                session.pause("接口持续返回临时错误或不完整响应，已保存译文并暂停，可稍后续跑",
+                              "rate" if response.status_code == 429 else "transient")
                 raise TranslationPaused(session.reason)
             session.stop.wait(min(8, 2 ** transient_retries))
             queue.appendleft(pending)
@@ -332,8 +359,7 @@ def translate_batch(items, context, characters, entities, client, config, file_n
         for i, item in enumerate(pending):
             key = item["original_json_key"]
             attempts[key] += 1
-            trace = (dict(id=i+1, original=key, type=item.get("original_marker"), speaker=item.get("speaker_id"),
-                          transport=transports[i].text, raw=records.get(i+1)) if reports and reports.enabled else None)
+            trace = {}
             result, reason = validate_item(item, transports[i], records[i + 1], config, mappings[i], trace) if i + 1 in records else (None, parse_error or response.error or "缺少该条译文")
             if result is not None:
                 successes[key] = result
@@ -342,8 +368,11 @@ def translate_batch(items, context, characters, entities, client, config, file_n
                 if i + 1 in records:
                     failures[key]["previous_translation"] = records[i + 1]
                 issues[i + 1] = reason
-                if trace is not None:
-                    traces.append(dict(trace, reason=reason))
+                review_drafts[key] = trace.get("restored")
+                if reports and reports.enabled:
+                    traces.append(dict(trace, id=i+1, original=key, type=item.get("original_marker"),
+                                       speaker=item.get("speaker_id"), transport=transports[i].text,
+                                       raw=records.get(i+1), reason=reason))
                 remainder.append(item)
         if traces:
             failed_requests += 1
@@ -367,9 +396,10 @@ def translate_batch(items, context, characters, entities, client, config, file_n
         if response.finish_reason == "length" and not response.content.strip() and output_tokens and reasoning_tokens >= output_tokens:
             for item in remainder:
                 reasoning_exhaustions[item["original_json_key"]] += 1
-            if any(reasoning_exhaustions[item["original_json_key"]] >= 2 for item in remainder):
+            exhausted = [item for item in remainder if reasoning_exhaustions[item["original_json_key"]] >= 2]
+            if exhausted:
                 session.pause("同一文本两次耗尽输出预算于模型思考，未返回译文；已暂停以节省额度，请降低思考强度或检查中转站参数支持")
-                report_failure(remainder)
+                report_failure(exhausted)
                 raise TranslationPaused(session.reason)
         if not remainder:
             continue
@@ -432,7 +462,8 @@ def translate_long_item(item, context, characters, entities, client, config, fil
         if cached is None:
             def save(_file, results, cache_key=key):
                 session.save_fragment(cache_key, results[part]["text"])
-            fragment_config = {**config, "_fragment_mode": True, "_batch_request_budget": budget, "_checkpoint_translation": save,
+            fragment_config = {**config, "_fragment_mode": True, "_fragment_parent": item["original_json_key"],
+                               "_batch_request_budget": budget, "_checkpoint_translation": save,
                                "_article_terms": list(article_terms.values())}
             translated = translate_batch([fragment], context, [*article_terms.values(), *characters], entities, client, fragment_config, file_name)
             cached = translated[part]["text"]
@@ -451,6 +482,7 @@ def translate_long_item(item, context, characters, entities, client, config, fil
         ok, reason = config["_translation_validator"](source, joined)
     if not ok:
         session.pause("长文本拼接校验失败: " + reason)
+        session.remember_failure(file_name, item["original_json_key"], reason, joined)
         reports = config.get("_error_reports")
         if reports:
             reports.capture("long-text", session.run_id, dict(task="translate", file=file_name, original=source,
