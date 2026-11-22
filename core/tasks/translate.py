@@ -714,7 +714,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                     message_queue.put(("progress", progress_percentage))
                     last_status_update_time = current_time
 
-        summary_path = os.path.join(translated_dir, "translation_run_summary.json")
+        summary_path = os.path.join(translated_dir, "translation_run_summary.jsonl")
         summary = {"run_id": session.run_id, "paused": session.stop.is_set(),
                    "pending_review": {name: {key: failure for key, failure in items.items()
                                              if not _is_reusable_translation_result(
@@ -726,7 +726,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
                        result.get("status") == "success"
                        for entries in all_files_translated_data.values() for result in entries.values()
                    )}
-        file_system.write_json_atomic(summary_path, summary)
+        file_system.write_json_atomic(summary_path, summary, indent=None)
         message_queue.put(("log", ("normal", f"实际请求 {session.stats['requests']} 次；输入 {session.stats['input_tokens']} / 输出 {session.stats['output_tokens']} token；拆批 {session.stats['splits']} 次。")))
         if session.stop.is_set():
             if selected_entries is not None and session.pause_kind and session.pause_kind != "cancelled":

@@ -88,7 +88,7 @@ def _legacy_failures(directory, summary, sources, translated):
 def load_paused_entries(path, translated):
     if path.name != "translation_translated.json":
         return {}
-    summary_path = path.with_name("translation_run_summary.json")
+    summary_path = path.with_name("translation_run_summary.jsonl")
     if not summary_path.is_file():
         return {}
     try:

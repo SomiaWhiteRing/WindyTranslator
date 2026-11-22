@@ -9,7 +9,7 @@ import tempfile
 log = logging.getLogger(__name__)
 
 
-def write_json_atomic(path, data):
+def write_json_atomic(path, data, *, indent=4):
     """写好同目录临时文件后替换 JSON，写入失败时保留原文件。"""
     path = os.path.abspath(path)
     directory = os.path.dirname(path)
@@ -19,7 +19,7 @@ def write_json_atomic(path, data):
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
                                          prefix=".windy-config-", suffix=".tmp", delete=False) as output:
             temporary_path = output.name
-            json.dump(data, output, indent=4, ensure_ascii=False)
+            json.dump(data, output, indent=indent, ensure_ascii=False)
             output.write("\n")
         os.replace(temporary_path, path)
     finally:
