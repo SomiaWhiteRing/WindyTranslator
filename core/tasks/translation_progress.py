@@ -16,7 +16,7 @@ from tools.translation_issue_review.paused_review import load_paused_entries
 
 
 class ProgressProject:
-    def __init__(self, game, works_dir, encoding):
+    def __init__(self, game, works_dir, encoding, *, files_only=False):
         self.game, self.works_dir = game, works_dir
         work = output_mode.project_settings_path(game, works_dir).parent
         source = work / "untranslated" / "translation.json"
@@ -28,11 +28,21 @@ class ProgressProject:
         self.labels = {}
         self.missing = {}
         self.busy = False
+        self.readable = False
         if not source.is_file() or not Path(game).is_dir():
             return
         self.source = json.loads(source.read_text(encoding="utf-8-sig"))
         if self.output.is_file():
             self.results = json.loads(self.output.read_text(encoding="utf-8-sig"))
+        self.readable = all(
+            isinstance(data, dict) and all(
+                name and isinstance(rows, dict) and all(isinstance(row, dict) for row in rows.values())
+                for name, rows in data.items()
+            )
+            for data in (self.source, self.results)
+        )
+        if files_only or not self.readable:
+            return
         self.issues = load_paused_entries(self.output, self.results)
         self.profile = control_tokens.profile_from_game(game)
         maps = {}

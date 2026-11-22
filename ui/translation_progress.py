@@ -10,16 +10,15 @@ from core.tasks.translation_progress import ProgressProject
 
 def search_box(parent, hint, changed):
     value = tk.StringVar(parent)
-    entry = ttk.Entry(parent, textvariable=value)
-    placeholder = ttk.Label(entry, text=hint, foreground="#777777", cursor="xterm")
-    placeholder.place(x=4, rely=.5, anchor="w")
-    placeholder.bind("<Button-1>", lambda _: entry.focus_set())
+    placeholder = tk.StringVar(parent, value=hint)
+    ttk.Style(parent).configure("SearchHint.TEntry", foreground="#777777")
+    entry = ttk.Entry(parent, textvariable=placeholder, style="SearchHint.TEntry")
 
     def update(*_):
-        if value.get() or entry.focus_get() == entry:
-            placeholder.place_forget()
-        else:
-            placeholder.place(x=4, rely=.5, anchor="w")
+        show_hint = not value.get() and entry.focus_get() != entry
+        display = placeholder if show_hint else value
+        if str(entry.cget("textvariable")) != str(display):
+            entry.configure(textvariable=display, style="SearchHint.TEntry" if show_hint else "TEntry")
 
     entry.bind("<FocusIn>", update)
     entry.bind("<FocusOut>", update)
@@ -27,11 +26,33 @@ def search_box(parent, hint, changed):
     return entry, value
 
 
+def bind_tooltip(button, text):
+    tooltip = None
+
+    def show(_event):
+        nonlocal tooltip
+        if tooltip is None:
+            tooltip = tk.Toplevel(button)
+            tooltip.overrideredirect(True)
+            ttk.Label(tooltip, text=text, padding=(5, 2), relief="solid", borderwidth=1).pack()
+            tooltip.geometry(f"+{button.winfo_rootx()}+{button.winfo_rooty() + button.winfo_height() + 2}")
+
+    def hide(_event):
+        nonlocal tooltip
+        if tooltip is not None:
+            tooltip.destroy()
+            tooltip = None
+
+    button.bind("<Enter>", show)
+    for event in ("<Leave>", "<ButtonPress>", "<Unmap>"):
+        button.bind(event, hide)
+
+
 class TranslationProgress(ttk.Frame):
     row_height = 29
 
     def __init__(self, parent, app):
-        super().__init__(parent, padding=6)
+        super().__init__(parent, padding=6, takefocus=True)
         self.app = app
         self.enabled = True
         self.project = self.editor = None
@@ -56,11 +77,13 @@ class TranslationProgress(ttk.Frame):
         self.configure_api = ttk.Button(self.fault_bar, text="接口设置",
                                         command=lambda: self.app.start_task("configure_deepseek"))
         entry, self.query = search_box(bar, "查找文件、地图名、原文或译文……", self.filter)
-        entry.grid(row=0, column=0, sticky="ew")
-        self.extract = ttk.Button(bar, text="补充提取…", command=self.choose_types)
-        self.extract.grid(row=0, column=1, padx=5)
-        self.submit = ttk.Button(bar, text="提交翻译", command=self.submit_files)
-        self.submit.grid(row=0, column=2)
+        entry.grid(row=0, column=0, sticky="nsew")
+        self.extract = ttk.Button(bar, text="补充提取…", padding=(5, 0), command=self.choose_types)
+        self.extract.grid(row=0, column=1, padx=5, sticky="ns")
+        self.submit = ttk.Button(bar, text="提交翻译", padding=(5, 0), command=self.submit_files)
+        self.submit.grid(row=0, column=2, sticky="ns")
+        bind_tooltip(self.extract, "补充未导出的文本")
+        bind_tooltip(self.submit, "将选中的条目提交翻译")
         header = ttk.Frame(self, height=26)
         header.grid(row=1, column=0, sticky="ew")
         self.all_var = tk.IntVar(self)
@@ -92,7 +115,9 @@ class TranslationProgress(ttk.Frame):
 
     def refresh(self):
         path = self.app.get_game_path()
-        if path and self.enabled and self.loading == path:
+        files_only = self.master.select() != str(self)
+        request = (path, files_only)
+        if path and self.enabled and self.loading == request:
             return
         self.generation += 1
         self.loading = None
@@ -107,13 +132,13 @@ class TranslationProgress(ttk.Frame):
             self.recount()
         if not path or not self.enabled:
             return
-        encoding = self.app.get_output_profile(path)["source_encoding"]
-        self.loading = path
+        self.loading = request
         loaded = queue.SimpleQueue()
 
         def worker():
             try:
-                loaded.put(ProgressProject(path, self.app.works_dir, encoding))
+                encoding = None if files_only else self.app.get_output_profile(path)["source_encoding"]
+                loaded.put(ProgressProject(path, self.app.works_dir, encoding, files_only=files_only))
             except Exception as error:
                 loaded.put(error)
 
@@ -125,9 +150,14 @@ class TranslationProgress(ttk.Frame):
                 return
             self.loading = None
             result = loaded.get()
-            if isinstance(result, Exception):
+            readable = isinstance(result, ProgressProject) and result.readable
+            self.app.main_window.set_progress_tab_visible(readable)
+            if not readable:
                 self.project = None
-                self.app.log_message(str(result), "error")
+                if isinstance(result, Exception) and not files_only:
+                    self.app.log_message(str(result), "error")
+            elif files_only:
+                return
             else:
                 self.project = result
                 if result.busy:

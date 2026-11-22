@@ -85,7 +85,7 @@ class MainWindow:
         self.functions_notebook.add(self.pro_mode_frame_container, text="专业模式")
 
         self.progress_panel = TranslationProgress(self.functions_notebook, self.app)
-        self.functions_notebook.add(self.progress_panel, text="翻译进度")
+        self.functions_notebook.add(self.progress_panel, text="翻译进度", state="hidden")
 
         # 源码型外部工具页。工具以独立进程运行，不嵌入第三方 GUI。
         self.tools_frame_container = ttk.Frame(self.functions_notebook, padding="5")
@@ -265,7 +265,7 @@ class MainWindow:
         self.progress_panel.controls()
         if self.progress_panel.editor:
             self.progress_panel.editor.refresh()
-        if enabled and self.functions_notebook.select() == str(self.progress_panel):
+        if enabled:
             self.progress_panel.refresh()
 
     def get_current_mode(self):
@@ -298,7 +298,13 @@ class MainWindow:
         if self.functions_notebook.select() == str(self.progress_panel):
             self.progress_panel.project = None
             self.progress_panel.recount()
+        self.set_progress_tab_visible(False)
         self._schedule_game_context_refresh(300)
+
+    def set_progress_tab_visible(self, visible):
+        if not visible and self.functions_notebook.select() == str(self.progress_panel):
+            self.switch_to_mode(self._last_workflow_mode)
+        self.functions_notebook.tab(self.progress_panel, state="normal" if visible else "hidden")
 
     def refresh_game_context(self):
         self._schedule_game_context_refresh(0)
@@ -334,8 +340,7 @@ class MainWindow:
         detected = detect_game_engine(path) if path else None
         self.apply_pending_rtp(path, detected)
         self.output_mode_panel.refresh(path, detected)
-        if self.functions_notebook.select() == str(self.progress_panel):
-            self.progress_panel.refresh()
+        self.progress_panel.refresh()
         is_wolf = bool(detected and detected.engine == "wolf")
         if not is_wolf:
             return
