@@ -330,11 +330,13 @@ class RPGTranslatorApp:
 
         # 从配置中获取所需参数
         pro_config = self.config.get('pro_mode_settings', {}) # 专业模式的独立配置
-        rtp_options = pro_config.get('rtp_options', {'2000': True, '2000en': False, '2003': False, '2003steam': False, '2003zh_tw': False})
         source_encoding = pro_config.get('export_source_encoding', 'auto')
         target_encoding = self.config['output_settings']['legacy_encoding']
         project_output_mode = "legacy"
         detected = detect_game_engine(current_game_path) if current_game_path else None
+        if task_name in ('initialize', 'easy_flow', 'select_rtp'):
+            self.main_window.apply_pending_rtp(current_game_path, detected)
+            rtp_options = pro_config['rtp_options']
         if detected and detected.engine == "rm200x":
             profile = self.ensure_output_profile(current_game_path)
             if profile is None:

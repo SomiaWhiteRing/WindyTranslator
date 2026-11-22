@@ -6,7 +6,7 @@ import os
 import threading
 from core.engines import wolf
 from core.utils import windows_notifications
-from core.utils.engine_detection import detect_game_engine
+from core.utils.engine_detection import detect_game_engine, detect_rm2k_rtp
 
 # 导入同目录下的其他 UI 面板类 (假设它们稍后会被定义)
 from . import easy_mode_panel
@@ -103,6 +103,7 @@ class MainWindow:
         self._font_tab_visible = False
         self._last_workflow_mode = "easy"
         self._path_check_after_id = None
+        self._rtp_detection_pending = False
         self._game_context_token = 0
         self.functions_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self.app.game_path.trace_add("write", self._on_game_path_changed)
@@ -291,6 +292,7 @@ class MainWindow:
              # self.root.after(50, lambda: self.switch_to_mode(mode))
 
     def _on_game_path_changed(self, *_args):
+        self._rtp_detection_pending = True
         self.progress_panel.generation += 1
         self.progress_panel.loading = None
         if self.functions_notebook.select() == str(self.progress_panel):
@@ -300,6 +302,18 @@ class MainWindow:
 
     def refresh_game_context(self):
         self._schedule_game_context_refresh(0)
+
+    def apply_pending_rtp(self, path, detected):
+        if not self._rtp_detection_pending:
+            return
+        self._rtp_detection_pending = False
+        if detected and detected.engine == "rm200x":
+            selected = detect_rm2k_rtp(path)
+            if selected:
+                options = self.config["pro_mode_settings"]["rtp_options"]
+                for name in options:
+                    options[name] = name == selected
+                self.update_rtp_button_text()
 
     def _schedule_game_context_refresh(self, delay):
         if self._path_check_after_id:
@@ -318,6 +332,7 @@ class MainWindow:
         self._path_check_after_id = None
         path = self.app.get_game_path().strip()
         detected = detect_game_engine(path) if path else None
+        self.apply_pending_rtp(path, detected)
         self.output_mode_panel.refresh(path, detected)
         if self.functions_notebook.select() == str(self.progress_panel):
             self.progress_panel.refresh()

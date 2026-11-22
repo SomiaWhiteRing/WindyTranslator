@@ -11,6 +11,24 @@ class DetectedGame:
     reason: str
 
 
+def detect_rm2k_rtp(game_path: str) -> Optional[str]:
+    """Match the archive site's root DLL markers for a known RM2000/2003 game."""
+    markers = {"accord.dll", "ultimate_rt_eb.dll"}
+    try:
+        with os.scandir(game_path) as entries:
+            found = {
+                entry.name.lower() for entry in entries
+                if entry.name.lower() in markers and entry.is_file()
+            }
+    except OSError:
+        return None
+    if "accord.dll" in found:
+        return "2003steam"
+    if "ultimate_rt_eb.dll" in found:
+        return "2003"
+    return "2000"
+
+
 def detect_game_engine(game_path: str) -> Optional[DetectedGame]:
     """
     Best-effort engine detection by file layout.
