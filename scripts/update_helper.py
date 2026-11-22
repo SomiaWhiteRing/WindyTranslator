@@ -45,7 +45,7 @@ def run(workspace, recover=False):
     lock = InstallationLock(install)
     try:
         state("replacing")
-        replace_files(workspace, install)
+        replace_files(workspace, install, task)
         state("restarting")
         lock.close()
         child = restart(install, workspace, success=True)

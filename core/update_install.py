@@ -113,27 +113,40 @@ def load_manifest(root):
     return data
 
 
+def verify_file(path, name, expected_hash, size=None):
+    if not path.is_file() or (size is not None and path.stat().st_size != size) or digest(path) != expected_hash:
+        raise InstallError(f"文件已修改或不完整：{name}。请保留修改后重新安装完整包。")
+
+
 def verify_files(root, manifest):
     for name, info in manifest["files"].items():
-        path = contained(root, name)
-        if not path.is_file() or path.stat().st_size != info["size"] or digest(path) != info["sha256"]:
-            raise InstallError(f"文件已修改或不完整：{name}。请保留修改后重新安装完整包。")
+        verify_file(contained(root, name), name, info["sha256"], info["size"])
 
 
-def preflight(install, staged):
-    old, new = load_manifest(install), load_manifest(staged)
-    verify_files(install, old)
-    verify_files(staged, new)
-    old_names = {name.casefold(): name for name in old["files"]}
-    for name in new["files"]:
+def changed_names(old, new):
+    return sorted(name for name in old.keys() | new.keys() if old.get(name) != new.get(name)) + [MANIFEST]
+
+
+def prepare_backups(workspace, install, old, new, manifest_hash):
+    old_names = {name.casefold(): name for name in old}
+    for name in new:
         if name.casefold() in old_names and old_names[name.casefold()] != name:
             raise InstallError("安装包文件路径大小写发生变化，请手动安装。")
-        if name not in old["files"] and contained(install, name).exists():
+        if name not in old and contained(install, name).exists():
             raise InstallError(f"更新会覆盖额外文件：{name}。请先移走该文件。")
-    needed = sum(item["size"] for item in old["files"].values()) + 64 * 1024**2
+    names = changed_names(old, new)
+    needed = sum(old[name]["size"] for name in names if name in old) + 64 * 1024**2
     if shutil.disk_usage(install).free < needed:
         raise InstallError("磁盘空间不足，请清理空间后重试。")
-    return old, new
+    for name in names:
+        if name not in old and name != MANIFEST:
+            continue
+        backup = contained(workspace / "backup", name)
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(contained(install, name), backup)
+        expected = manifest_hash if name == MANIFEST else old[name]["sha256"]
+        if digest(backup) != expected:
+            raise InstallError("备份校验失败，未替换程序文件。")
 
 
 def extract_package(package_path, staged, build_id, progress):
@@ -182,6 +195,7 @@ def extract_package(package_path, staged, build_id, progress):
     if new["applicationBuildId"] != build_id or {name for _, name in files} != set(new["files"]) | {MANIFEST}:
         raise InstallError("更新包与网站发布的版本不一致。")
     verify_files(staged, new)
+    return new
 
 
 def prepare_update(install, info, build_id, download, progress):
@@ -189,6 +203,7 @@ def prepare_update(install, info, build_id, download, progress):
     if os.name != "nt" or not getattr(sys, "frozen", False):
         raise InstallError("源码运行不支持替换程序，请使用完整 Windows 安装包。")
     old = load_manifest(install)
+    old_manifest_hash = digest(install / MANIFEST)
     verify_files(install, old)
     workspace = Path(tempfile.mkdtemp(prefix=".windy-update-", dir=install))
     try:
@@ -198,13 +213,14 @@ def prepare_update(install, info, build_id, download, progress):
         download(info, package, progress=lambda received, total: progress(80 * received / total, "正在下载更新…"), build_id=build_id,
                  phase=lambda: progress(85, "正在校验更新…"))
         progress(90, "正在准备新版…")
-        extract_package(package, staged, info.artifact.build_id, progress)
-        preflight(install, staged)
+        new = extract_package(package, staged, info.artifact.build_id, progress)
+        prepare_backups(workspace, install, old["files"], new["files"], old_manifest_hash)
         progress(98, "正在准备重启…")
         helper = workspace / HELPER
         helper_name = HELPER_PATH if HELPER_PATH in old["files"] else HELPER
         shutil.copy2(contained(install, helper_name), helper)
         task = {"schemaVersion": 1, "install": str(install), "parentPid": os.getpid(),
+                "oldManifestHash": old_manifest_hash, "newManifestHash": digest(staged / MANIFEST),
                 "buildId": info.artifact.build_id, "state": "prepared"}
         write_json(workspace / "task.json", task)
         return workspace
@@ -277,30 +293,32 @@ def restore(workspace, install):
             target.unlink()
 
 
-def replace_files(workspace, install):
+def replace_files(workspace, install, task):
     staged = workspace / "staged"
-    old, new = preflight(install, staged)
+    verify_file(contained(install, MANIFEST), MANIFEST, task["oldManifestHash"])
+    verify_file(contained(staged, MANIFEST), MANIFEST, task["newManifestHash"])
+    old = load_manifest(install)["files"]
+    new = load_manifest(staged)["files"]
+    names = changed_names(old, new)
     originals = {}
-    names = sorted(set(old["files"]) | set(new["files"]) | {MANIFEST})
-    # Finish every backup before committing the journal or touching installed files.
+    # Recheck every destination we will touch before making rollback active.
     for name in names:
-        source = contained(install, name)
-        originals[name] = source.exists()
-        if source.exists():
-            target = contained(workspace / "backup", name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            if digest(source) != digest(target):
-                raise InstallError("备份校验失败，未替换程序文件。")
+        target = contained(install, name)
+        originals[name] = name in old or name == MANIFEST
+        if name in old:
+            verify_file(target, name, old[name]["sha256"])
+        if not originals[name] and target.exists():
+            raise InstallError(f"更新会覆盖额外文件：{name}。请先移走该文件。")
     write_json(workspace / "journal.json", {"originals": originals})
     for name in names:
         target = contained(install, name)
-        if name in new["files"] or name == MANIFEST:
+        if name in new or name == MANIFEST:
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(contained(staged, name), target)
-        elif target.exists():
+            expected = task["newManifestHash"] if name == MANIFEST else new[name]["sha256"]
+            verify_file(target, name, expected)
+        else:
             target.unlink()
-    verify_files(install, new)
 
 
 def restart(install, workspace, success=False):
