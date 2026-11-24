@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from core.external import easyrpg, rpgrewriter
 from core.utils import rpg_rt_ini, text_processing
-from core.utils.message_widths import query_widths
+from core.utils.message_widths import query_font_slots, query_widths
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
@@ -67,7 +67,11 @@ def _import_game_data(game_path, source_encoding, target_encoding, message_queue
                 return converted
         read_encoding = target_encoding if transcode else source_encoding
         width_table = staging_path / "kai-message-widths.txt"
-        width_table.write_text(query_widths(str(target_encoding), characters), encoding="ascii")
+        width_table.write_text(
+            query_widths(str(target_encoding), characters, game_path)
+            + query_font_slots(str(target_encoding), game_path),
+            encoding="ascii",
+        )
         result = rpgrewriter.import_text_command(staged_lmt, read_encoding, target_encoding, width_table)
         if result[0] == 0:
             if any(path.read_bytes() != content for path, content in originals.items()):

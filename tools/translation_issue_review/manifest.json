@@ -12,6 +12,13 @@
   "working_directory": ".",
   "arguments": [
     {
+      "name": "game_path",
+      "flag": "--game-path",
+      "type": "game_path",
+      "required": true,
+      "label": "游戏目录"
+    },
+    {
       "name": "input",
       "flag": "--translated-dir",
       "type": "current_game_file",
