@@ -648,11 +648,17 @@ class RPGTranslatorApp:
                         detected = detect_game_engine(args[0])
                         if "source_encoding" in kwargs and detected and detected.engine == "rm200x":
                             profile = self.get_output_profile(args[0])
-                            task_message_proxy.report_project.update(sourceEncoding=profile["source_encoding"],
-                                                                     targetEncoding=profile["target_encoding"])
                             if not profile["recorded"]:
                                 raise ValueError("当前游戏路径尚未完成编码登记")
-                            kwargs["source_encoding"] = profile["source_encoding"]
+                            source_encoding = profile["source_encoding"]
+                            if task_name in ("initialize", "easy_flow"):
+                                # 同一路径可能已重新解压原版，步骤 0 以当前游戏数据为准。
+                                source_encoding = easyrpg.detect_game_encoding(args[0])
+                                if source_encoding != profile["source_encoding"]:
+                                    output_mode.record_game_encoding_locked(args[0], self.works_dir, source_encoding)
+                            kwargs["source_encoding"] = source_encoding
+                            task_message_proxy.report_project.update(sourceEncoding=source_encoding,
+                                                                     targetEncoding=profile["target_encoding"])
                             if "target_encoding" in kwargs:
                                 target_encoding = kwargs["target_encoding"] = profile["target_encoding"]
                             if "output_mode" in kwargs:
@@ -661,7 +667,7 @@ class RPGTranslatorApp:
                         if task_result and not task_message_proxy.has_problem and target_encoding is not None:
                             detected = detect_game_engine(args[0])
                             if detected and detected.engine == "rm200x":
-                                output_mode.record_import_encoding_locked(args[0], self.works_dir, target_encoding)
+                                output_mode.record_game_encoding_locked(args[0], self.works_dir, target_encoding)
                         task_succeeded = bool(task_result)
                 # 注意：任务成功完成的消息由任务自身通过队列发送 ("success", ...)
             except WorkBusyError as e:
@@ -708,7 +714,7 @@ class RPGTranslatorApp:
         if task_name == 'apply_wolf_fonts' and hasattr(self.main_window, "font_panel"):
             self.main_window.font_panel.finish_apply()
         self.set_processing_state(False)
-        if task_succeeded and task_name in ("import", "easy_flow"):
+        if task_name in ("initialize", "easy_flow") or (task_name == "import" and task_succeeded):
             path = self.get_game_path()
             self.main_window.output_mode_panel.refresh(path, detect_game_engine(path) if path else None, show_intro=False)
         auto_import_pending = task_name == 'release_json' and task_succeeded and self._should_auto_import_after_release()

@@ -206,7 +206,7 @@ def export_text_command(lmt_path, source_encoding, export_scope):
     # 注意：这个命令不需要交互输入
     return run_rpgrewriter_command(lmt_path, args)
 
-def import_text_command(lmt_path, source_encoding, target_encoding):
+def import_text_command(lmt_path, source_encoding, target_encoding, width_table=None):
     """
     执行导入文本的命令。
 
@@ -218,11 +218,11 @@ def import_text_command(lmt_path, source_encoding, target_encoding):
     Returns:
         tuple: (return_code, stdout, stderr)
     """
-    # 原脚本使用了 -nolimit 1 参数
-    
     length_mode = "2" if str(target_encoding) == "65001" else "1"
     args = ["-import", "-readcode", str(source_encoding), "-filereadcode", str(source_encoding), "-miscreadcode", str(source_encoding), "-writecode", str(target_encoding), "-filewritecode", str(target_encoding), "-miscwritecode", str(target_encoding), "-nolimit", length_mode]
     # 注意：这个命令不需要交互输入
+    if width_table is not None:
+        args.extend(["-widthtable", str(width_table)])
     return run_rpgrewriter_command(lmt_path, args)
 
 

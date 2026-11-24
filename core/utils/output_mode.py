@@ -208,14 +208,14 @@ def _save_project_document(config, game_path, path, document, mode=None, legacy_
     return previous_document
 
 
-def record_import_encoding_locked(game_path, works_dir, target_encoding):
-    """在作品锁内记录本次已成功写入的编码，保留输出选项和其他工程字段。"""
-    if target_encoding not in (*SUPPORTED_ENCODINGS, "65001"):
-        raise ValueError("无效的实际写入编码")
+def record_game_encoding_locked(game_path, works_dir, encoding):
+    """在作品锁内记录游戏数据当前的编码，保留输出选项和其他工程字段。"""
+    if encoding not in (*SUPPORTED_ENCODINGS, "65001"):
+        raise ValueError("无效的游戏数据编码")
     path = project_settings_path(game_path, works_dir)
     document = _read_project_document(path)
     record = document.get("game_paths", {}).get(project_key(game_path))
     if record is None:
         raise ValueError(f"工程输出设置尚未初始化：{path}")
-    record["source_encoding"] = target_encoding
+    record["source_encoding"] = encoding
     write_json_atomic(path, document)

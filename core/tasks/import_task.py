@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from core.external import easyrpg, rpgrewriter
 from core.utils import rpg_rt_ini, text_processing
+from core.utils.message_widths import query_widths
 from core.utils.engine_detection import detect_game_engine
 
 log = logging.getLogger(__name__)
@@ -26,11 +27,13 @@ def _import_game_data(game_path, source_encoding, target_encoding, message_queue
     from core.tasks.json_release import _apply_translations_to_file
 
     scripts_path = Path(game_path) / "StringScripts"
+    characters = {" ", "\\"}  # Half-space and escaped backslash.
     replacements = {}
-    for path in (scripts_path.rglob("*.txt") if legacy else ()):
+    for path in scripts_path.rglob("*.txt"):
         changes = {}
         for original in _extract_strings_from_file(str(path)):
-            compatible = text_processing.apply_gbk_compatibility(original)
+            compatible = text_processing.apply_gbk_compatibility(original) if legacy else original
+            characters.update(compatible)
             if compatible != original:
                 changes[original] = {"text": compatible}
         if changes:
@@ -63,7 +66,9 @@ def _import_game_data(game_path, source_encoding, target_encoding, message_queue
             if converted[0] != 0:
                 return converted
         read_encoding = target_encoding if transcode else source_encoding
-        result = rpgrewriter.import_text_command(staged_lmt, read_encoding, target_encoding)
+        width_table = staging_path / "kai-message-widths.txt"
+        width_table.write_text(query_widths(str(target_encoding), characters), encoding="ascii")
+        result = rpgrewriter.import_text_command(staged_lmt, read_encoding, target_encoding, width_table)
         if result[0] == 0:
             if any(path.read_bytes() != content for path, content in originals.items()):
                 raise RuntimeError("导入期间游戏数据被其他程序修改，已停止写回临时导入结果。")

@@ -85,3 +85,4 @@ modules/WOLF/Extra
 modules/RTPCollection/rtp-content.zip
 /output/update-build/
 /WindyUpdater.spec
+/windy-errors.sqlite

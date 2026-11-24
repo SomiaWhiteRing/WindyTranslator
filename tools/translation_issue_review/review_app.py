@@ -22,6 +22,8 @@ try:
     from .display_width import calc_display_width
     from .paused_review import load_paused_entries
 except ImportError:  # Supports execution as the tool entry script.
+    import sys
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
     from display_width import calc_display_width
     from paused_review import load_paused_entries
 
@@ -362,6 +364,7 @@ class ReviewEntry:
     initial_text: str
     current_text: str
     marker: str = MESSAGE_MARKER
+    measure_width: Callable[[str], int] = field(default=calc_display_width, repr=False, compare=False, kw_only=True)
     issue_kinds: List[str] = field(default_factory=list)
     fallback_reason: Optional[str] = None
     per_line_widths: List[int] = field(default_factory=list)
@@ -435,7 +438,7 @@ class ReviewEntry:
     def recompute(self) -> None:
         lines = self.current_text.split("\n")
         if self.marker == MESSAGE_MARKER and self.limit is not None:
-            self.per_line_widths = [calc_display_width(line) for line in lines]
+            self.per_line_widths = [self.measure_width(line) for line in lines]
             self.overflow_lines = [
                 index
                 for index, width in enumerate(self.per_line_widths, start=1)
@@ -605,6 +608,7 @@ def _fallback_record_map(records: Sequence[FallbackRecord]) -> Dict[Tuple[str, s
 def scan_translation_data(
     data: dict,
     fallback_records: Optional[Sequence[FallbackRecord]] = None,
+    pixel_measure: Optional[Callable[[str], int]] = None,
 ) -> List[ReviewEntry]:
     """Build review entries from nested translation JSON and matching fallback rows."""
     validate_nested_translation_data(data)
@@ -626,13 +630,17 @@ def scan_translation_data(
             speaker_id = info.get("speaker_id")
             normalized_speaker = str(speaker_id) if speaker_id is not None else None
             issue_kinds = ["fallback"] if fallback_record else []
+            limit = determine_line_limit(normalized_speaker) if marker == MESSAGE_MARKER else None
+            if pixel_measure and limit is not None:
+                limit = 304 if normalized_speaker == NARRATION_SPEAKER_ID else 232
             review_entries.append(
                 ReviewEntry(
                     entry_id=f"entry_{len(review_entries)}",
                     map_name=map_name_str,
                     original_key=original_key_str,
                     speaker_id=normalized_speaker,
-                    limit=determine_line_limit(normalized_speaker) if marker == MESSAGE_MARKER else None,
+                    limit=limit,
+                    measure_width=pixel_measure or calc_display_width,
                     initial_text=text,
                     current_text=text,
                     marker=marker,
@@ -648,10 +656,20 @@ def load_review_project(path: Path, fallback_csv_path: Optional[Path] = None):
     data = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
     records = load_fallback_records(fallback_csv_path) if fallback_csv_path else []
     pending = load_paused_entries(path, data)
+    pixel_measure = None
+    map_names = set(data).union(name for name, _ in pending)
+    if any(re.fullmatch(r"Map\d+\.txt", name, re.IGNORECASE) or name.replace("\\", "/").startswith("Database/") for name in map_names):
+        # The standalone tool host changes argv[0] and cwd to this tool's directory.
+        from core.utils.message_widths import MessageWidths
+        project_path = path.parent.parent / "project.json"
+        project = json.loads(project_path.read_text(encoding="utf-8-sig")) if project_path.is_file() else {}
+        settings = project.get("output_settings", {})
+        encoding = "65001" if settings.get("mode") == "utf8" else str(settings.get("legacy_encoding", "936"))
+        pixel_measure = MessageWidths(encoding).measure
     if not pending:
         if not path.exists():
             raise FileNotFoundError(path)
-        return data, records, scan_translation_data(data, records)
+        return data, records, scan_translation_data(data, records, pixel_measure)
 
     # The overlay is for display only. An untouched draft must stay missing on disk.
     display = {name: dict(items) for name, items in data.items()}
@@ -659,7 +677,7 @@ def load_review_project(path: Path, fallback_csv_path: Optional[Path] = None):
     for (name, key), (metadata, draft, reason) in pending.items():
         display.setdefault(name, {})[key] = dict(metadata, text=draft)
         paused_records.append(FallbackRecord(name, key, metadata["original_marker"], reason))
-    entries = scan_translation_data(display, [*paused_records, *records])
+    entries = scan_translation_data(display, [*paused_records, *records], pixel_measure)
     for entry in entries:
         if entry.key in pending:
             entry.pending_metadata = pending[entry.key][0]
@@ -790,7 +808,7 @@ def preview_rule_application(
             changed_entries += 1
             substitutions += count
         if entry.marker == MESSAGE_MARKER and entry.limit is not None:
-            widths = [calc_display_width(line) for line in new_text.split("\n")]
+            widths = [entry.measure_width(line) for line in new_text.split("\n")]
             overflow_lines = sum(1 for width in widths if width > entry.limit)
         else:
             overflow_lines = 0
@@ -1714,7 +1732,7 @@ class LineLimitCheckerApp:
         text = editor_text if editor_text is not None else self._get_editor_text()
         lines = text.split("\n")
         if entry.marker == MESSAGE_MARKER and entry.limit is not None:
-            line_widths: List[Optional[int]] = [calc_display_width(line) for line in lines]
+            line_widths: List[Optional[int]] = [entry.measure_width(line) for line in lines]
             overflow_lines = [
                 index
                 for index, width in enumerate(line_widths, start=1)
