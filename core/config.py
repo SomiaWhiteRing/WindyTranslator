@@ -7,6 +7,16 @@ from core.utils.output_mode import DEFAULT_OUTPUT_SETTINGS, migrate_settings
 
 log = logging.getLogger(__name__)
 
+TARGET_LANGUAGE_CODES = {
+    "简体中文": "zh_CN", "繁体中文": "zh_TW", "英语": "en_US", "日语": "ja_JP", "韩语": "ko_KR",
+    "俄语": "ru_RU", "法语": "fr_FR", "德语": "de_DE", "西班牙语": "es_ES",
+}
+
+
+def target_language_code(translate_config):
+    return TARGET_LANGUAGE_CODES.get(translate_config.get("target_language", DEFAULT_TRANSLATE_CONFIG["target_language"]))
+
+
 # --- 默认配置 ---
 
 # --- 默认世界观字典生成配置 ---

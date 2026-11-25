@@ -19,7 +19,7 @@ def _read_title_file(path):
     return lines[1]
 
 
-def _import_game_data(game_path, source_encoding, target_encoding, message_queue, output_mode):
+def _import_game_data(game_path, source_encoding, target_encoding, message_queue, output_mode, font_language=None):
     lmt_path = Path(game_path) / "RPG_RT.lmt"
     legacy = output_mode == "legacy"
     transcode = str(source_encoding) != str(target_encoding)
@@ -68,14 +68,27 @@ def _import_game_data(game_path, source_encoding, target_encoding, message_queue
         read_encoding = target_encoding if transcode else source_encoding
         width_table = staging_path / "kai-message-widths.txt"
         width_table.write_text(
-            query_widths(str(target_encoding), characters, game_path)
+            query_widths(str(target_encoding), characters, game_path, font_language)
             + query_font_slots(str(target_encoding), game_path),
             encoding="ascii",
         )
+        # Prepare the default-language manifest alongside the staged import.
+        staged_meta = staging_path / "meta.ini"
+        if font_language:
+            meta_path = Path(game_path) / "language" / "default" / "meta.ini"
+            original_meta = meta_path.read_bytes() if meta_path.is_file() else b""
+            codec = "utf-8-sig" if original_meta.startswith(b"\xef\xbb\xbf") else "utf-8"
+            content = original_meta.decode(codec, errors="surrogateescape")
+            new_meta = rpg_rt_ini.set_ini_value(content, "Language", "Code", font_language).encode(codec, errors="surrogateescape")
+            if new_meta != original_meta:
+                staged_meta.write_bytes(new_meta)
         result = rpgrewriter.import_text_command(staged_lmt, read_encoding, target_encoding, width_table)
         if result[0] == 0:
             if any(path.read_bytes() != content for path, content in originals.items()):
                 raise RuntimeError("导入期间游戏数据被其他程序修改，已停止写回临时导入结果。")
+            if staged_meta.is_file():
+                meta_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staged_meta, meta_path)
             for path, original_content in originals.items():
                 staged_file = staging_path / path.name
                 if staged_file.read_bytes() != original_content:
@@ -83,7 +96,7 @@ def _import_game_data(game_path, source_encoding, target_encoding, message_queue
         return result
 
 
-def run_import(game_path, source_encoding, target_encoding, message_queue, output_mode):
+def run_import(game_path, source_encoding, target_encoding, message_queue, output_mode, font_language=None):
     """
     执行将 StringScripts 文本导入回游戏文件的流程。
 
@@ -188,7 +201,7 @@ def run_import(game_path, source_encoding, target_encoding, message_queue, outpu
             ini_temp_path.write_bytes(ini_bytes)
 
         # 执行导入命令
-        return_code, stdout, stderr = _import_game_data(game_path, source_encoding, target_encoding, message_queue, output_mode)
+        return_code, stdout, stderr = _import_game_data(game_path, source_encoding, target_encoding, message_queue, output_mode, font_language)
 
         if return_code == 0:
             if ini_temp_path is not None:

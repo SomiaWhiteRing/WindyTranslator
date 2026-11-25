@@ -411,7 +411,8 @@ class RPGTranslatorApp:
             task_func = import_task.run_import
             task_args = [current_game_path]
             task_kwargs = dict(source_encoding=source_encoding, target_encoding=target_encoding,
-                               message_queue=self.message_queue, output_mode=project_output_mode)
+                               message_queue=self.message_queue, output_mode=project_output_mode,
+                               font_language=cfg.target_language_code(translate_config))
         elif task_name == 'apply_wolf_fonts':
             from core.engines import wolf
 

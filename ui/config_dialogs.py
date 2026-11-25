@@ -7,7 +7,7 @@ import logging
 # 导入 API 客户端模块用于连接测试
 from core.api_clients import gemini, deepseek
 # 导入默认配置以获取默认 Prompt 值
-from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG
+from core.config import DEFAULT_WORLD_DICT_CONFIG, DEFAULT_TRANSLATE_CONFIG, TARGET_LANGUAGE_CODES
 from ui.model_selector import ModelSelector
 
 log = logging.getLogger(__name__)
@@ -549,9 +549,7 @@ class TranslateConfigWindow(tk.Toplevel):
 
         # Target Language
         ttk.Label(lang_frame, text="目标语言:").grid(row=0, column=2, padx=(10, 5), sticky="w")
-        target_lang_combo = ttk.Combobox(lang_frame, textvariable=self.target_lang_var, values=[
-            "简体中文", "繁体中文", "英语", "日语", "韩语", "俄语", "法语", "德语", "西班牙语"
-        ], width=15, state="readonly")
+        target_lang_combo = ttk.Combobox(lang_frame, textvariable=self.target_lang_var, values=tuple(TARGET_LANGUAGE_CODES), width=15, state="readonly")
         target_lang_combo.grid(row=0, column=3, padx=5, sticky="ew")
         row_idx += 1
 

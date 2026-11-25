@@ -19,6 +19,12 @@
       "label": "游戏目录"
     },
     {
+      "name": "font_language",
+      "flag": "--font-language",
+      "type": "target_language",
+      "required": false
+    },
+    {
       "name": "input",
       "flag": "--translated-dir",
       "type": "current_game_file",

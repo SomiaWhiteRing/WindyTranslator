@@ -8,6 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from core.config import target_language_code
 from core.tools import RunningTool, ToolManager, ToolManifest, ToolSpecError
 from core.utils.file_system import get_modules_path
 
@@ -242,6 +243,8 @@ class ToolsPanel(ttk.Frame):
             if argument.type == "game_path" and self.app.get_game_path():
                 game_path = Path(self.app.get_game_path())
                 values[argument.name] = str(game_path.joinpath(*Path(argument.source).parts)) if argument.source else str(game_path)
+            elif argument.type == "target_language":
+                values[argument.name] = target_language_code(self.app.config["translate_config"])
             elif argument.type == "current_game_file":
                 values[argument.name] = self.app.get_tools_context_path(argument.source)
             elif argument.type == "modules":

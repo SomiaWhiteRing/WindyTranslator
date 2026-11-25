@@ -16,9 +16,10 @@ def _query(encoding, game_path, request, *options):
     ).stdout
 
 
-def query_widths(encoding: str, characters: set[str], game_path: Path) -> str:
+def query_widths(encoding: str, characters: set[str], game_path: Path, font_language=None) -> str:
     request = " ".join(str(ord(c)) for c in sorted(characters))
-    table = _query(encoding, game_path, request)
+    options = ("--font-language", font_language) if font_language else ()
+    table = _query(encoding, game_path, request, *options)
     if table.split("\n", 1)[0] != f"KAI-WIDTHS-1 {encoding}":
         raise ValueError("Invalid EasyRPG Kai width table")
     return table
@@ -29,7 +30,8 @@ def query_font_slots(encoding, game_path):
 
 
 class MessageWidths:
-    def __init__(self, encoding, game_path, texts):
+    def __init__(self, encoding, game_path, texts, font_language=None):
+        self.font_language = font_language
         self.encoding = encoding
         self.game_path = Path(game_path)
         self.advances = {}
@@ -87,7 +89,7 @@ class MessageWidths:
     def cache_characters(self, characters):
         missing = characters - self.advances.keys()
         if missing:
-            for row in query_widths(self.encoding, missing, self.game_path).splitlines()[1:]:
+            for row in query_widths(self.encoding, missing, self.game_path, self.font_language).splitlines()[1:]:
                 code, gothic, mincho = map(int, row.split())
                 self.advances[chr(code)] = (gothic, mincho)
 

@@ -608,7 +608,7 @@ def _fallback_record_map(records: Sequence[FallbackRecord]) -> Dict[Tuple[str, s
 def scan_translation_data(
     data: dict,
     fallback_records: Optional[Sequence[FallbackRecord]] = None,
-    *, game_path=None, encoding=None,
+    *, game_path=None, encoding=None, font_language=None,
 ) -> List[ReviewEntry]:
     """Build review entries from nested translation JSON and matching fallback rows."""
     validate_nested_translation_data(data)
@@ -617,7 +617,7 @@ def scan_translation_data(
         from core.utils.message_widths import MessageWidths
         texts = (info["text"] for items in data.values() for info in items.values()
                  if info["original_marker"] == MESSAGE_MARKER)
-        message_widths = MessageWidths(encoding, game_path, texts)
+        message_widths = MessageWidths(encoding, game_path, texts, font_language)
 
     fallback_records = list(fallback_records or [])
     fallback_by_key = _fallback_record_map(fallback_records)
@@ -658,7 +658,7 @@ def scan_translation_data(
     return review_entries
 
 
-def load_review_project(path: Path, fallback_csv_path: Optional[Path] = None, game_path: Optional[Path] = None):
+def load_review_project(path: Path, fallback_csv_path: Optional[Path] = None, game_path: Optional[Path] = None, font_language=None):
     data = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
     records = load_fallback_records(fallback_csv_path) if fallback_csv_path else []
     pending = load_paused_entries(path, data)
@@ -675,7 +675,7 @@ def load_review_project(path: Path, fallback_csv_path: Optional[Path] = None, ga
     if not pending:
         if not path.exists():
             raise FileNotFoundError(path)
-        return data, records, scan_translation_data(data, records, game_path=game_path, encoding=encoding)
+        return data, records, scan_translation_data(data, records, game_path=game_path, encoding=encoding, font_language=font_language)
 
     # The overlay is for display only. An untouched draft must stay missing on disk.
     display = {name: dict(items) for name, items in data.items()}
@@ -683,7 +683,7 @@ def load_review_project(path: Path, fallback_csv_path: Optional[Path] = None, ga
     for (name, key), (metadata, draft, reason) in pending.items():
         display.setdefault(name, {})[key] = dict(metadata, text=draft)
         paused_records.append(FallbackRecord(name, key, metadata["original_marker"], reason))
-    entries = scan_translation_data(display, [*paused_records, *records], game_path=game_path, encoding=encoding)
+    entries = scan_translation_data(display, [*paused_records, *records], game_path=game_path, encoding=encoding, font_language=font_language)
     for entry in entries:
         if entry.key in pending:
             entry.pending_metadata = pending[entry.key][0]
@@ -694,10 +694,11 @@ def translation_json_has_reviewable_issues(
     translated_json_path: Path,
     fallback_csv_path: Optional[Path] = None,
     game_path: Optional[Path] = None,
+    font_language: Optional[str] = None,
 ) -> bool:
     """Return whether the integrated review button should be enabled."""
     try:
-        _, _, entries = load_review_project(translated_json_path, fallback_csv_path, game_path)
+        _, _, entries = load_review_project(translated_json_path, fallback_csv_path, game_path, font_language)
     except UnsupportedFallbackCsvError:
         return True
     except Exception:
@@ -1124,11 +1125,13 @@ class LineLimitCheckerApp:
         *,
         fallback_csv_path: Optional[Path] = None,
         game_path: Optional[Path] = None,
+        font_language: Optional[str] = None,
         integrated_mode: bool = False,
         on_saved: Optional[Callable[[], None]] = None,
     ) -> None:
         self.root = root
         self.initial_path = initial_path
+        self.font_language = font_language
         self.game_path = game_path
         self.integrated_mode = integrated_mode
         self.fallback_csv_path = fallback_csv_path
@@ -1560,7 +1563,8 @@ class LineLimitCheckerApp:
 
         try:
             data, fallback_records, entries = load_review_project(
-                path, self.fallback_csv_path, self.game_path if path == self.initial_path else None
+                path, self.fallback_csv_path, self.game_path if path == self.initial_path else None,
+                self.font_language,
             )
             rules_path = default_rules_path(path)
             rules = load_rule_set(rules_path)
@@ -2204,6 +2208,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("json_path", nargs="?", help="可选：待审阅的翻译 JSON 路径")
     parser.add_argument("--initial-input", help="启动时加载的译文 JSON 路径")
     parser.add_argument("--game-path", type=Path)
+    parser.add_argument("--font-language")
     parser.add_argument("--translated-dir", type=Path)
     parser.add_argument("--initial-fallback-csv", help="启动时加载的回退记录 CSV 路径")
     return parser.parse_args()
@@ -2231,6 +2236,7 @@ def main() -> None:
         root,
         initial_path=initial_path,
         game_path=args.game_path,
+        font_language=args.font_language,
         fallback_csv_path=fallback_csv_path,
         integrated_mode=initial_path is not None,
     )

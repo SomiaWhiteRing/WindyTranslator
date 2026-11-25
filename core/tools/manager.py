@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-SUPPORTED_ARGUMENT_TYPES = {"game_path", "current_game_file", "modules", "fixed"}
+SUPPORTED_ARGUMENT_TYPES = {"game_path", "current_game_file", "modules", "fixed", "target_language"}
 SUPPORTED_RUNTIMES = {"host_python", "exe"}
 SUPPORTED_CATEGORIES = {"gui", "cli"}
 

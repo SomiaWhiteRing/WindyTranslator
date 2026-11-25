@@ -91,42 +91,48 @@ def get_game_title(text):
 
 
 def set_easy_rpg_encoding(text, encoding):
+    return set_ini_value(text, "EasyRPG", "Encoding", encoding)
+
+
+def set_ini_value(text, section_name, key_name, value):
     lines = text.splitlines(keepends=True)
     section = None
-    easyrpg_index = None
-    encoding_indices = []
+    section_index = None
+    key_indices = []
 
     for index, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             section = stripped[1:-1].strip().casefold()
-            if section == "easyrpg":
-                easyrpg_index = index
+            if section == section_name.casefold():
+                section_index = index
             continue
-        if section == "easyrpg" and "=" in line:
+        if section == section_name.casefold() and "=" in line:
             key, _value = line.split("=", 1)
-            if key.strip().casefold() == "encoding":
-                encoding_indices.append(index)
+            if key.strip().casefold() == key_name.casefold():
+                key_indices.append(index)
 
-    if encoding_indices:
-        first = encoding_indices[0]
+    if key_indices:
+        first = key_indices[0]
         key, _value = lines[first].split("=", 1)
         newline = "\r\n" if lines[first].endswith("\r\n") else "\n" if lines[first].endswith("\n") else ""
-        lines[first] = f"{key}={encoding}{newline}"
-        for index in reversed(encoding_indices[1:]):
+        lines[first] = f"{key}={value}{newline}"
+        for index in reversed(key_indices[1:]):
             del lines[index]
         return "".join(lines)
 
-    if easyrpg_index is None:
+    if section_index is None:
         if lines and lines[-1].strip():
             lines.append("\n")
-        lines.extend(("[EasyRPG]\n", f"Encoding={encoding}\n"))
+        lines.extend((f"[{section_name}]\n", f"{key_name}={value}\n"))
         return "".join(lines)
 
-    insert_at = easyrpg_index + 1
+    insert_at = section_index + 1
     while insert_at < len(lines) and not lines[insert_at].strip().startswith("["):
         insert_at += 1
-    lines.insert(insert_at, f"Encoding={encoding}\n")
+    if insert_at and not lines[insert_at - 1].endswith(("\n", "\r")):
+        lines[insert_at - 1] += "\n"
+    lines.insert(insert_at, f"{key_name}={value}\n")
     return "".join(lines)
 
 

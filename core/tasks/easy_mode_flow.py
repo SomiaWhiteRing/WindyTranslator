@@ -2,6 +2,7 @@
 import os
 import logging
 import queue # 需要引用 queue 来检查类型
+from core.config import target_language_code
 from . import initialize, rename, export, json_creation, dict_generation, translate, json_release, import_task
 from core.utils import (text_processing, dictionary_manager)
 
@@ -72,7 +73,8 @@ def run_easy_flow(
         "func": import_task.run_import,
         "args": [game_path],
         "kwargs": dict(source_encoding=source_encoding, target_encoding=target_encoding,
-                       message_queue=message_queue, output_mode=output_mode),
+                       message_queue=message_queue, output_mode=output_mode,
+                       font_language=target_language_code(translate_config)),
     }
 
     # 将最后两步加入
